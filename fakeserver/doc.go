@@ -60,12 +60,14 @@
 // Store (stateful mode; all methods are safe for concurrent use):
 //
 //	type Article struct { Number int64; MessageID string; Headers []string; Body []string; Date time.Time }
-//	type Group struct { Name, Description string; Low, High, Count int64; Posting bool }
+//	type Group struct { Name, Description string; Low, High, Count int64; Posting bool; Created time.Time }
 //	type Location struct { Group string; Number int64 }
 //	type Store struct { ... }
 //	func NewStore() *Store
-//	func (st *Store) AddGroup(name, description string)                 // idempotent; Posting true
-//	func (st *Store) AddArticle(group string, a Article) int64          // number = a.Number when > 0 (must be free) else High+1; Date zero → now; returns the number; a group that does not exist is created
+//	func (st *Store) AddGroup(name, description string)                 // idempotent; Posting true; Created = now when created
+//	func (st *Store) AddGroupAt(name, description string, created time.Time) // AddGroup with an explicit Created (also re-dates an existing group when non-zero)
+//	func (st *Store) SetPosting(group string, posting bool) bool        // LIST ACTIVE flag; false for an unknown group
+//	func (st *Store) AddArticle(group string, a Article) int64          // number = a.Number when > 0 (must be free, else panic) else High+1; Date zero → now; a missing Message-ID (field and header) is generated as <n.group@fakeserver.invalid> and indexed; a field that differs from the header panics; returns the number; a group that does not exist is created
 //	func (st *Store) Article(group string, n int64) (Article, bool)
 //	func (st *Store) ByMessageID(id string) (Article, []Location, bool) // first article stored under id, every location
 //	func (st *Store) Group(name string) (Group, bool)
@@ -76,6 +78,9 @@
 //	func (st *Store) Posted() []Article
 //	func (st *Store) Next(group string, n int64) (int64, bool)          // next existing number above n
 //	func (st *Store) Last(group string, n int64) (int64, bool)          // previous existing number below n
+//	func (a Article) Header(name string) string                         // first matching header value, case-insensitive, unfolded; "" when absent
+//	func (a Article) WithDefaults(group string) Article                 // copy with Message-ID, Newsgroups (when group != "") and Date headers added when missing
+//	const DateLayout = "Mon, 02 Jan 2006 15:04:05 -0700"
 //
 //	type StoreOptions struct { User, Pass string; ReaderOnly bool; OverviewFmt []string }
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
