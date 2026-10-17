@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // echoServer is built once per test binary into a directory that TestMain removes.
@@ -325,6 +327,7 @@ func TestFailureLogging(t *testing.T) {
 				t.Fatal(err)
 			}
 			ftb := &fakeTB{TB: t}
+			t.Cleanup(ftb.runCleanups) // a real-t failure must not leak the child
 			p := StartStdio(ftb, Options{
 				Path: bin,
 				Args: []string{"-log", "server.log"},
@@ -369,6 +372,7 @@ func TestFailureLogging(t *testing.T) {
 func TestStartTCPExitBeforeReady(t *testing.T) {
 	bin := buildEcho(t)
 	ftb := &fakeTB{TB: t}
+	t.Cleanup(ftb.runCleanups)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -385,5 +389,66 @@ func TestStartTCPExitBeforeReady(t *testing.T) {
 	}
 	if logs := ftb.allLogs(); !strings.Contains(logs, "listen:") {
 		t.Errorf("logs lack the server's stderr:\n%s", logs)
+	}
+}
+
+func TestRelativePath(t *testing.T) {
+	bin := buildEcho(t)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.ContainsRune(rel, filepath.Separator) {
+		t.Fatalf("relative path %q has no separator", rel)
+	}
+	// Dir differs from the working directory: rel must not be resolved against it.
+	p := StartStdio(t, Options{Path: rel, Dir: t.TempDir()})
+	if got := readLine(t, bufio.NewReader(p.Conn())); got != "200 proc-echo ready" {
+		t.Fatalf("greeting %q", got)
+	}
+	p.Stop()
+	if err := p.Wait(); err != nil {
+		t.Errorf("Wait: %v", err)
+	}
+}
+
+func TestWaitDeadlineStops(t *testing.T) {
+	bin := buildEcho(t)
+	p := StartStdio(t, Options{
+		Path:        bin,
+		Args:        []string{"-ignore-term"},
+		Deadline:    200 * time.Millisecond,
+		StopTimeout: 200 * time.Millisecond,
+	})
+	c := p.Conn()
+	// The greeting read gets the kit's hang guard, not the short Deadline under test.
+	if err := c.SetReadDeadline(time.Now().Add(testkit.Deadline())); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLine(t, bufio.NewReader(c)); got != "200 proc-echo ready" {
+		t.Fatalf("greeting %q", got)
+	}
+	// stdin stays open and SIGTERM is ignored: Wait hits its deadline, Stop escalates to SIGKILL.
+	err := p.Wait()
+	if err == nil || !strings.Contains(err.Error(), "not exited within") {
+		t.Fatalf("Wait: %v, want a 'not exited within' error", err)
+	}
+	killed := func(err error) bool {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return false
+		}
+		ws, ok := ee.Sys().(syscall.WaitStatus)
+		return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
+	}
+	if !killed(err) {
+		t.Errorf("Wait: %v, want the SIGKILL exit joined in", err)
+	}
+	if err2 := p.Wait(); !killed(err2) || strings.Contains(err2.Error(), "not exited within") {
+		t.Errorf("second Wait: %v, want the recorded SIGKILL exit", err2)
 	}
 }

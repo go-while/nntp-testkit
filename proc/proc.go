@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -90,7 +91,17 @@ func newProcess(tb testing.TB, o Options) *Process {
 	if p.deadline <= 0 {
 		p.deadline = testkit.Deadline()
 	}
-	cmd := exec.Command(o.Path, o.Args...)
+	path := o.Path
+	if !filepath.IsAbs(path) && strings.ContainsRune(path, filepath.Separator) {
+		// os/exec resolves a relative path with a separator against cmd.Dir; the caller
+		// means the test's working directory. A bare name keeps the PATH lookup.
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			tb.Fatalf("proc: resolve %s: %v", path, err)
+		}
+		path = abs
+	}
+	cmd := exec.Command(path, o.Args...)
 	cmd.Dir = p.dir
 	cmd.Env = append(os.Environ(), o.Env...)
 	cmd.Stderr = p.out
@@ -143,7 +154,9 @@ func (p *Process) dumpLogs(tb testing.TB) {
 // StartTCP starts the process (stdin from /dev/null; stdout and stderr captured, see Stderr)
 // and waits until a dial to addr yields a greeting line, retrying every 20ms within Deadline.
 // It fails tb when the deadline passes or the process exits first; the cleanup then stops the
-// process and logs the captured output.
+// process and logs the captured output. Each probe connection reads the greeting, sends
+// "QUIT\r\n" and closes, so at least one connection reaches the server before the test's own
+// (relevant for connection caps and accept counters).
 func StartTCP(tb testing.TB, o Options, addr string) *Process {
 	tb.Helper()
 	p := newProcess(tb, o)
@@ -155,7 +168,7 @@ func StartTCP(tb testing.TB, o Options, addr string) *Process {
 	}
 	limit := time.Now().Add(p.deadline)
 	for {
-		err := probe(addr, time.Until(limit))
+		err := probe(addr, limit)
 		if err == nil {
 			return p
 		}
@@ -178,22 +191,25 @@ func StartTCP(tb testing.TB, o Options, addr string) *Process {
 	}
 }
 
-// probe dials addr and reads one line within d.
-func probe(addr string, d time.Duration) error {
-	if d <= 0 {
+// probe dials addr and reads one line before limit, then sends QUIT so a server with a
+// connection cap frees the slot promptly.
+func probe(addr string, limit time.Time) error {
+	if !time.Now().Before(limit) {
 		return errors.New("deadline passed")
 	}
-	c, err := net.DialTimeout("tcp", addr, d)
+	d := net.Dialer{Deadline: limit}
+	c, err := d.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = c.Close() }()
-	if err := c.SetReadDeadline(time.Now().Add(d)); err != nil {
+	if err := c.SetDeadline(limit); err != nil {
 		return err
 	}
 	if _, err := bufio.NewReader(c).ReadString('\n'); err != nil {
 		return fmt.Errorf("greeting: %w", err)
 	}
+	_, _ = c.Write([]byte("QUIT\r\n"))
 	return nil
 }
 
@@ -225,7 +241,8 @@ func (p *Process) Signal(sig os.Signal) error {
 }
 
 // Stop sends SIGTERM, then SIGKILL when the process has not exited after StopTimeout, waits
-// for it and closes the stdio pipes. It is idempotent and also run by tb.Cleanup.
+// for it and closes the stdio pipes. It is idempotent and also run by tb.Cleanup. It relies on
+// SIGTERM and SIGKILL, so it needs a Unix system.
 func (p *Process) Stop() {
 	p.stopOnce.Do(func() {
 		if p.cmd.Process == nil {
@@ -250,15 +267,24 @@ func (p *Process) Stop() {
 	})
 }
 
-// Wait blocks until the process has exited and returns its exit error (nil on exit status 0).
-// Every call returns the same value; it is safe to call before or after Stop. It returns an
-// error at once when the process never started.
+// Wait blocks until the process has exited and returns its exit error (nil on exit status 0);
+// it is safe to call before or after Stop. When the process has not exited within Deadline,
+// Wait calls Stop and returns a "not exited within" error joined with the exit error; later
+// calls return the recorded exit error. It returns an error at once when the process never
+// started.
 func (p *Process) Wait() error {
 	if p.cmd.Process == nil {
 		return errors.New("proc: process not started")
 	}
-	<-p.done
-	return p.waitErr
+	t := time.NewTimer(p.deadline)
+	defer t.Stop()
+	select {
+	case <-p.done:
+		return p.waitErr
+	case <-t.C:
+	}
+	p.Stop()
+	return errors.Join(fmt.Errorf("proc: %s not exited within %v, stopped", p.cmd.Path, p.deadline), p.Wait())
 }
 
 // Stderr returns the output captured so far: stderr, plus stdout in TCP mode. After Wait or
