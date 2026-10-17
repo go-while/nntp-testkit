@@ -56,9 +56,10 @@ func wantEqual(t *testing.T, what string, got, want any) {
 func TestStoreCapabilities(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "MODE READER", 200)
 	wantCode(t, c, "MODE STREAM", 501)
+	wantCode(t, c, "MODE", 501)
 	_, help := wantBlock(t, c, "HELP", 100)
 	if len(help) == 0 || help[0] != "ARTICLE" {
 		t.Errorf("HELP %q", help)
@@ -79,7 +80,7 @@ func TestStoreCapabilities(t *testing.T) {
 
 	_, ro := storeServer(t, testStore(), StoreOptions{ReaderOnly: true}, Faults{})
 	_, caps = wantBlock(t, ro, "CAPABILITIES", 101)
-	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID", "IMPLEMENTATION fakeserver"})
 	wantCode(t, ro, "MODE READER", 201)
 	wantCode(t, ro, "POST", 440)
 	_, active := wantBlock(t, ro, "LIST", 215)
@@ -103,6 +104,7 @@ func TestStoreAuth(t *testing.T) {
 	wantCode(t, c, "DATE", 111)
 	wantCode(t, c, "MODE READER", 200)
 	wantCode(t, c, "AUTHINFO PASS p", 482)
+	wantCode(t, c, "AUTHINFO FOO x", 501)
 	wantCode(t, c, "AUTHINFO USER u", 381)
 	wantCode(t, c, "AUTHINFO PASS wrong", 481)
 	wantCode(t, c, "AUTHINFO USER other", 381)
@@ -116,7 +118,7 @@ func TestStoreAuth(t *testing.T) {
 	if strings.Contains(strings.Join(caps, "|"), "AUTHINFO") {
 		t.Errorf("caps after auth %q", caps)
 	}
-	if got := s.Count("AUTHINFO"); got != 8 {
+	if got := s.Count("AUTHINFO"); got != 9 {
 		t.Errorf("Count(AUTHINFO) = %d", got)
 	}
 	if got := s.Count("POST"); got != 1 {
@@ -129,6 +131,19 @@ func TestStoreAuth(t *testing.T) {
 	// authentication is per connection
 	c2 := client.Dial(t, s.Addr())
 	wantCode(t, c2, "GROUP alt.test", 480)
+}
+
+func TestStoreAuthUserOnly(t *testing.T) {
+	s, c := storeServer(t, testStore(), StoreOptions{User: "u"}, Faults{})
+	wantCode(t, c, "GROUP alt.test", 480)
+	wantCode(t, c, "AUTHINFO USER other", 481)
+	wantCode(t, c, "GROUP alt.test", 480)
+	wantCode(t, c, "AUTHINFO USER u", 281)
+	wantCode(t, c, "GROUP alt.test", 211)
+	wantCode(t, c, "AUTHINFO USER u", 502)
+	if got := s.Count("AUTHINFO"); got != 3 {
+		t.Errorf("Count(AUTHINFO) = %d", got)
+	}
 }
 
 func TestStoreList(t *testing.T) {
@@ -413,6 +428,9 @@ func TestStorePost(t *testing.T) {
 		"Newsgroups: alt.test\r\nSubject: s\r\n\r\nb\r\n.\r\n",
 		"Newsgroups: ,\r\nSubject: s\r\nFrom: f\r\n\r\nb\r\n.\r\n",
 		"Newsgroups: alt.test\r\nSubject: s\r\nFrom: f\r\nMessage-ID:\r\n\r\nb\r\n.\r\n",
+		"Newsgroups: alt.test\r\nSubject: s\r\nFrom: f\r\nMessage-ID: no-brackets@x\r\n\r\nb\r\n.\r\n",
+		"Newsgroups: alt.test\r\nSubject: s\r\nFrom: f\r\nMessage-ID: <two words@x>\r\n\r\nb\r\n.\r\n",
+		"Newsgroups: alt.test\r\nSubject: s\r\nFrom: f\r\nMessage-ID: <>\r\n\r\nb\r\n.\r\n",
 	} {
 		wantCode(t, c, "POST", 340)
 		if err := c.Send(art); err != nil {
@@ -424,6 +442,54 @@ func TestStorePost(t *testing.T) {
 		t.Errorf("Posted() = %d after the failures", n)
 	}
 	wantCode(t, c, "POST x", 501)
+}
+
+func TestStorePostConcurrent(t *testing.T) {
+	st := NewStore()
+	s := New(t, Options{Store: st})
+	conns := []*client.Conn{client.Dial(t, s.Addr()), client.Dial(t, s.Addr())}
+	for _, c := range conns {
+		wantCode(t, c, "POST", 340)
+	}
+	art := "Newsgroups: alt.race\r\nSubject: s\r\nFrom: f\r\nMessage-ID: <same@x>\r\n\r\nb\r\n.\r\n"
+	start := make(chan struct{})
+	codes := make(chan int, len(conns))
+	for _, c := range conns {
+		go func(c *client.Conn) {
+			<-start
+			if err := c.Send(art); err != nil {
+				codes <- 0
+				return
+			}
+			code, _, err := c.ReadStatus()
+			if err != nil {
+				code = 0
+			}
+			codes <- code
+		}(c)
+	}
+	close(start)
+	got := map[int]int{}
+	for range conns {
+		got[<-codes]++
+	}
+	wantEqual(t, "reply codes", got, map[int]int{240: 1, 441: 1})
+	if n := len(st.Posted()); n != 1 {
+		t.Errorf("Posted() = %d articles", n)
+	}
+	if g, _ := st.Group("alt.race"); g.Count != 1 {
+		t.Errorf("alt.race Count = %d", g.Count)
+	}
+}
+
+func TestStoreOverClean(t *testing.T) {
+	st := NewStore()
+	st.AddArticle("alt.nul", Article{Headers: []string{"Subject: a\x00b\tc", "From: f", "Message-ID: <n@x>"}, Date: storeDate})
+	_, c := storeServer(t, st, StoreOptions{}, Faults{})
+	_, got := wantBlock(t, c, "OVER <n@x>", 224)
+	if len(got) != 1 || strings.Split(got[0], "\t")[1] != "a b c" {
+		t.Errorf("OVER with NUL and tab %q", got)
+	}
 }
 
 func TestStoreCounts(t *testing.T) {

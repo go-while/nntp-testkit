@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -28,10 +29,10 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER, POST (not ReaderOnly), AUTHINFO USER (auth required and not done), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST (not ReaderOnly), AUTHINFO USER (auth required and not done), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list
-//	AUTHINFO USER u     381; AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done
+//	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
 //	LIST [ACTIVE [wm]]  215 "name high low y|n" (y when Posting and not ReaderOnly); wm is a wildmat (*, ?, comma list, ! negation)
 //	LIST NEWSGROUPS [wm] 215 "name<TAB>description"; LIST OVERVIEW.FMT 215; other keywords 501
 //	GROUP g             211 "count low high g" (current article = low, none when empty); 411
@@ -41,7 +42,7 @@ func init() { storeHandler = StoreHandler }
 //	OVER/XOVER [rng|<id>] 224; 412, 420, 423 (empty range or m<n), 430; number 0 for <id>
 //	NEWGROUPS d t [GMT] 231 groups whose Created is at or after d t (yymmdd or yyyymmdd, hhmmss; always UTC); 501
 //	DATE                111 yyyymmddhhmmss (UTC)
-//	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; duplicate or empty Message-ID)
+//	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
 //	QUIT                205, then the connection is closed
 //
 // With StoreOptions.User or Pass set, every command but CAPABILITIES, MODE, HELP, AUTHINFO, DATE
@@ -51,7 +52,7 @@ func init() { storeHandler = StoreHandler }
 // A served article has the stored Headers plus the defaults of Article.WithDefaults (Message-ID,
 // Date, and Newsgroups = every group it is filed in) when missing; head and body lines are
 // dot-stuffed. An overview line holds the Subject, From, Date, Message-ID and References header
-// values (tabs, CR and LF replaced by spaces), :bytes (head and body with CRLF line ends plus the
+// values (tabs, CR, LF and NUL replaced by spaces), :bytes (head and body with CRLF line ends plus the
 // separating blank line), :lines (body lines) and "Xref: " with the stored Xref header, else
 // "fakeserver group:number ..." over every location. OverviewFmt only changes the LIST
 // OVERVIEW.FMT answer, not the OVER lines.
@@ -59,21 +60,25 @@ func init() { storeHandler = StoreHandler }
 // POST un-stuffs the article, splits head and body at the first blank line, generates a
 // missing Message-ID as <posted-N@fakeserver.invalid> (N counts per handler, skipping ids
 // already stored), records it with st.AddPosted and files it with st.AddArticle into each
-// group of its Newsgroups header (created when missing). Posting flags are not checked.
+// group of its Newsgroups header (created when missing). Posting flags are not checked. The
+// handler's connections post one at a time (from the duplicate check through the filing), so of
+// two concurrent POSTs with the same Message-ID one gets 240 and the other 441.
 func StoreHandler(st *Store, o StoreOptions) func(*Conn) {
-	seq := new(atomic.Int64) // generated POST Message-IDs, shared by the handler's connections
+	seq := new(atomic.Int64)  // generated POST Message-IDs, shared by the handler's connections
+	postMu := new(sync.Mutex) // serialises filing POSTs across the handler's connections
 	return func(c *Conn) {
-		h := &storeConn{st: st, o: o, c: c, seq: seq, authed: o.User == "" && o.Pass == ""}
+		h := &storeConn{st: st, o: o, c: c, seq: seq, postMu: postMu, authed: o.User == "" && o.Pass == ""}
 		h.serve()
 	}
 }
 
 // storeConn is the state of one connection of the store handler.
 type storeConn struct {
-	st  *Store
-	o   StoreOptions
-	c   *Conn
-	seq *atomic.Int64
+	st     *Store
+	o      StoreOptions
+	c      *Conn
+	seq    *atomic.Int64
+	postMu *sync.Mutex
 
 	group    string // selected group; "" = none
 	cur      int64  // current article number; 0 = none
@@ -184,7 +189,7 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 }
 
 func (h *storeConn) capabilities() []string {
-	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER"}
+	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID"}
 	if !h.o.ReaderOnly {
 		out = append(out, "POST")
 	}
@@ -210,6 +215,13 @@ func (h *storeConn) authinfo(args []string) []string {
 	val := strings.Join(args[1:], " ")
 	switch strings.ToUpper(args[0]) {
 	case "USER":
+		if h.o.Pass == "" { // username-only authentication (RFC 4643 2.3.2)
+			if val == h.o.User {
+				h.authed = true
+				return []string{"281 Authentication accepted"}
+			}
+			return []string{"481 Authentication failed"}
+		}
 		h.user, h.userSeen = val, true
 		return []string{"381 Password required"}
 	case "PASS":
@@ -476,7 +488,7 @@ func (h *storeConn) overviewLine(a Article, num int64, group string) string {
 	for _, l := range a.Body {
 		size += len(l) + 2
 	}
-	clean := strings.NewReplacer("\t", " ", "\r", " ", "\n", " ")
+	clean := strings.NewReplacer("\t", " ", "\r", " ", "\n", " ", "\x00", " ")
 	f := []string{strconv.FormatInt(num, 10)}
 	for _, name := range []string{"Subject", "From", "Date", "Message-ID", "References"} {
 		f = append(f, clean.Replace(a.Header(name)))
@@ -573,9 +585,11 @@ func (h *storeConn) file(wire []string) string {
 	if len(groups) == 0 {
 		return "441 Posting failed: no newsgroup"
 	}
+	h.postMu.Lock()
+	defer h.postMu.Unlock()
 	switch id := a.Header("Message-ID"); {
-	case a.hasHeader("Message-ID") && id == "":
-		return "441 Posting failed: empty Message-ID header"
+	case a.hasHeader("Message-ID") && !validMessageID(id):
+		return "441 Posting failed: bad Message-ID header"
 	case id != "":
 		if _, _, dup := h.st.ByMessageID(id); dup {
 			return "441 Posting failed: duplicate " + id
@@ -603,6 +617,11 @@ func (h *storeConn) file(wire []string) string {
 		h.st.AddArticle(g, a)
 	}
 	return "240 Article received " + a.MessageID
+}
+
+// validMessageID reports whether id has the form "<...>" without white space.
+func validMessageID(id string) bool {
+	return len(id) > 2 && strings.HasPrefix(id, "<") && strings.HasSuffix(id, ">") && !strings.ContainsAny(id, " \t\r\n")
 }
 
 // appendStuffed appends lines to out, dot-stuffing those that start with ".".
