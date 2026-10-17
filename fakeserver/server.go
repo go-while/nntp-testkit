@@ -33,9 +33,14 @@ type Options struct {
 	Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 	Store      *Store        // stateful mode: the store handler when Handler is nil (see storeHandler)
 	StoreOpts  StoreOptions  // options of the store handler
-	Faults     Faults        // fault hooks of Store and Script mode
-	Deadline   time.Duration // hang guard of waits, raw reads and sleeps; 0 = testkit.Deadline()
+	Faults     Faults        // fault hooks of Store and Script mode; copied by New/Start
+	Deadline   time.Duration // hang guard; 0 = testkit.Deadline()
 }
+
+// Options.Deadline bounds exactly: the polls of WaitOpen (d is raised to it) and WaitLines, the
+// wait of Close for the connection goroutines, and every server-side sleep (Step.Delay,
+// Faults.Delay, PeerOptions.StallModeStream are capped at it). Server-side reads have no
+// deadline: a connection is held until the client closes it or Close.
 
 // Step is one scripted exchange.
 //
@@ -47,7 +52,7 @@ type Options struct {
 type Step struct {
 	Expect     string        // regexp, anchored ^…$, matched against the client line; "" matches any line
 	ReadDot    bool          // after the match, read a dot-terminated block (POST/TAKETHIS payload)
-	Delay      time.Duration // before replying
+	Delay      time.Duration // before replying; capped at Options.Deadline
 	Reply      []string      // lines written with CRLF; multi-line replies include their "." line
 	Hang       bool          // after the match (and ReadDot, Delay, Reply), never reply again; held until Close
 	CloseAfter bool          // close the connection after the reply
@@ -61,7 +66,9 @@ type StoreOptions struct {
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store
-// mode and in Script mode (Handler-less); a Handler may apply them through the Conn helpers.
+// mode and in Script mode only: an external Handler cannot apply them. New and Start copy the
+// maps, so changing Options.Faults afterwards has no effect (and does not race); do not mutate
+// the maps while New or Start runs.
 //
 // In Script mode: Delay and Override apply to the Reply of a matched step (not to the
 // "500 fakeserver: unexpected" answer of a mismatch); Delay runs after the step's own Delay;
@@ -77,10 +84,35 @@ type Faults struct {
 	DropInMultiline map[string]int           // command → close the connection after this many lines of its multi-line reply
 }
 
+// clone returns a deep copy of f (nil maps stay nil).
+func (f Faults) clone() Faults {
+	out := Faults{CloseAfter: f.CloseAfter}
+	if f.Delay != nil {
+		out.Delay = make(map[string]time.Duration, len(f.Delay))
+		for k, v := range f.Delay {
+			out.Delay[k] = v
+		}
+	}
+	if f.Override != nil {
+		out.Override = make(map[string][]string, len(f.Override))
+		for k, v := range f.Override {
+			out.Override[k] = append([]string(nil), v...)
+		}
+	}
+	if f.DropInMultiline != nil {
+		out.DropInMultiline = make(map[string]int, len(f.DropInMultiline))
+		for k, v := range f.DropInMultiline {
+			out.DropInMultiline[k] = v
+		}
+	}
+	return out
+}
+
 // storeHandler builds the handler of Store mode (Options.Store set, Handler nil) once per
 // Server. It is set by storehandler.go; while it is nil, Store mode only records lines (like
-// NoGreeting without Handler, but after the greeting).
-var storeHandler func(*Store, StoreOptions, Faults) func(*Conn)
+// NoGreeting without Handler, but after the greeting). The handler applies the server's Faults
+// through Conn.writeReply and Conn.closeDue.
+var storeHandler func(*Store, StoreOptions) func(*Conn)
 
 // Server is a fake NNTP server: scripted, handler-driven or stateful. Create it with New or Start.
 type Server struct {
@@ -144,6 +176,7 @@ func start(tb testing.TB, o Options) (*Server, error) {
 	if s.deadline <= 0 {
 		s.deadline = testkit.Deadline()
 	}
+	s.o.Faults = o.Faults.clone()
 	for i, st := range o.Script {
 		if st.Expect == "" {
 			s.re = append(s.re, nil)
@@ -159,7 +192,7 @@ func start(tb testing.TB, o Options) (*Server, error) {
 	case o.Handler != nil:
 		s.handler = o.Handler
 	case o.Store != nil && storeHandler != nil:
-		s.handler = storeHandler(o.Store, o.StoreOpts, o.Faults)
+		s.handler = storeHandler(o.Store, o.StoreOpts)
 	}
 	ln, err := net.Listen("tcp", o.Addr)
 	if err != nil {
@@ -213,7 +246,6 @@ func (s *Server) serve(raw net.Conn) {
 	if s.o.RawStall {
 		buf := make([]byte, 4096)
 		for {
-			_ = raw.SetReadDeadline(time.Now().Add(s.deadline))
 			if _, err := raw.Read(buf); err != nil {
 				return
 			}

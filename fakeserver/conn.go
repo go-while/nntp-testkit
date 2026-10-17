@@ -87,10 +87,9 @@ func (c *Conn) Raw() net.Conn { return c.conn }
 // Server returns the server this connection belongs to.
 func (c *Conn) Server() *Server { return c.s }
 
-// readRaw reads one line without recording it, within the server's Deadline (a hang guard on
-// an idle client); a read error counts the conn out of Open().
+// readRaw reads one line without recording it; a read error counts the conn out of Open().
+// There is no read deadline: Close unblocks it.
 func (c *Conn) readRaw() (string, error) {
-	_ = c.conn.SetReadDeadline(time.Now().Add(c.s.deadline))
 	line, err := c.r.ReadString('\n')
 	if err != nil {
 		c.markGone()

@@ -11,7 +11,7 @@ type PeerOptions struct {
 	User, Pass      string          // non-empty: AUTHINFO required; CHECK/TAKETHIS before auth → 480
 	Have            map[string]bool // ids the peer holds; guarded by the peer's mutex; TAKETHIS 239 adds to it
 	Defer431Once    map[string]bool // CHECK of these ids → 431 the first time only
-	StallModeStream time.Duration   // sleep before the first connection's "203" reply
+	StallModeStream time.Duration   // sleep before the first connection's "203" reply; capped at Options.Deadline
 	OnArticle       func(msgID string, wire []string)
 }
 

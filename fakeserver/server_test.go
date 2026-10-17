@@ -419,6 +419,17 @@ func TestFaultsScript(t *testing.T) {
 		}
 	})
 
+	t.Run("CopiedAtStart", func(t *testing.T) {
+		// New copies the maps: a change after New neither races nor takes effect
+		f := Faults{Override: map[string][]string{"A": {"480 nope"}}}
+		s := New(t, Options{Script: steps(), Faults: f})
+		f.Override["A"] = []string{"481 changed"}
+		f.Override["B"] = []string{"482 added"}
+		c := client.Dial(t, s.Addr())
+		wantCode(t, c, "A", 480)
+		wantCode(t, c, "B", 200)
+	})
+
 	t.Run("CloseAfter", func(t *testing.T) {
 		s := New(t, Options{Script: steps(), Faults: Faults{CloseAfter: 3}})
 		c := client.Dial(t, s.Addr())
@@ -508,10 +519,10 @@ func TestStorePrecedence(t *testing.T) {
 
 	// with a store handler: Store wins over Script, Handler wins over Store
 	var built int
-	storeHandler = func(got *Store, o StoreOptions, f Faults) func(*Conn) {
+	storeHandler = func(got *Store, o StoreOptions) func(*Conn) {
 		built++
-		if got != st || o.User != "u" || f.CloseAfter != 7 {
-			t.Errorf("store handler built with %p %+v %+v", got, o, f)
+		if got != st || o.User != "u" {
+			t.Errorf("store handler built with %p %+v", got, o)
 		}
 		return func(c *Conn) {
 			if _, err := c.ReadLine(); err != nil {
