@@ -14,8 +14,13 @@ import (
 	testkit "github.com/go-while/nntp-testkit"
 )
 
-// DefaultGreeting is the greeting written when Options.Greeting is empty.
+// DefaultGreeting is the greeting written when Options.Greeting is empty; a Store server with
+// StoreOpts.ReaderOnly greets with DefaultGreetingNoPost instead (RFC 3977 5.1.1: 201 when
+// posting is prohibited).
 const DefaultGreeting = "200 fakeserver ready"
+
+// DefaultGreetingNoPost is the greeting of a read-only Store server.
+const DefaultGreetingNoPost = "201 fakeserver ready (no posting)"
 
 // Options configures a Server.
 //
@@ -25,7 +30,7 @@ const DefaultGreeting = "200 fakeserver ready"
 // With NoGreeting and no Handler neither Store nor Script runs: lines are only recorded.
 type Options struct {
 	Addr       string        // listen address, default "127.0.0.1:0"
-	Greeting   string        // default DefaultGreeting
+	Greeting   string        // default DefaultGreeting (DefaultGreetingNoPost for a read-only Store)
 	NoGreeting bool          // no greeting; without Handler: never write (greeting stall), reads are still recorded
 	RawStall   bool          // accept TCP, never write (TLS-handshake / SOCKS stall); bytes read are discarded
 	TLS        *tls.Config   // non-nil: TLS server on every accepted conn (cert from TLSConfig)
@@ -164,6 +169,9 @@ func start(tb testing.TB, o Options) (*Server, error) {
 	}
 	if o.Greeting == "" {
 		o.Greeting = DefaultGreeting
+		if o.Store != nil && o.Handler == nil && o.StoreOpts.ReaderOnly {
+			o.Greeting = DefaultGreetingNoPost
+		}
 	}
 	s := &Server{
 		tb:       tb,

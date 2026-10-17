@@ -101,5 +101,5 @@
 //	// Keys are upper-cased command names ("ARTICLE"); the hooks apply in Store mode and in Script
 //	// mode (there: only to a matched step's reply). DropInMultiline counts the status line; 0
 //	// closes before writing anything. CloseAfter counts every client line, mismatches included.
-//	const DefaultGreeting = "200 fakeserver ready"
+//	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
 package fakeserver
