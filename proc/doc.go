@@ -1,7 +1,12 @@
 // Package proc starts an external NNTP server binary for a test, either with stdin/stdout as the
 // client connection (inetd style) or on a TCP address with readiness detected by dialling until a
 // greeting arrives, and stops it afterwards (SIGTERM, then SIGKILL after a timeout). Its stderr
-// and named log files are written to the test output when the test fails.
+// and named log files are written to the test output when the test fails. Stop relies on
+// SIGTERM/SIGKILL, so the package needs a Unix system. Wait is bounded by the Deadline (it
+// stops the process when that passes). In TCP mode the child's stdout is captured with its
+// stderr, and one readiness probe connection (greeting, QUIT) reaches the server before the
+// test's own; a relative Path with a separator is resolved against the caller's directory,
+// a bare name through PATH.
 //
 // Contract (plan nntp-testkit; implemented in proc.go and stdio.go):
 //
@@ -23,7 +28,8 @@
 //	func (p *Process) Signal(sig os.Signal) error
 //	func (p *Process) Stop()                            // SIGTERM, SIGKILL after StopTimeout, then Wait; idempotent; also run by tb.Cleanup
 //	func (p *Process) Wait() error                      // the exit error, once
-//	func (p *Process) Stderr() string                   // captured so far
+//	func (p *Process) Stderr() string                   // captured so far (stdout too in TCP mode)
+//	const DefaultStopTimeout = 5 * time.Second
 //
 // Both Start functions register a tb.Cleanup that stops the process and, when tb.Failed(), logs
 // Stderr() and the Logs files with tb.Log.
