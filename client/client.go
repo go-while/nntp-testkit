@@ -31,14 +31,28 @@ type Conn struct {
 	tb testing.TB // nil for TryDial: the tb-failing methods then panic
 }
 
-// Dial connects to addr within the deadline, reads the greeting into c.Greeting and registers
-// tb.Cleanup(Close). Strict mode is on. A dial or greeting error fails tb.
+// Dial is DialWith(tb, addr, 0): the hang guard is testkit.Deadline().
 func Dial(tb testing.TB, addr string) *Conn {
 	tb.Helper()
-	c, err := TryDial(addr, 0)
+	return DialWith(tb, addr, 0)
+}
+
+// DialWith connects to addr and reads the greeting into c.Greeting within deadline (0 =
+// testkit.Deadline()), sets c.Deadline to it and registers tb.Cleanup(Close). Strict mode is
+// on. A dial or greeting error fails tb.
+func DialWith(tb testing.TB, addr string, deadline time.Duration) *Conn {
+	tb.Helper()
+	c, err := TryDial(addr, deadline)
 	if err != nil {
 		tb.Fatalf("dial %s: %v", addr, err)
 	}
+	return c.WithTB(tb)
+}
+
+// WithTB attaches tb to c (for a Conn from TryDial or a struct literal) and registers
+// tb.Cleanup(Close): Cmd, ReadDotLines and RawUntilDot then fail tb instead of panicking.
+func (c *Conn) WithTB(tb testing.TB) *Conn {
+	tb.Helper()
 	c.tb = tb
 	tb.Cleanup(c.Close)
 	return c
@@ -46,8 +60,8 @@ func Dial(tb testing.TB, addr string) *Conn {
 
 // TryDial connects to addr and reads the greeting, without a testing dependency. deadline is
 // the hang guard for the dial and every later step (0 = testkit.Deadline()). Strict mode is
-// on. The tb-failing methods (Cmd, ReadDotLines, RawUntilDot) panic on a Conn from TryDial;
-// use the Try forms there. The caller closes the Conn.
+// on. The tb-failing methods (Cmd, ReadDotLines, RawUntilDot) panic on a Conn from TryDial
+// unless WithTB attached a tb; use the Try forms there. The caller closes the Conn.
 func TryDial(addr string, deadline time.Duration) (*Conn, error) {
 	c := &Conn{Deadline: deadline, Strict: true}
 	nc, err := net.DialTimeout("tcp", addr, c.deadline())
@@ -163,9 +177,9 @@ func (c *Conn) Cmd(format string, args ...any) (int, string) {
 // TryReadDotLines reads a dot-terminated block, un-stuffs leading dots and strips the line
 // ends. On error it returns the lines read so far. In strict mode a line that starts with "."
 // but is neither ".." stuffed nor the terminator is a BadDotStuffing error (the rest of the
-// block stays unread), a line-end mistake inside the block is returned as ReadLine reports it,
-// and a block that ends (EOF or deadline) before ".\r\n" is a NoTerminator error wrapping the
-// read error.
+// block stays unread), a BareLF or BareCR line inside the block is returned as ReadLine
+// reports it, and a block that ends (EOF or deadline, with or without a partial last line)
+// before ".\r\n" is a NoTerminator error wrapping the read error.
 func (c *Conn) TryReadDotLines() ([]string, error) {
 	var out []string
 	for {
@@ -173,6 +187,11 @@ func (c *Conn) TryReadDotLines() ([]string, error) {
 		if err != nil {
 			var se *StrictError
 			if errors.As(err, &se) {
+				if se.Kind == NoCRLF {
+					// a partial last line at EOF/deadline: the block has no terminator
+					return out, &StrictError{Kind: NoTerminator, Line: se.Line,
+						Err: fmt.Errorf("after %d lines: %w", len(out), se.Err)}
+				}
 				return out, err
 			}
 			err = fmt.Errorf("after %d lines: %w", len(out), err)
@@ -200,7 +219,7 @@ func (c *Conn) ReadDotLines() []string {
 	}
 	out, err := c.TryReadDotLines()
 	if err != nil {
-		c.fatalf("readDotLines: %v after %d lines", err, len(out))
+		c.fatalf("readDotLines: %v", err)
 	}
 	return out
 }
@@ -215,7 +234,7 @@ func (c *Conn) RawUntilDot() []byte {
 	}
 	b, err := c.tryRawUntilDot()
 	if err != nil {
-		c.fatalf("rawUntilDot: %v after %d bytes", err, len(b))
+		c.fatalf("rawUntilDot: %v", err)
 	}
 	return b
 }

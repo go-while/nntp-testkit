@@ -109,28 +109,27 @@ func checkLine(raw []byte) *StrictError {
 	return nil
 }
 
-// ExpectNoPending reads for up to d and returns a *StrictError of Kind Pending holding the
-// bytes when any arrive (or are already buffered in R), for example a NUL after
-// "400 too many users\r\n". A timeout gives nil, and so does EOF (a closed connection is not
-// pending data); any other read error is returned. It works in both modes and returns as soon
-// as the first bytes arrive.
+// ExpectNoPending waits up to d for data and returns a *StrictError of Kind Pending holding
+// the bytes when any arrive (or are already buffered in R), for example a NUL after
+// "400 too many users\r\n". It never consumes them: they stay in R for the next read. A
+// timeout gives nil, and so does EOF (a closed connection is not pending data); any other read
+// error is returned. It works in both modes, returns as soon as the first bytes arrive and
+// restores the hang guard deadline before it returns, so direct reads on R keep working.
 func (c *Conn) ExpectNoPending(d time.Duration) error {
-	if n := c.R.Buffered(); n > 0 {
-		b, _ := c.R.Peek(n)
-		return &StrictError{Kind: Pending, Bytes: append([]byte(nil), b...)}
+	if c.R.Buffered() == 0 {
+		_ = c.Conn.SetReadDeadline(time.Now().Add(d))
+		defer c.bump()
+		// Peek waits without consuming; on error bufio clears its sticky read error, so the
+		// timeout does not poison later reads.
+		if _, err := c.R.Peek(1); err != nil && c.R.Buffered() == 0 {
+			var ne net.Error
+			if errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) ||
+				(errors.As(err, &ne) && ne.Timeout()) {
+				return nil
+			}
+			return err
+		}
 	}
-	_ = c.Conn.SetReadDeadline(time.Now().Add(d))
-	buf := make([]byte, 4096)
-	n, err := c.R.Read(buf)
-	if n > 0 {
-		return &StrictError{Kind: Pending, Bytes: buf[:n]}
-	}
-	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
-		return nil
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return nil
-	}
-	return err
+	b, _ := c.R.Peek(c.R.Buffered())
+	return &StrictError{Kind: Pending, Bytes: append([]byte(nil), b...)}
 }

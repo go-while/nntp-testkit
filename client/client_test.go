@@ -395,7 +395,7 @@ func TestStrictErrors(t *testing.T) {
 		{"bare LF in block", "200 hi\r\nx\r\ny\n.\r\n", false, "dot", BareLF, "y\n"},
 		{"LF terminator", "200 hi\r\nx\r\n.\n", false, "dot", BareLF, ".\n"},
 		{"missing terminator", "200 hi\r\na\r\nb\r\n", true, "dot", NoTerminator, ""},
-		{"partial terminator", "200 hi\r\na\r\n.", true, "dot", NoCRLF, "."},
+		{"partial terminator", "200 hi\r\na\r\n.", true, "dot", NoTerminator, "."},
 		{"raw bare LF", "200 hi\r\na\r\nb\n.\r\n", false, "raw", BareLF, "b\n"},
 		{"raw missing terminator", "200 hi\r\na\r\n", true, "raw", NoTerminator, ""},
 	}
@@ -448,19 +448,128 @@ func TestStrictPending(t *testing.T) {
 	}
 }
 
-func TestStrictPendingUnbuffered(t *testing.T) {
+// TestPendingArrivesDuringWait: nothing is buffered when ExpectNoPending starts; the bytes
+// arrive while it waits, are reported and stay readable.
+func TestPendingArrivesDuringWait(t *testing.T) {
 	gate := make(chan struct{})
 	p := newPeer(t, func(_ *peer, c net.Conn, r *bufio.Reader) {
 		write(c, "200 hi\r\n")
 		<-gate
-		write(c, "junk")
+		write(c, "PENDING\r\n")
 		drain(r)
 	})
 	c := Dial(t, p.addr())
+	if n := c.R.Buffered(); n != 0 {
+		t.Fatalf("buffered before the wait: %d", n)
+	}
 	close(gate)
 	se := strictKind(t, c.ExpectNoPending(testkit.Deadline()), Pending)
-	if len(se.Bytes) == 0 || !strings.HasPrefix("junk", string(se.Bytes)) {
+	if len(se.Bytes) == 0 || !strings.HasPrefix("PENDING\r\n", string(se.Bytes)) {
 		t.Fatalf("Bytes = %q", se.Bytes)
+	}
+	if line, err := c.ReadLine(); err != nil || line != "PENDING" {
+		t.Fatalf("after Pending: %q %v (bytes consumed?)", line, err)
+	}
+}
+
+// TestPendingAlreadyBuffered: the bytes came in with the greeting (one pipe write); they are
+// reported without a wait and stay readable.
+func TestPendingAlreadyBuffered(t *testing.T) {
+	a, b := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = b.Close() }()
+		_ = b.SetDeadline(time.Now().Add(testkit.Deadline()))
+		write(b, "200 hi\r\nPENDING\r\n")
+		drain(bufio.NewReader(b))
+	}()
+	t.Cleanup(func() { <-done }) // registered first: runs after New's Close (LIFO)
+	c := New(t, a)
+	if _, err := c.ReadGreeting(); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.R.Buffered(); n != len("PENDING\r\n") {
+		t.Fatalf("buffered = %d, want the pending line", n)
+	}
+	se := strictKind(t, c.ExpectNoPending(testkit.Deadline()), Pending)
+	if string(se.Bytes) != "PENDING\r\n" {
+		t.Fatalf("Bytes = %q", se.Bytes)
+	}
+	if line, err := c.ReadLine(); err != nil || line != "PENDING" {
+		t.Fatalf("after Pending: %q %v (bytes consumed?)", line, err)
+	}
+}
+
+// TestExpectNoPendingRestoresDeadline: after a quiet probe a direct read on R still works.
+func TestExpectNoPendingRestoresDeadline(t *testing.T) {
+	gate := make(chan struct{})
+	p := newPeer(t, func(_ *peer, c net.Conn, r *bufio.Reader) {
+		write(c, "200 hi\r\n")
+		<-gate
+		write(c, "211 later\r\n")
+		drain(r)
+	})
+	c := Dial(t, p.addr())
+	if err := c.ExpectNoPending(50 * time.Millisecond); err != nil {
+		t.Fatalf("quiet: %v", err)
+	}
+	close(gate)
+	line, err := c.R.ReadBytes('\n')
+	if err != nil || string(line) != "211 later\r\n" {
+		t.Fatalf("direct read after the probe: %q %v", line, err)
+	}
+}
+
+func TestDialWith(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n"))
+	c := DialWith(t, p.addr(), 200*time.Millisecond)
+	if c.Deadline != 200*time.Millisecond || !c.Strict || c.Greeting != "200 hi" {
+		t.Fatalf("DialWith: deadline %v strict %v greeting %q", c.Deadline, c.Strict, c.Greeting)
+	}
+	if _, _, err := c.TryCmd("DATE"); !isTimeout(err) {
+		t.Fatalf("err = %v, want a timeout from the DialWith deadline", err)
+	}
+
+	p = newPeer(t, func(_ *peer, _ net.Conn, r *bufio.Reader) { drain(r) })
+	r := &recordTB{TB: t}
+	r.run(func(tb testing.TB) { DialWith(tb, p.addr(), 200*time.Millisecond) })
+	if !r.failed || !strings.Contains(r.msg, "greeting") {
+		t.Fatalf("silent peer: failed=%v msg=%q", r.failed, r.msg)
+	}
+}
+
+func TestWithTB(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n211 x\n"))
+	c, err := TryDial(p.addr(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &recordTB{TB: t}
+	if got := c.WithTB(r); got != c {
+		t.Fatal("WithTB must return c")
+	}
+	r.run(func(testing.TB) { c.Cmd("GROUP x") })
+	if !r.failed || !strings.Contains(r.msg, "bare LF") {
+		t.Fatalf("Cmd: failed=%v msg=%q", r.failed, r.msg)
+	}
+}
+
+// TestLongLines: lines beyond the 1 MiB reader buffer in strict mode.
+func TestLongLines(t *testing.T) {
+	long := strings.Repeat("x", 2<<20)
+	p := newPeer(t, scripted("200 hi\r\n"+long+"\r\n"+long+"\n"+"211 after\r\n"))
+	c := Dial(t, p.addr())
+	if line, err := c.ReadLine(); err != nil || line != long {
+		t.Fatalf("CRLF line: len %d err %v", len(line), err)
+	}
+	_, err := c.ReadLine()
+	se := strictKind(t, err, BareLF)
+	if se.Line != long+"\n" {
+		t.Fatalf("BareLF Line len %d, want %d", len(se.Line), len(long)+1)
+	}
+	if code, _, err := c.ReadStatus(); err != nil || code != 211 {
+		t.Fatalf("after the long lines: %d %v", code, err)
 	}
 }
 
