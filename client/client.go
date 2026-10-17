@@ -58,6 +58,20 @@ func (c *Conn) WithTB(tb testing.TB) *Conn {
 	return c
 }
 
+// For returns a view of c whose tb-failing methods (Cmd, ReadDotLines, RawUntilDot) fail tb
+// instead of the tb c was dialed with, sharing the socket, the reader and the settings; no
+// cleanup is registered, the view is as short-lived as its caller. Use it when one connection
+// dialed in a parent test is used inside t.Run subtests: a failure then fails the subtest, not
+// the parent. Changes to the exported fields of the view are not seen by c.
+func (c *Conn) For(tb testing.TB) *Conn {
+	v := *c
+	v.tb = tb
+	return &v
+}
+
+// TryRawUntilDot is RawUntilDot that returns the error instead of failing tb.
+func (c *Conn) TryRawUntilDot() ([]byte, error) { return c.tryRawUntilDot() }
+
 // TryDial connects to addr and reads the greeting, without a testing dependency. deadline is
 // the hang guard for the dial and every later step (0 = testkit.Deadline()). Strict mode is
 // on. The tb-failing methods (Cmd, ReadDotLines, RawUntilDot) panic on a Conn from TryDial

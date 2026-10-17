@@ -15,6 +15,7 @@
 //	func TryDial(addr string, deadline time.Duration) (*Conn, error) // no testing dependency; Strict; reads the greeting; its tb-failing methods panic until WithTB
 //	func New(tb testing.TB, c net.Conn) *Conn               // wrap an open conn; no greeting read; tb.Cleanup(Close); Strict
 //	func (c *Conn) WithTB(tb testing.TB) *Conn              // attach a tb to a TryDial/raw Conn (registers tb.Cleanup(Close))
+//	func (c *Conn) For(tb testing.TB) *Conn                 // a view of c that fails tb instead (shared stream, no cleanup): for subtests sharing a parent's conn
 //	func (c *Conn) ReadGreeting() (string, error)          // reads one line into c.Greeting
 //	func (c *Conn) Send(raw string) error                  // raw bytes, nothing appended (pipelining)
 //	func (c *Conn) ReadLine() (string, error)              // one line, CRLF stripped (LF in non-strict mode)
@@ -24,6 +25,7 @@
 //	func (c *Conn) TryReadDotLines() ([]string, error)     // dot-terminated block, un-stuffed, CRLF stripped
 //	func (c *Conn) ReadDotLines() []string                 // TryReadDotLines; fails tb on error
 //	func (c *Conn) RawUntilDot() []byte                    // exact bytes up to and including "\r\n.\r\n" (or ".\r\n" when empty); fails tb on error
+//	func (c *Conn) TryRawUntilDot() ([]byte, error)        // the same, returning the error
 //	func (c *Conn) ExpectNoPending(d time.Duration) error  // wait up to d for bytes; any → *StrictError{Kind: Pending, Bytes: ...}; nil on timeout/EOF; never consumes the bytes; restores the deadline
 //	func (c *Conn) Close()
 //

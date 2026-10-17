@@ -555,6 +555,32 @@ func TestWithTB(t *testing.T) {
 	}
 }
 
+// TestFor: a view bound to another tb fails that tb, shares the stream with c and registers no
+// cleanup (c is still open after the view's tb finished).
+func TestFor(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n211 x\n205 bye\r\n"))
+	c := Dial(t, p.addr())
+	r := &recordTB{TB: t}
+	r.run(func(testing.TB) { c.For(r).Cmd("GROUP x") })
+	if !r.failed || !strings.Contains(r.msg, "bare LF") {
+		t.Fatalf("view Cmd: failed=%v msg=%q", r.failed, r.msg)
+	}
+	// The stream position is shared: the next line on c is the one after the bad one.
+	if code, line := c.Cmd("QUIT"); code != 205 || line != "205 bye" {
+		t.Fatalf("after the view: %d %q", code, line)
+	}
+}
+
+// TestTryRawUntilDot: the error-returning form of RawUntilDot.
+func TestTryRawUntilDot(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\nline\r\n..x\r\n.\r\n"))
+	c := Dial(t, p.addr())
+	b, err := c.TryRawUntilDot()
+	if err != nil || string(b) != "line\r\n..x\r\n.\r\n" {
+		t.Fatalf("TryRawUntilDot = %q, %v", b, err)
+	}
+}
+
 // TestLongLines: lines beyond the 1 MiB reader buffer in strict mode.
 func TestLongLines(t *testing.T) {
 	long := strings.Repeat("x", 2<<20)
