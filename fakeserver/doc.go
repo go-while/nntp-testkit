@@ -3,8 +3,8 @@
 // of groups and articles served by the built-in RFC 3977 handler), with fault hooks and command
 // counters. It listens on 127.0.0.1:0 unless given another address and never contacts any host.
 //
-// Contract (plan nntp-testkit). Implemented in server.go, conn.go, tls.go, peer.go (wave 2 core),
-// store.go (wave 1), storehandler.go and faults.go (wave 2):
+// Contract (plan nntp-testkit). Implemented in server.go (Options, Step, StoreOptions, Faults,
+// Server), conn.go, tls.go, peer.go, store.go and storehandler.go:
 //
 //	type Options struct {
 //		Addr       string        // listen address, default "127.0.0.1:0"
@@ -16,8 +16,8 @@
 //		Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 //		Store      *Store        // stateful mode: StoreHandler(Store, StoreOptions) when Handler is nil
 //		StoreOpts  StoreOptions
-//		Faults     Faults        // see faults.go; apply to Store and Script modes
-//		Deadline   time.Duration // hang guard of waits and raw reads; 0 = testkit.Deadline()
+//		Faults     Faults        // apply in Script and Store mode (copied at start); an external Handler cannot use them
+//		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline; 0 = testkit.Deadline()
 //	}
 //	// Precedence: RawStall wins over everything. Otherwise the greeting is written unless
 //	// NoGreeting; then Handler when set, else Store when set, else Script (with NoGreeting and
@@ -98,5 +98,8 @@
 //		Override        map[string][]string      // command → reply lines written instead of the normal reply
 //		DropInMultiline map[string]int           // command → close the connection after this many lines of its multi-line reply
 //	}
-//	// Keys are upper-cased command names ("ARTICLE"); the hooks apply in Store mode and in Script mode.
+//	// Keys are upper-cased command names ("ARTICLE"); the hooks apply in Store mode and in Script
+//	// mode (there: only to a matched step's reply). DropInMultiline counts the status line; 0
+//	// closes before writing anything. CloseAfter counts every client line, mismatches included.
+//	const DefaultGreeting = "200 fakeserver ready"
 package fakeserver
