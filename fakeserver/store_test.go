@@ -93,13 +93,90 @@ func TestStoreMessageIDFromHeader(t *testing.T) {
 	if !ok || a.MessageID != "<h@x>" || len(locs) != 1 {
 		t.Fatalf("ByMessageID(<h@x>) = %+v, %v, %v", a, locs, ok)
 	}
-	// an article without any id is stored but not indexed
-	n := st.AddArticle("g", Article{Body: []string{"x"}})
-	if _, ok := st.Article("g", n); !ok {
-		t.Fatalf("article without id not stored")
+	// an article without any id gets a generated one that ByMessageID resolves; Headers stay as given
+	n := st.AddArticle("g", Article{Headers: []string{"Subject: s"}, Body: []string{"x"}})
+	stored, ok := st.Article("g", n)
+	if !ok || stored.MessageID != "<2.g@fakeserver.invalid>" {
+		t.Fatalf("article without id = %+v, %v; want MessageID <2.g@fakeserver.invalid>", stored, ok)
+	}
+	if !reflect.DeepEqual(stored.Headers, []string{"Subject: s"}) {
+		t.Fatalf("AddArticle changed Headers: %q", stored.Headers)
+	}
+	if _, locs, ok := st.ByMessageID("<2.g@fakeserver.invalid>"); !ok || !reflect.DeepEqual(locs, []Location{{"g", 2}}) {
+		t.Fatalf("generated id not indexed: %v, %v", locs, ok)
+	}
+	if got := stored.WithDefaults("g").Header("Message-ID"); got != stored.MessageID {
+		t.Fatalf("WithDefaults serves Message-ID %q, want the indexed %q", got, stored.MessageID)
 	}
 	if _, _, ok := st.ByMessageID(""); ok {
 		t.Fatalf("empty message-id indexed")
+	}
+
+	// field and header must agree
+	st.AddArticle("g", Article{MessageID: "<same@x>", Headers: []string{"Message-ID: <same@x>"}})
+	mustPanic(t, "differs from Message-ID header", func() {
+		st.AddArticle("g", Article{MessageID: "<field@x>", Headers: []string{"Message-ID: <header@x>"}})
+	})
+	if _, _, ok := st.ByMessageID("<field@x>"); ok {
+		t.Fatalf("mismatching article indexed")
+	}
+	if g, _ := st.Group("g"); g.Count != 3 {
+		t.Fatalf("Count %d after mismatch panic, want 3", g.Count)
+	}
+}
+
+func TestStoreCreatedAndPosting(t *testing.T) {
+	st := NewStore()
+	at := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	st.AddGroupAt("old.group", "old", at)
+	if g, _ := st.Group("old.group"); !g.Created.Equal(at) || !g.Posting || g.Description != "old" {
+		t.Fatalf("AddGroupAt = %+v", g)
+	}
+	st.AddGroup("old.group", "")
+	if g, _ := st.Group("old.group"); !g.Created.Equal(at) {
+		t.Fatalf("AddGroup changed Created to %v", g.Created)
+	}
+	// an auto-created group gets Created now; AddGroupAt can set it afterwards
+	st.AddArticle("auto.group", art("<a@x>"))
+	if g, _ := st.Group("auto.group"); g.Created.IsZero() {
+		t.Fatalf("auto-created group has zero Created")
+	}
+	later := at.Add(24 * time.Hour)
+	st.AddGroupAt("auto.group", "", later)
+	if g, _ := st.Group("auto.group"); !g.Created.Equal(later) || g.Count != 1 {
+		t.Fatalf("AddGroupAt on existing group = %+v", g)
+	}
+	// zero created behaves like AddGroup
+	st.AddGroupAt("auto.group", "", time.Time{})
+	if g, _ := st.Group("auto.group"); !g.Created.Equal(later) {
+		t.Fatalf("AddGroupAt(zero) changed Created to %v", g.Created)
+	}
+
+	if !st.SetPosting("old.group", false) {
+		t.Fatalf("SetPosting on existing group = false")
+	}
+	if g, _ := st.Group("old.group"); g.Posting {
+		t.Fatalf("Posting still true")
+	}
+	st.AddGroup("old.group", "again")
+	if g, _ := st.Group("old.group"); g.Posting {
+		t.Fatalf("repeat AddGroup reset Posting")
+	}
+	if !st.SetPosting("old.group", true) {
+		t.Fatalf("SetPosting(true) = false")
+	}
+	if g, _ := st.Group("old.group"); !g.Posting {
+		t.Fatalf("Posting not restored")
+	}
+	if st.SetPosting("no.such", false) {
+		t.Fatalf("SetPosting on unknown group = true")
+	}
+	if _, ok := st.Group("no.such"); ok {
+		t.Fatalf("SetPosting created a group")
+	}
+	var zero Store
+	if zero.SetPosting("g", true) {
+		t.Fatalf("SetPosting on zero Store = true")
 	}
 }
 
@@ -215,6 +292,7 @@ func TestStoreGroups(t *testing.T) {
 	st := NewStore()
 	st.AddGroup("zeta", "Z group")
 	st.AddGroup("alpha", "A group")
+	alphaCreated, _ := st.Group("alpha")
 	st.AddArticle("mid.auto", art("<m@x>"))
 	st.AddArticle("alpha", Article{Number: 4})
 	st.AddArticle("alpha", Article{Number: 9})
@@ -223,6 +301,12 @@ func TestStoreGroups(t *testing.T) {
 	st.AddGroup("zeta", "Z group, new") // non-empty description replaces
 
 	got := st.Groups()
+	for i := range got {
+		if got[i].Created.IsZero() {
+			t.Fatalf("group %s has zero Created", got[i].Name)
+		}
+		got[i].Created = time.Time{}
+	}
 	want := []Group{
 		{Name: "alpha", Description: "A group", Low: 4, High: 10, Count: 3, Posting: true},
 		{Name: "mid.auto", Low: 1, High: 1, Count: 1, Posting: true},
@@ -231,7 +315,12 @@ func TestStoreGroups(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Groups =\n%+v\nwant\n%+v", got, want)
 	}
-	if g, ok := st.Group("alpha"); !ok || g != want[0] {
+	g, ok := st.Group("alpha")
+	if !g.Created.Equal(alphaCreated.Created) {
+		t.Fatalf("repeat AddGroup changed Created: %v -> %v", alphaCreated.Created, g.Created)
+	}
+	g.Created = time.Time{}
+	if !ok || g != want[0] {
 		t.Fatalf("Group(alpha) = %+v, %v", g, ok)
 	}
 	if _, ok := st.Group("no.such"); ok {
@@ -368,6 +457,9 @@ func TestArticleWithDefaults(t *testing.T) {
 	bare := Article{Number: 3, Date: date}.WithDefaults("")
 	if bare.MessageID == "" || bare.Header("Message-ID") != bare.MessageID {
 		t.Fatalf("generated id %q, header %q", bare.MessageID, bare.Header("Message-ID"))
+	}
+	if bare.MessageID != "<3@fakeserver.invalid>" {
+		t.Fatalf("generated id for empty group %q, want <3@fakeserver.invalid>", bare.MessageID)
 	}
 	if bare.Header("Newsgroups") != "" {
 		t.Fatalf("Newsgroups added for empty group: %q", bare.Headers)

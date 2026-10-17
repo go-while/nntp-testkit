@@ -25,11 +25,14 @@ type Article struct {
 
 // Group is the state of one newsgroup. An empty group has Low 1, High 0 and Count 0; otherwise
 // Low is the lowest existing number, High the highest number ever assigned and Count the number
-// of articles (holes from explicit numbers are not counted).
+// of articles (holes from explicit numbers are not counted). Posting is true unless changed with
+// SetPosting (LIST ACTIVE "y"/"n"). Created is when the group was created (time.Now() unless set
+// with AddGroupAt), for NEWGROUPS.
 type Group struct {
 	Name, Description string
 	Low, High, Count  int64
 	Posting           bool
+	Created           time.Time
 }
 
 // Location is one place an article is filed under: a group and its number there.
@@ -74,14 +77,14 @@ func (st *Store) initLocked() {
 	}
 }
 
-// groupLocked returns the group, creating it (Posting true, empty) when it does not exist.
-// Callers hold st.mu.
+// groupLocked returns the group, creating it (Posting true, empty, Created now) when it does not
+// exist. Callers hold st.mu.
 func (st *Store) groupLocked(name string) *storeGroup {
 	st.initLocked()
 	g, ok := st.groups[name]
 	if !ok {
 		g = &storeGroup{
-			meta:     Group{Name: name, Low: 1, High: 0, Posting: true},
+			meta:     Group{Name: name, Low: 1, High: 0, Posting: true, Created: time.Now()},
 			articles: make(map[int64]Article),
 		}
 		st.groups[name] = g
@@ -89,23 +92,49 @@ func (st *Store) groupLocked(name string) *storeGroup {
 	return g
 }
 
-// AddGroup creates a group with Posting true. It is idempotent: an existing group keeps its
-// articles; a non-empty description replaces the stored one.
+// AddGroup creates a group with Posting true and Created time.Now(). It is idempotent: an
+// existing group keeps its articles, Posting and Created; a non-empty description replaces the
+// stored one.
 func (st *Store) AddGroup(name, description string) {
+	st.AddGroupAt(name, description, time.Time{})
+}
+
+// AddGroupAt is AddGroup with an explicit creation time (for NEWGROUPS tests). A non-zero
+// created is set on the group whether it is new or already exists (e.g. created by AddArticle);
+// a zero created behaves like AddGroup.
+func (st *Store) AddGroupAt(name, description string, created time.Time) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	g := st.groupLocked(name)
 	if description != "" {
 		g.meta.Description = description
 	}
+	if !created.IsZero() {
+		g.meta.Created = created
+	}
+}
+
+// SetPosting sets whether posting to group is allowed. It returns false when the group does not
+// exist.
+func (st *Store) SetPosting(group string, posting bool) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	g, ok := st.groups[group]
+	if !ok {
+		return false
+	}
+	g.meta.Posting = posting
+	return true
 }
 
 // AddArticle files a copy of a in group and returns its number there: a.Number when > 0 (a
 // number that is already taken panics, it is a test-setup bug), else High+1 (the first article
-// of a group gets 1). A zero Date becomes time.Now(); an empty MessageID is taken from the
-// Message-ID header when present. A group that does not exist is created. To file one article
-// in several groups, call AddArticle once per group; ByMessageID then returns every location.
-// An empty group name or a negative number panics as well.
+// of a group gets 1). A zero Date becomes time.Now(). An empty MessageID is taken from the
+// Message-ID header when present, else "<number.group@fakeserver.invalid>" is generated (the
+// id WithDefaults then serves) and indexed; Headers stay as given. A group that does not exist
+// is created. To file one article in several groups, call AddArticle once per group;
+// ByMessageID then returns every location. An empty group name, a negative number or a
+// MessageID that differs from the Message-ID header panics as well (test-setup bugs).
 func (st *Store) AddArticle(group string, a Article) int64 {
 	if group == "" {
 		panic("fakeserver: Store.AddArticle with empty group name")
@@ -117,8 +146,10 @@ func (st *Store) AddArticle(group string, a Article) int64 {
 	if a.Date.IsZero() {
 		a.Date = time.Now()
 	}
-	if a.MessageID == "" {
-		a.MessageID = a.Header("Message-ID")
+	if hdr := a.Header("Message-ID"); a.MessageID == "" {
+		a.MessageID = hdr
+	} else if hdr != "" && hdr != a.MessageID {
+		panic(fmt.Sprintf("fakeserver: Store.AddArticle(%q): MessageID %q differs from Message-ID header %q", group, a.MessageID, hdr))
 	}
 
 	st.mu.Lock()
@@ -133,15 +164,16 @@ func (st *Store) AddArticle(group string, a Article) int64 {
 		n = g.meta.High + 1
 	}
 	a.Number = n
+	if a.MessageID == "" {
+		a.MessageID = generatedID(n, group)
+	}
 	g.articles[n] = a
 	i := sort.Search(len(g.nums), func(i int) bool { return g.nums[i] >= n })
 	g.nums = slices.Insert(g.nums, i, n)
 	g.meta.Count = int64(len(g.nums))
 	g.meta.Low = g.nums[0]
 	g.meta.High = max(g.meta.High, n)
-	if a.MessageID != "" {
-		st.byID[a.MessageID] = append(st.byID[a.MessageID], Location{Group: group, Number: n})
-	}
+	st.byID[a.MessageID] = append(st.byID[a.MessageID], Location{Group: group, Number: n})
 	return n
 }
 
@@ -316,7 +348,8 @@ func (a Article) hasHeader(name string) bool {
 
 // WithDefaults returns a copy of a with the Message-ID, Newsgroups and Date header lines appended
 // when missing (existing lines are kept unchanged). Message-ID uses a.MessageID, else the
-// existing header, else "<number.group@fakeserver.invalid>"; the copy's MessageID is set to that
+// existing header, else "<number.group@fakeserver.invalid>" ("<number@fakeserver.invalid>" when
+// group is ""); the copy's MessageID is set to that
 // value. Newsgroups is group (not added when group is ""). Date uses a.Date (time.Now() when
 // zero, also stored in the copy) in DateLayout.
 func (a Article) WithDefaults(group string) Article {
@@ -325,7 +358,7 @@ func (a Article) WithDefaults(group string) Article {
 		a.MessageID = a.Header("Message-ID")
 	}
 	if a.MessageID == "" {
-		a.MessageID = fmt.Sprintf("<%d.%s@fakeserver.invalid>", a.Number, group)
+		a.MessageID = generatedID(a.Number, group)
 	}
 	if !a.hasHeader("Message-ID") {
 		a.Headers = append(a.Headers, "Message-ID: "+a.MessageID)
@@ -340,6 +373,15 @@ func (a Article) WithDefaults(group string) Article {
 		a.Headers = append(a.Headers, "Date: "+a.Date.Format(DateLayout))
 	}
 	return a
+}
+
+// generatedID is the Message-ID given to an article that has none: "<n.group@fakeserver.invalid>",
+// or "<n@fakeserver.invalid>" when group is "".
+func generatedID(n int64, group string) string {
+	if group == "" {
+		return fmt.Sprintf("<%d@fakeserver.invalid>", n)
+	}
+	return fmt.Sprintf("<%d.%s@fakeserver.invalid>", n, group)
 }
 
 // clone returns a with its own copies of Headers and Body.
