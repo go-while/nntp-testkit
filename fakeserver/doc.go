@@ -84,13 +84,20 @@
 //
 //	type StoreOptions struct { User, Pass string; ReaderOnly bool; OverviewFmt []string }
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
-//	// Serves CAPABILITIES, MODE READER, LIST [ACTIVE [wildmat]|NEWSGROUPS|OVERVIEW.FMT], GROUP,
-//	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current), XOVER/OVER (range or
-//	// message-id), NEXT/LAST, NEWGROUPS, DATE, POST (480 before auth when User set; 340/240;
-//	// stores with AddPosted and files into the Newsgroups header's groups), AUTHINFO USER/PASS
-//	// (381/281/481), QUIT (205). Codes per RFC 3977/4643; unknown command 500; 411/412/420/423/430
-//	// where the RFC says so. Headers of a served article: the stored Headers; when none hold
-//	// Message-ID/Newsgroups/Date they are added.
+//	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST
+//	// unless ReaderOnly, AUTHINFO USER while auth is required, IMPLEMENTATION fakeserver), MODE
+//	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT], GROUP,
+//	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current; 412/420/423/430),
+//	// XOVER/OVER (range "n", "n-", "n-m" or message-id; 423 for an empty range), NEXT/LAST
+//	// (421/422), NEWGROUPS (Group.Created; RFC 3977 7.3.2 century rule), DATE, POST (440 when
+//	// ReaderOnly; 340 then 240/441: Newsgroups, Subject and From required, Message-ID must be
+//	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
+//	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone
+//	// answers 281/481 when Pass is empty; 502 when not configured or done), QUIT (205).
+//	// When User or Pass is set every other command answers 480 until authenticated. Unknown
+//	// command 500, bad arguments 501. Served headers: the stored Headers plus Message-ID,
+//	// Newsgroups (every group the article is filed in) and Date when missing. Faults apply to
+//	// every reply (for POST: to the 340).
 //
 //	type Faults struct {
 //		Delay           map[string]time.Duration // command → sleep before its reply
