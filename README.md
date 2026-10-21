@@ -257,6 +257,8 @@ func Example() {
 gofmt -l . && go vet ./... && go test -race -count=1 ./...
 ```
 
+Which Go versions CI covers, and what to change when Go 1.28 is out: [NOTES.md](NOTES.md).
+
 ## License
 
 GPLv2, see [LICENSE](LICENSE).
