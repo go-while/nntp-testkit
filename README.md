@@ -2,7 +2,8 @@
 
 Shared NNTP test tools in Go: a fake NNTP server (scripted, handler-driven or backed by a stateful
 store), a strict test client that reports wire-level mistakes, and a runner for external server
-binaries. Standard library only, `go 1.22`.
+binaries. Standard library only, `go 1.22` or later; CI tests Go 1.22, the previous release and
+the latest on Linux and macOS (`proc` uses Unix signals, so Windows is not tested).
 
 It is written for the test suites of go-pugleaf, nntp-server and nntp-proxy (Go tests import the
 packages), and for NewsCache's end-to-end tests (the C++ server runs under `proc`, the strict client
