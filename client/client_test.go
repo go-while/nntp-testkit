@@ -207,7 +207,7 @@ func TestTryDialAndStatus(t *testing.T) {
 		t.Fatalf("GROUP = %d %q %v", code, line, err)
 	}
 	for _, cmd := range []string{"GARBAGE", "NOSPACE"} {
-		code, line, err = c.TryCmd(cmd)
+		code, line, err = c.TryCmd("%s", cmd)
 		if err == nil || code != 0 || line == "" {
 			t.Fatalf("%s = %d %q %v, want a parse error with the line", cmd, code, line, err)
 		}

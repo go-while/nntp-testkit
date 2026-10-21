@@ -12,13 +12,8 @@ jobs:
         # Linux and macOS only: proc and its tests send SIGTERM and SIGHUP
         # and read syscall.WaitStatus, which Windows does not have.
         os: [ubuntu-latest, macos-latest]
-        # the minimum from go.mod, the previous release and the latest
-        go: ['1.22.x', oldstable, stable]
-        exclude:
-          # current macOS refuses Go 1.22's test binaries at load: "dyld:
-          # missing LC_UUID load command"; newer Go writes the load command
-          - os: macos-latest
-            go: '1.22.x'
+        # the previous release (now 1.26, the go.mod minimum) and the latest
+        go: [oldstable, stable]
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.os }}, Go ${{ matrix.go }}
     steps:
