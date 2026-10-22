@@ -82,16 +82,61 @@ type StoreOptions struct {
 // counts every reply line, the status line included, and closes after N of them when the reply
 // is longer (0 = close before writing anything). A Hang step holds its connection: the faults
 // no longer apply after its reply.
+//
+// The faults apply in this order: Delay; OverrideLine, else Override; LongLine;
+// DropInMultiline; then the reply is written, through Drip when set, and Endless goes on from
+// there. OverrideLine is keyed by the whole client line, normalised as the command upper-cased
+// and the arguments as sent, joined by single spaces ("ARTICLE 2", "OVER 11-20",
+// "ARTICLE <a@b>"); New and Start normalise its keys the same way. Drip and Endless are bounded
+// by Options.Deadline like every server-side wait: after it the connection is closed.
 type Faults struct {
 	Delay           map[string]time.Duration // command → sleep before its reply
 	CloseAfter      int                      // >0: close the connection after this many commands
 	Override        map[string][]string      // command → reply lines written instead of the normal reply
 	DropInMultiline map[string]int           // command → close the connection after this many lines of its multi-line reply
+
+	// OverrideLine is Override for one client line: "ARTICLE 2" → {"430 No such article"}
+	// answers only that article, e.g. one 430 in a pipeline. It wins over Override.
+	OverrideLine map[string][]string
+	// Drip writes the reply one byte at a time with this pause between bytes: a slow server
+	// that never goes quiet for long, which a per-read timeout does not catch.
+	Drip map[string]time.Duration
+	// Endless writes the reply without its "." terminator and then filler lines ("<n> endless")
+	// until the client closes, the server is closed or the Deadline passes: a never-ending
+	// response. The connection is closed after it.
+	Endless map[string]bool
+	// LongLine inserts one line of that many "x" bytes after the status line of the reply: an
+	// overlong line, in a multi-line reply as part of its block.
+	LongLine map[string]int
 }
 
 // clone returns a deep copy of f (nil maps stay nil).
 func (f Faults) clone() Faults {
 	out := Faults{CloseAfter: f.CloseAfter}
+	if f.OverrideLine != nil {
+		out.OverrideLine = make(map[string][]string, len(f.OverrideLine))
+		for k, v := range f.OverrideLine {
+			out.OverrideLine[lineKey(k)] = append([]string(nil), v...)
+		}
+	}
+	if f.Drip != nil {
+		out.Drip = make(map[string]time.Duration, len(f.Drip))
+		for k, v := range f.Drip {
+			out.Drip[k] = v
+		}
+	}
+	if f.Endless != nil {
+		out.Endless = make(map[string]bool, len(f.Endless))
+		for k, v := range f.Endless {
+			out.Endless[k] = v
+		}
+	}
+	if f.LongLine != nil {
+		out.LongLine = make(map[string]int, len(f.LongLine))
+		for k, v := range f.LongLine {
+			out.LongLine[k] = v
+		}
+	}
 	if f.Delay != nil {
 		out.Delay = make(map[string]time.Duration, len(f.Delay))
 		for k, v := range f.Delay {
@@ -308,7 +353,7 @@ func (s *Server) runScript(c *Conn) {
 		if st.Delay > 0 && !c.sleep(st.Delay) {
 			return
 		}
-		if !c.writeReply(command(line), st.Reply...) {
+		if !c.writeReply(line, st.Reply...) {
 			return
 		}
 		if st.Hang {

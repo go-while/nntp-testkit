@@ -583,3 +583,107 @@ func TestWildmat(t *testing.T) {
 		}
 	}
 }
+
+// OverrideLine answers one client line, here one article of a pipeline; it wins over Override
+// and its keys are normalised.
+func TestFaultOverrideLine(t *testing.T) {
+	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{
+		OverrideLine: map[string][]string{"article  2": {"430 No such article"}, "HEAD 1": {"503 head override"}},
+		Override:     map[string][]string{"HEAD": {"502 any head"}},
+	})
+	wantCode(t, c, "GROUP alt.test", 211)
+	if err := c.Send("ARTICLE 1\r\nARTICLE 2\r\nARTICLE 3\r\nARTICLE <a2@x>\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{220, 430, 220, 220} {
+		line := wantStatus(t, c, want)
+		if want == 220 {
+			c.ReadDotLines()
+		} else if line != "430 No such article" {
+			t.Errorf("ARTICLE 2: %q", line)
+		}
+	}
+	wantCode(t, c, "HEAD 1", 503)
+	wantCode(t, c, "HEAD 2", 502)
+}
+
+// Drip writes the reply a byte at a time; the next reply is normal, and a drip past the
+// Deadline closes the connection.
+func TestFaultDrip(t *testing.T) {
+	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{Drip: map[string]time.Duration{"DATE": 10 * time.Millisecond}})
+	start := time.Now()
+	line := wantCode(t, c, "DATE", 111)
+	if took := time.Since(start); took < 150*time.Millisecond || len(line) != 18 {
+		t.Errorf("DATE %q in %v, want 18 bytes dripped over 190ms", line, took)
+	}
+	start = time.Now()
+	wantCode(t, c, "MODE READER", 200)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("MODE READER after a drip took %v", took)
+	}
+
+	s := New(t, Options{Store: testStore(), Deadline: 100 * time.Millisecond,
+		Faults: Faults{Drip: map[string]time.Duration{"HELP": 20 * time.Millisecond}}})
+	c2 := client.Dial(t, s.Addr())
+	c2.Strict = false
+	if err := c2.Send("HELP\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	for {
+		if _, err := c2.ReadLine(); err != nil {
+			break
+		}
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("drip past the Deadline: closed after %v", took)
+	}
+}
+
+// Endless never ends its reply: the client reads filler lines until it gives up; the server
+// lets go of the connection when the client closes, or at the Deadline.
+func TestFaultEndless(t *testing.T) {
+	s, c := storeServer(t, testStore(), StoreOptions{}, Faults{Endless: map[string]bool{"OVER": true}})
+	wantCode(t, c, "GROUP alt.test", 211)
+	wantCode(t, c, "OVER 1-3", 224)
+	for i := range 3 {
+		if l, err := c.ReadLine(); err != nil || !strings.HasPrefix(l, strconv.Itoa(i+1)+"\t") {
+			t.Fatalf("overview line %d: %q, %v", i+1, l, err)
+		}
+	}
+	for i := 1; i <= 20000; i++ {
+		l, err := c.ReadLine()
+		if err != nil || l != strconv.Itoa(i)+" endless" {
+			t.Fatalf("filler %d: %q, %v", i, l, err)
+		}
+	}
+	c.Close()
+	s.WaitOpen(t, 0, 5*time.Second)
+
+	s2 := New(t, Options{Store: testStore(), Deadline: 100 * time.Millisecond, Faults: Faults{Endless: map[string]bool{"DATE": true}}})
+	c2 := client.Dial(t, s2.Addr())
+	if err := c2.Send("DATE\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	n := 0
+	for ; ; n++ {
+		if _, err := c2.ReadLine(); err != nil {
+			break
+		}
+	}
+	if took := time.Since(start); n < 2 || took > 3*time.Second {
+		t.Errorf("endless DATE: %d lines, ended after %v", n, took)
+	}
+}
+
+// LongLine puts one overlong line after the status line, inside the dot block.
+func TestFaultLongLine(t *testing.T) {
+	const n = 2 << 20
+	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{LongLine: map[string]int{"ARTICLE": n}})
+	wantCode(t, c, "GROUP alt.test", 211)
+	_, lines := wantBlock(t, c, "ARTICLE 1", 220)
+	if len(lines) < 2 || len(lines[0]) != n || strings.Trim(lines[0], "x") != "" || lines[1] != "Subject: one" {
+		t.Errorf("first lines: %d bytes, then %q", len(lines[0]), lines[1:2])
+	}
+}

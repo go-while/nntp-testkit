@@ -104,9 +104,17 @@
 //		CloseAfter      int                      // >0: close the connection after this many commands
 //		Override        map[string][]string      // command → reply lines written instead of the normal reply
 //		DropInMultiline map[string]int           // command → close the connection after this many lines of its multi-line reply
+//		OverrideLine    map[string][]string      // client line ("ARTICLE 2") → reply lines; wins over Override
+//		Drip            map[string]time.Duration // command → write its reply one byte at a time, this pause between bytes
+//		Endless         map[string]bool          // command → reply without terminator, then "<n> endless" lines until close or Deadline
+//		LongLine        map[string]int           // command → one line of N "x" bytes after the status line
 //	}
-//	// Keys are upper-cased command names ("ARTICLE"); the hooks apply in Store mode and in Script
-//	// mode (there: only to a matched step's reply). DropInMultiline counts the status line; 0
-//	// closes before writing anything. CloseAfter counts every client line, mismatches included.
+//	// Keys are upper-cased command names ("ARTICLE"), OverrideLine's the whole client line
+//	// normalised (command upper-cased, arguments joined by single spaces); the hooks apply in
+//	// Store mode and in Script mode (there: only to a matched step's reply), in this order:
+//	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
+//	// then Endless. DropInMultiline counts the status line; 0 closes before writing anything.
+//	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
+//	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
 package fakeserver

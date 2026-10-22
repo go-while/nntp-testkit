@@ -2,6 +2,7 @@ package fakeserver
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -32,6 +33,17 @@ func command(line string) string {
 		return ""
 	}
 	return strings.ToUpper(f[0])
+}
+
+// lineKey is the key of Faults.OverrideLine for a client line: the command upper-cased and the
+// arguments as sent, joined by single spaces.
+func lineKey(line string) string {
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return ""
+	}
+	f[0] = strings.ToUpper(f[0])
+	return strings.Join(f, " ")
 }
 
 // ReadLine reads one client line (CRLF or LF stripped), records it in Lines() and counts its
@@ -150,13 +162,28 @@ func (c *Conn) faultDelay(cmd string) bool {
 	return c.sleep(d)
 }
 
-// faultReply applies Faults.Override and Faults.DropInMultiline for cmd to lines: it returns
-// the lines to write and drop >= 0 when the connection must be closed after writing them (the
-// reply was cut), else drop == -1.
-func (c *Conn) faultReply(cmd string, lines []string) (out []string, drop int) {
+// override returns the Faults.OverrideLine reply for the client line, else the Faults.Override
+// reply for its command; ok is false when neither is set.
+func (c *Conn) override(line string) (lines []string, ok bool) {
 	f := c.s.o.Faults
-	if o, ok := f.Override[cmd]; ok {
+	if o, ok := f.OverrideLine[lineKey(line)]; ok {
+		return o, true
+	}
+	o, ok := f.Override[command(line)]
+	return o, ok
+}
+
+// faultReply applies Faults.OverrideLine or Override, LongLine and DropInMultiline for the
+// client line to lines: it returns the lines to write and drop >= 0 when the connection must be
+// closed after writing them (the reply was cut), else drop == -1.
+func (c *Conn) faultReply(line string, lines []string) (out []string, drop int) {
+	f := c.s.o.Faults
+	cmd := command(line)
+	if o, ok := c.override(line); ok {
 		lines = o
+	}
+	if n, ok := f.LongLine[cmd]; ok && n > 0 && len(lines) > 0 {
+		lines = append([]string{lines[0], strings.Repeat("x", n)}, lines[1:]...)
 	}
 	if n, ok := f.DropInMultiline[cmd]; ok && n >= 0 && len(lines) > n {
 		return lines[:n], n
@@ -164,21 +191,71 @@ func (c *Conn) faultReply(cmd string, lines []string) (out []string, drop int) {
 	return lines, -1
 }
 
-// writeReply writes the reply to cmd with the Faults applied: Delay, then Override, then
-// DropInMultiline. An empty reply writes nothing. It returns false when the caller must stop
-// serving the connection: the server closed during the delay, a write error, or a reply cut by
-// DropInMultiline.
-func (c *Conn) writeReply(cmd string, lines ...string) bool {
+// writeReply writes the reply to the client line with the Faults applied (see Faults for the
+// order). An empty reply writes nothing. It returns false when the caller must stop serving
+// the connection: the server closed during the delay, a write error, a reply cut by
+// DropInMultiline, a Drip that ran past the Deadline, or an Endless reply.
+func (c *Conn) writeReply(line string, lines ...string) bool {
+	cmd := command(line)
 	if !c.faultDelay(cmd) {
 		return false
 	}
-	lines, drop := c.faultReply(cmd, lines)
-	if len(lines) > 0 {
-		if err := c.WriteLines(lines...); err != nil {
-			return false
+	lines, drop := c.faultReply(line, lines)
+	f := c.s.o.Faults
+	endless := f.Endless[cmd]
+	if endless && len(lines) > 0 && lines[len(lines)-1] == "." {
+		lines = lines[:len(lines)-1]
+	}
+	drip := f.Drip[cmd]
+	if drip > 0 || endless {
+		// bounded like every server-side wait; cleared again after this reply
+		_ = c.conn.SetWriteDeadline(time.Now().Add(c.s.deadline))
+		defer c.conn.SetWriteDeadline(time.Time{})
+	}
+	w := c.writer(drip)
+	if len(lines) > 0 && !w(joinCRLF(lines)) {
+		return false
+	}
+	if endless {
+		for n := 1; ; n++ {
+			if !w(joinCRLF([]string{fmt.Sprintf("%d endless", n)})) {
+				return false
+			}
 		}
 	}
 	return drop < 0
+}
+
+func joinCRLF(lines []string) []byte {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString("\r\n")
+	}
+	return []byte(b.String())
+}
+
+// writer returns a function that writes p to the client and reports whether it may go on: at
+// once, or with Faults.Drip, one byte at a time with drip between them, for at most the
+// server's Deadline from now. writeReply sets a write deadline for Drip and Endless, so a
+// client that stops reading cannot block them for longer; a closed server stops them too.
+func (c *Conn) writer(drip time.Duration) func(p []byte) bool {
+	end := time.Now().Add(c.s.deadline)
+	return func(p []byte) bool {
+		if drip <= 0 {
+			_, err := c.conn.Write(p)
+			return err == nil
+		}
+		for _, b := range p {
+			if _, err := c.conn.Write([]byte{b}); err != nil {
+				return false
+			}
+			if time.Now().After(end) || !c.sleep(drip) {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // closeDue reports whether Faults.CloseAfter is reached: this connection has read that many

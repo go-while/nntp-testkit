@@ -563,3 +563,18 @@ func TestStorePrecedence(t *testing.T) {
 		t.Errorf("NoGreeting Store mode wrote: %v", err)
 	}
 }
+
+// The new faults apply to the Reply of a matched step in Script mode too.
+func TestFaultsScriptPerLine(t *testing.T) {
+	s := New(t, Options{
+		Script: []Step{{Expect: `(?i)STAT .*`, Reply: []string{"223 1 <a@b>"}}, {Expect: `(?i)STAT .*`, Reply: []string{"223 2 <c@d>"}}, {Expect: `LIST`, Reply: []string{"215 list", "a 1 1 y", "."}}},
+		Faults: Faults{OverrideLine: map[string][]string{"STAT 2": {"423 no such number"}}, LongLine: map[string]int{"LIST": 100}},
+	})
+	c := client.Dial(t, s.Addr())
+	wantCode(t, c, "STAT 1", 223)
+	wantCode(t, c, "stat 2", 423)
+	wantCode(t, c, "LIST", 215)
+	if lines := c.ReadDotLines(); len(lines) != 2 || lines[0] != strings.Repeat("x", 100) || lines[1] != "a 1 1 y" {
+		t.Errorf("LIST block %q", lines)
+	}
+}

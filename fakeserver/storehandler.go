@@ -110,11 +110,11 @@ func (h *storeConn) serve() {
 		reply, act := h.dispatch(cmd, args)
 		switch act {
 		case actPost:
-			if !h.post(cmd) {
+			if !h.post(line) {
 				return
 			}
 		default:
-			if !h.c.writeReply(cmd, reply...) || act == actQuit {
+			if !h.c.writeReply(line, reply...) || act == actQuit {
 				return
 			}
 		}
@@ -540,11 +540,11 @@ func (h *storeConn) newgroups(args []string) []string {
 
 // post runs the POST exchange after a 340-able POST: it writes the first reply through the
 // Faults, reads and files the article and writes 240 or 441. False ends the connection.
-func (h *storeConn) post(cmd string) bool {
-	if !h.c.writeReply(cmd, "340 Send article to be posted") {
+func (h *storeConn) post(line string) bool {
+	if !h.c.writeReply(line, "340 Send article to be posted") {
 		return false
 	}
-	if ov, ok := h.c.s.o.Faults.Override[cmd]; ok && (len(ov) == 0 || !strings.HasPrefix(ov[0], "340")) {
+	if ov, ok := h.c.override(line); ok && (len(ov) == 0 || !strings.HasPrefix(ov[0], "340")) {
 		return true // the overridden first reply was final: no article follows
 	}
 	wire, err := h.c.ReadDotBlock()

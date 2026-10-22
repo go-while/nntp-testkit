@@ -15,8 +15,9 @@ and the fake upstream talk to it). The kit never contacts a host a test did not 
 go get github.com/go-while/nntp-testkit
 ```
 
-Not published yet: until the module is on GitHub and tagged, use a `replace` directive to a local
-checkout, e.g. `replace github.com/go-while/nntp-testkit => ../nntp-testkit`.
+The module is on GitHub but not tagged yet: `go get github.com/go-while/nntp-testkit@main` gives a
+pseudo-version. For local work on the kit itself, a `replace` directive to a checkout works, e.g.
+`replace github.com/go-while/nntp-testkit => ../nntp-testkit`.
 
 ## Hang guard
 
@@ -124,6 +125,14 @@ maps.
 | `CloseAfter int` | close the connection after the reply to the N-th client line |
 | `Override map[string][]string` | write these reply lines instead of the normal reply |
 | `DropInMultiline map[string]int` | close after N lines of that command's reply (status line counted; 0 = before anything) |
+| `OverrideLine map[string][]string` | `Override` for one client line, e.g. `"ARTICLE 2"`: one 430 in a pipeline; the key is the command upper-cased and the arguments joined by single spaces; wins over `Override` |
+| `Drip map[string]time.Duration` | write the reply one byte at a time with this pause between bytes: a slow server that a per-read timeout never sees as stalled |
+| `Endless map[string]bool` | write the reply without its `.` terminator, then `<n> endless` lines until the client closes, the server is closed or the Deadline passes; then close |
+| `LongLine map[string]int` | insert one line of N `x` bytes after the status line (in a multi-line reply: as its first block line) |
+
+The faults apply in this order: `Delay`; `OverrideLine`, else `Override`; `LongLine`;
+`DropInMultiline`; then the write, through `Drip` when set; then `Endless`. `Drip` and `Endless`
+are bounded by the Deadline like every server-side wait.
 
 `Count(cmd)` and `Counts()` count the upper-cased first word of every client line read through
 `Conn.ReadLine`, in all modes and on all connections (dot-block payload lines are not counted).
