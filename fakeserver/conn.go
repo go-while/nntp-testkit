@@ -19,9 +19,16 @@ type Conn struct {
 	raw  net.Conn // the accepted TCP conn
 	conn net.Conn // raw, or the TLS server conn on top of it
 	r    *bufio.Reader
-	gone bool // guarded by s.mu: counted out of Open()
-	cmds int  // client lines read with ReadLine on this conn (Faults.CloseAfter)
+	gone bool           // guarded by s.mu: counted out of Open()
+	cmds int            // client lines read with ReadLine on this conn (Faults.CloseAfter)
+	id   int            // accept order, from 1 (Conn.ID)
+	seen map[string]int // commands read on this conn (Faults.OverrideFrom)
+	used map[string]int // overrides applied on this conn (Faults.OverrideTimes)
 }
+
+// ID returns the connection's number in accept order, starting at 1 (connections rejected by
+// Options.MaxConns count too). StoreOptions.GroupNumbers gets it.
+func (c *Conn) ID() int { return c.id }
 
 func newReader(c net.Conn) *bufio.Reader { return bufio.NewReaderSize(c, readerSize) }
 
@@ -54,6 +61,10 @@ func (c *Conn) ReadLine() (string, error) {
 		return "", err
 	}
 	c.cmds++
+	if c.seen == nil {
+		c.seen = make(map[string]int)
+	}
+	c.seen[command(line)]++
 	c.s.mu.Lock()
 	c.s.lines = append(c.s.lines, line)
 	c.s.counts[command(line)]++
@@ -166,10 +177,23 @@ func (c *Conn) faultDelay(cmd string) bool {
 // reply for its command; ok is false when neither is set.
 func (c *Conn) override(line string) (lines []string, ok bool) {
 	f := c.s.o.Faults
-	if o, ok := f.OverrideLine[lineKey(line)]; ok {
-		return o, true
+	cmd := command(line)
+	if from, set := f.OverrideFrom[cmd]; set && c.seen[cmd] < from {
+		return nil, false
 	}
-	o, ok := f.Override[command(line)]
+	if n, set := f.OverrideTimes[cmd]; set && c.used[cmd] >= n {
+		return nil, false
+	}
+	o, ok := f.OverrideLine[lineKey(line)]
+	if !ok {
+		o, ok = f.Override[cmd]
+	}
+	if ok && f.OverrideTimes != nil {
+		if c.used == nil {
+			c.used = make(map[string]int)
+		}
+		c.used[cmd]++
+	}
 	return o, ok
 }
 
@@ -207,13 +231,24 @@ func (c *Conn) writeReply(line string, lines ...string) bool {
 		lines = lines[:len(lines)-1]
 	}
 	drip := f.Drip[cmd]
-	if drip > 0 || endless {
+	pause := f.LineDelay[cmd]
+	if drip > 0 || endless || pause > 0 {
 		// bounded like every server-side wait; cleared again after this reply
 		_ = c.conn.SetWriteDeadline(time.Now().Add(c.s.deadline))
 		defer c.conn.SetWriteDeadline(time.Time{})
 	}
 	w := c.writer(drip)
-	if len(lines) > 0 && !w(joinCRLF(lines)) {
+	if pause > 0 {
+		end := time.Now().Add(c.s.deadline)
+		for i, l := range lines {
+			if i > 0 && (time.Now().After(end) || !c.sleep(pause)) {
+				return false
+			}
+			if !w(joinCRLF([]string{l})) {
+				return false
+			}
+		}
+	} else if len(lines) > 0 && !w(joinCRLF(lines)) {
 		return false
 	}
 	if endless {

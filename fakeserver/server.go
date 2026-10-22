@@ -3,6 +3,7 @@ package fakeserver
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"slices"
@@ -40,6 +41,11 @@ type Options struct {
 	StoreOpts  StoreOptions  // options of the store handler
 	Faults     Faults        // fault hooks of Store and Script mode; copied by New/Start
 	Deadline   time.Duration // hang guard; 0 = testkit.Deadline()
+
+	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
+	// closed, like a provider's per-account limit. It counts in Accepted but never in Open.
+	MaxConns         int
+	MaxConnsGreeting string // default "502 Too many connections"
 }
 
 // Options.Deadline bounds exactly: the polls of WaitOpen (d is raised to it) and WaitLines, the
@@ -68,6 +74,30 @@ type StoreOptions struct {
 	User, Pass  string   // non-empty: AUTHINFO USER/PASS required (POST before auth → 480)
 	ReaderOnly  bool     // no posting
 	OverviewFmt []string // LIST OVERVIEW.FMT lines; empty = the handler's default
+
+	// GroupNumbers changes the numbers that GROUP, LISTGROUP and LIST ACTIVE report for a group,
+	// per connection (conn is Conn.ID): e.g. a lagging frontend of a server farm (a lower High on
+	// some connections), "211 0 0 0" for an empty group, or Store.HighestExisting. It only
+	// changes what is reported; the articles served stay the stored ones.
+	GroupNumbers func(conn int, g Group) Group
+
+	// ListgroupRange is how LISTGROUP treats its range argument: "" as RFC 3977 does; "reject"
+	// answers 501 to the range form (RFC 977/2980 servers); "ignore" lists the whole group.
+	ListgroupRange string
+
+	// NoOver and NoXover make OVER or XOVER an unknown command (500), like servers that have
+	// only one of them; NoOver also drops "OVER MSGID" from CAPABILITIES.
+	NoOver, NoXover bool
+
+	// EmptyOverReply replaces the 423 that OVER/XOVER answer for a range without articles,
+	// e.g. {"420 No article(s) selected"} (older servers) or {"224 Overview follows", "."}.
+	EmptyOverReply []string
+
+	// MaxOverRange > 0 caps the size of one OVER/XOVER range (an open range ends at High):
+	// a larger range gets OverRangeTooLarge when set (e.g. {"501 Range too large"}), else the
+	// records of its first MaxOverRange numbers only, as providers that truncate do.
+	MaxOverRange      int64
+	OverRangeTooLarge []string
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store
@@ -108,11 +138,41 @@ type Faults struct {
 	// LongLine inserts one line of that many "x" bytes after the status line of the reply: an
 	// overlong line, in a multi-line reply as part of its block.
 	LongLine map[string]int
+	// LineDelay writes the reply one line at a time with this pause between lines: a slow
+	// server on a large reply (OVER of many records), bounded by the Deadline like Drip.
+	LineDelay map[string]time.Duration
+	// OverrideFrom makes Override and OverrideLine of a command apply only from its N-th use
+	// on a connection (counted per connection, 1 = from the first): the reply changes in the
+	// middle of a session, e.g. "OVER" → 2 with Override "OVER" → {"480 Authentication
+	// required"} (a login that expired) or {"502 Access denied"}.
+	OverrideFrom map[string]int
+	// OverrideTimes limits Override and OverrideLine of a command to N replies per connection
+	// (counted from OverrideFrom on); after them the command gets its normal reply again: e.g.
+	// one 480 that a client answers with AUTHINFO and then retries.
+	OverrideTimes map[string]int
 }
 
 // clone returns a deep copy of f (nil maps stay nil).
 func (f Faults) clone() Faults {
 	out := Faults{CloseAfter: f.CloseAfter}
+	if f.LineDelay != nil {
+		out.LineDelay = make(map[string]time.Duration, len(f.LineDelay))
+		for k, v := range f.LineDelay {
+			out.LineDelay[k] = v
+		}
+	}
+	if f.OverrideTimes != nil {
+		out.OverrideTimes = make(map[string]int, len(f.OverrideTimes))
+		for k, v := range f.OverrideTimes {
+			out.OverrideTimes[k] = v
+		}
+	}
+	if f.OverrideFrom != nil {
+		out.OverrideFrom = make(map[string]int, len(f.OverrideFrom))
+		for k, v := range f.OverrideFrom {
+			out.OverrideFrom[k] = v
+		}
+	}
 	if f.OverrideLine != nil {
 		out.OverrideLine = make(map[string][]string, len(f.OverrideLine))
 		for k, v := range f.OverrideLine {
@@ -283,18 +343,42 @@ func (s *Server) acceptLoop() {
 			_ = c.Close()
 			return
 		}
-		s.conns[c] = struct{}{}
 		s.accepted++
+		id := s.accepted
+		if s.o.MaxConns > 0 && s.open >= s.o.MaxConns {
+			s.wg.Add(1)
+			s.mu.Unlock()
+			go s.reject(c)
+			continue
+		}
+		s.conns[c] = struct{}{}
 		s.open++
 		s.wg.Add(1)
 		s.mu.Unlock()
-		go s.serve(c)
+		go s.serve(c, id)
 	}
 }
 
-func (s *Server) serve(raw net.Conn) {
+// reject answers a connection above MaxConns with MaxConnsGreeting and closes it.
+func (s *Server) reject(raw net.Conn) {
 	defer s.wg.Done()
-	c := &Conn{s: s, raw: raw, conn: raw}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(s.deadline)) // a TLS handshake reads too
+	if s.o.TLS != nil {
+		tc := tls.Server(raw, s.o.TLS)
+		defer tc.Close()
+		raw = tc
+	}
+	g := s.o.MaxConnsGreeting
+	if g == "" {
+		g = "502 Too many connections"
+	}
+	_, _ = io.WriteString(raw, g+"\r\n")
+}
+
+func (s *Server) serve(raw net.Conn, id int) {
+	defer s.wg.Done()
+	c := &Conn{s: s, raw: raw, conn: raw, id: id}
 	defer c.finish()
 	if s.o.RawStall {
 		buf := make([]byte, 4096)

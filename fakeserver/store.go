@@ -23,9 +23,11 @@ type Article struct {
 	Date      time.Time
 }
 
-// Group is the state of one newsgroup. An empty group has Low 1, High 0 and Count 0; otherwise
-// Low is the lowest existing number, High the highest number ever assigned and Count the number
-// of articles (holes from explicit numbers are not counted). Posting is true unless changed with
+// Group is the state of one newsgroup. A new group has Low 1, High 0 and Count 0; otherwise
+// Low is the lowest existing number, High the highest number ever assigned (a high-water mark
+// like INN's: removing articles does not lower it) and Count the number of articles (holes from
+// explicit numbers are not counted). A group whose articles were all removed has Low High+1 and
+// Count 0, as RFC 3977 6.1.1.2 recommends. Posting is true unless changed with
 // SetPosting (LIST ACTIVE "y"/"n"). Created is when the group was created (time.Now() unless set
 // with AddGroupAt), for NEWGROUPS.
 type Group struct {
@@ -175,6 +177,92 @@ func (st *Store) AddArticle(group string, a Article) int64 {
 	g.meta.High = max(g.meta.High, n)
 	st.byID[a.MessageID] = append(st.byID[a.MessageID], Location{Group: group, Number: n})
 	return n
+}
+
+// RemoveArticle removes article n from group, as expiry or a cancel on a real server does: the
+// number stays used (High is kept and AddArticle without a number does not reuse it; an explicit
+// number may refill it), Low and Count follow, and the location goes from ByMessageID. It
+// returns false when there is no such article.
+func (st *Store) RemoveArticle(group string, n int64) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	g, ok := st.groups[group]
+	if !ok {
+		return false
+	}
+	return st.removeLocked(group, g, n)
+}
+
+// Expire removes every article of group numbered below below (RemoveArticle each) and returns
+// how many it removed.
+func (st *Store) Expire(group string, below int64) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	g, ok := st.groups[group]
+	if !ok {
+		return 0
+	}
+	var gone []int64
+	for _, n := range g.nums {
+		if n >= below {
+			break
+		}
+		gone = append(gone, n)
+	}
+	for _, n := range gone {
+		st.removeLocked(group, g, n)
+	}
+	return len(gone)
+}
+
+// Cancel removes the article with message-id id from every group it is filed in and returns
+// how many locations it removed.
+func (st *Store) Cancel(id string) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	locs := slices.Clone(st.byID[id])
+	for _, l := range locs {
+		st.removeLocked(l.Group, st.groups[l.Group], l.Number)
+	}
+	return len(locs)
+}
+
+// removeLocked removes article n of g (named group). Callers hold st.mu.
+func (st *Store) removeLocked(group string, g *storeGroup, n int64) bool {
+	a, ok := g.articles[n]
+	if !ok {
+		return false
+	}
+	delete(g.articles, n)
+	if i, found := slices.BinarySearch(g.nums, n); found {
+		g.nums = slices.Delete(g.nums, i, i+1)
+	}
+	g.meta.Count = int64(len(g.nums))
+	if len(g.nums) > 0 {
+		g.meta.Low = g.nums[0]
+	} else {
+		g.meta.Low = g.meta.High + 1
+	}
+	locs := slices.DeleteFunc(st.byID[a.MessageID], func(l Location) bool { return l.Group == group && l.Number == n })
+	if len(locs) == 0 {
+		delete(st.byID, a.MessageID)
+	} else {
+		st.byID[a.MessageID] = locs
+	}
+	return true
+}
+
+// HighestExisting reports a group's High as its highest existing article number (Low-1 when
+// empty) instead of the high-water mark, like servers whose last number goes down when the
+// newest articles are cancelled or expire. Its signature fits StoreOptions.GroupNumbers:
+// GroupNumbers: st.HighestExisting.
+func (st *Store) HighestExisting(conn int, g Group) Group {
+	if nums := st.Numbers(g.Name); len(nums) > 0 {
+		g.High = nums[len(nums)-1]
+	} else {
+		g.High = g.Low - 1
+	}
+	return g
 }
 
 // Article returns a copy of article n of group.

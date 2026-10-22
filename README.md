@@ -79,22 +79,24 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | API | what |
 |---|---|
 | `New(tb, Options) *Server` / `Start(Options) (*Server, error)` | listen (default `127.0.0.1:0`) and serve; `New` registers `tb.Cleanup(Close)` |
-| `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration }` | server config |
+| `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration; MaxConns int; MaxConnsGreeting string }` | server config; `MaxConns` > 0: one more simultaneous connection gets `MaxConnsGreeting` (default `502 Too many connections`) and is closed |
 | `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
 | `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
 | `Accepted`, `Open`, `WaitOpen(tb, n, d)`, `WaitLines(tb, want)` | connection counts and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
-| `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server` | server side of one connection, for a Handler |
+| `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | streaming peer (RFC 4644): MODE STREAM, CHECK, TAKETHIS, AUTHINFO |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
 | `Article`, `ByMessageID`, `Group`, `Groups`, `Numbers`, `Overview`, `Next`, `Last` | lookups |
+| `RemoveArticle(group, n)`, `Expire(group, below)`, `Cancel(id)` | expiry and cancels: the high-water mark `High` is kept (numbers are not reused), `Low` and `Count` follow; an emptied group has `Low` = `High`+1 |
+| `HighestExisting(conn, Group) Group` | for `StoreOptions.GroupNumbers`: report the highest existing number as `High`, like servers whose last number goes down |
 | `AddPosted`, `Posted` | articles accepted by POST |
 | `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model |
-| `StoreHandler(*Store, StoreOptions) func(*Conn)`; `type StoreOptions struct { User, Pass string; ReaderOnly bool; OverviewFmt []string }` | RFC 3977 reader over a Store |
+| `StoreHandler(*Store, StoreOptions) func(*Conn)`; `type StoreOptions` | RFC 3977 reader over a Store; options below |
 | `DefaultGreeting`, `DefaultGreetingNoPost`, `DateLayout` | constants |
 
 Three modes, chosen per server:
@@ -109,6 +111,19 @@ Three modes, chosen per server:
   OVER/XOVER, NEXT/LAST, NEWGROUPS, DATE, POST, AUTHINFO USER/PASS, QUIT. `StoreOpts.User`/`Pass`
   require authentication (480 before it); `ReaderOnly` greets 201 (unless `Greeting` is set) and
   answers POST with 440.
+
+`StoreOptions` make the Store server behave like particular real servers:
+
+| field | effect |
+|---|---|
+| `User, Pass string` | require AUTHINFO USER/PASS (480 before it) |
+| `ReaderOnly bool` | greet 201, POST answers 440 |
+| `OverviewFmt []string` | the LIST OVERVIEW.FMT answer |
+| `GroupNumbers func(conn int, g Group) Group` | the numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection: a lagging frontend of a server farm (lower `High` on some connections), `211 0 0 0` for an empty group, or `st.HighestExisting`; the articles served stay the stored ones |
+| `ListgroupRange string` | `"reject"`: 501 for `LISTGROUP group range` (RFC 977/2980 servers); `"ignore"`: the whole group whatever the range |
+| `NoOver`, `NoXover bool` | that command is unknown (500); `NoOver` also drops `OVER MSGID` from CAPABILITIES |
+| `EmptyOverReply []string` | instead of 423 for a range without articles, e.g. `{"420 No article(s) selected"}` or `{"224 Overview follows", "."}` |
+| `MaxOverRange int64`, `OverRangeTooLarge []string` | cap one OVER/XOVER range (an open range ends at `High`): a larger range gets `OverRangeTooLarge`, or when that is nil the records of its first `MaxOverRange` numbers only |
 
 Precedence: `RawStall` wins over everything (accept TCP, never write). Otherwise the greeting is
 written unless `NoGreeting`; then `Handler` when set, else `Store` when set, else `Script`. With
@@ -128,10 +143,14 @@ maps.
 | `Drip map[string]time.Duration` | write the reply one byte at a time with this pause between bytes: a slow server that a per-read timeout never sees as stalled |
 | `Endless map[string]bool` | write the reply without its `.` terminator, then `<n> endless` lines until the client closes, the server is closed or the Deadline passes; then close |
 | `LongLine map[string]int` | insert one line of N `x` bytes after the status line (in a multi-line reply: as its first block line) |
+| `LineDelay map[string]time.Duration` | write the reply one line at a time with this pause between lines: a slow server on a large OVER |
+| `OverrideFrom map[string]int` | `Override`/`OverrideLine` of that command apply only from its N-th use on a connection: e.g. `"OVER": 2` with `Override` `"OVER": {"480 Authentication required"}`, a login that expires in the middle of a session |
+| `OverrideTimes map[string]int` | `Override`/`OverrideLine` of that command apply at most N times per connection, then the normal reply: one 480 that the client answers with AUTHINFO before it retries |
 
 The faults apply in this order: `Delay`; `OverrideLine`, else `Override`; `LongLine`;
-`DropInMultiline`; then the write, through `Drip` when set; then `Endless`. `Drip` and `Endless`
-are bounded by the Deadline like every server-side wait.
+`DropInMultiline`; then the write, through `Drip` when set and with `LineDelay` between lines;
+then `Endless`. `Drip`, `LineDelay` and `Endless` are bounded by the Deadline like every
+server-side wait.
 
 `Count(cmd)` and `Counts()` count the upper-cased first word of every client line read through
 `Conn.ReadLine`, in all modes and on all connections (dot-block payload lines are not counted).
