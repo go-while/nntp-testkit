@@ -138,6 +138,9 @@ var argCount = map[string][2]int{
 // dispatch answers one command; POST and QUIT are flagged for serve.
 func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	n, known := argCount[cmd]
+	if (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) {
+		known = false
+	}
 	if !known {
 		return []string{"500 Unknown command"}, actReply
 	}
@@ -189,7 +192,10 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 }
 
 func (h *storeConn) capabilities() []string {
-	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID"}
+	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT"}
+	if !h.o.NoOver {
+		out = append(out, "OVER MSGID")
+	}
 	if !h.o.ReaderOnly {
 		out = append(out, "POST")
 	}
@@ -247,7 +253,16 @@ func (h *storeConn) postingFlag(g Group) string {
 }
 
 func (h *storeConn) activeLine(g Group) string {
+	g = h.reported(g)
 	return fmt.Sprintf("%s %d %d %s", g.Name, g.High, g.Low, h.postingFlag(g))
+}
+
+// reported returns g with the numbers this connection reports (StoreOptions.GroupNumbers).
+func (h *storeConn) reported(g Group) Group {
+	if h.o.GroupNumbers != nil {
+		return h.o.GroupNumbers(h.c.ID(), g)
+	}
+	return g
 }
 
 func (h *storeConn) list(args []string) []string {
@@ -312,7 +327,7 @@ func (h *storeConn) groupCmd(name string) []string {
 	if !ok {
 		return []string{"411 No such newsgroup"}
 	}
-	return []string{groupLine(g)}
+	return []string{groupLine(h.reported(g))}
 }
 
 func (h *storeConn) listgroup(args []string) []string {
@@ -324,7 +339,10 @@ func (h *storeConn) listgroup(args []string) []string {
 		return []string{"412 No newsgroup selected"}
 	}
 	r := numRange{from: 1, open: true}
-	if len(args) > 1 {
+	if len(args) > 1 && h.o.ListgroupRange == "reject" {
+		return []string{"501 Syntax error"}
+	}
+	if len(args) > 1 && h.o.ListgroupRange != "ignore" {
 		var ok bool
 		if r, ok = parseRange(args[1]); !ok {
 			return []string{"501 Syntax error in range"}
@@ -334,7 +352,7 @@ func (h *storeConn) listgroup(args []string) []string {
 	if !ok {
 		return []string{"411 No such newsgroup"}
 	}
-	out := []string{groupLine(g) + " list follows"}
+	out := []string{groupLine(h.reported(g)) + " list follows"}
 	for _, n := range h.st.Numbers(name) {
 		if r.contains(n) {
 			out = append(out, strconv.FormatInt(n, 10))
@@ -460,13 +478,23 @@ func (h *storeConn) over(args []string) []string {
 		if !ok {
 			return []string{"501 Syntax error in range"}
 		}
-		switch {
-		case r.open:
-			arts = h.st.Overview(h.group, r.from, 0)
-		case r.to >= r.from && r.to > 0:
+		if r.open {
+			g, _ := h.st.Group(h.group)
+			r.to, r.open = max(g.High, 0), false
+		}
+		if lim := h.o.MaxOverRange; lim > 0 && r.to >= r.from && r.to-r.from >= lim {
+			if h.o.OverRangeTooLarge != nil {
+				return slices.Clone(h.o.OverRangeTooLarge)
+			}
+			r.to = r.from + lim - 1
+		}
+		if r.to >= r.from && r.to > 0 {
 			arts = h.st.Overview(h.group, r.from, r.to)
 		}
 		if len(arts) == 0 {
+			if h.o.EmptyOverReply != nil {
+				return slices.Clone(h.o.EmptyOverReply)
+			}
 			return []string{"423 No articles in that range"}
 		}
 	}

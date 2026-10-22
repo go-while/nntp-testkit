@@ -18,6 +18,8 @@
 //		StoreOpts  StoreOptions
 //		Faults     Faults        // apply in Script and Store mode (copied at start); an external Handler cannot use them
 //		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline; 0 = testkit.Deadline()
+//		MaxConns         int    // >0: one more simultaneous connection gets MaxConnsGreeting and is closed (counts in Accepted, never in Open)
+//		MaxConnsGreeting string // default "502 Too many connections"
 //	}
 //	// Precedence: RawStall wins over everything. Otherwise the greeting is written unless
 //	// NoGreeting; then Handler when set, else Store when set, else Script (with NoGreeting and
@@ -51,6 +53,7 @@
 //	func (c *Conn) ReadDotBlock() ([]string, error)  // raw wire lines up to "."; recorded in Articles()
 //	func (c *Conn) Raw() net.Conn                    // the TLS conn when TLS, else the TCP conn
 //	func (c *Conn) Server() *Server
+//	func (c *Conn) ID() int                          // accept order from 1 (rejected connections count too)
 //
 //	func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) // self-signed ECDSA cert for 127.0.0.1
 //
@@ -78,11 +81,25 @@
 //	func (st *Store) Posted() []Article
 //	func (st *Store) Next(group string, n int64) (int64, bool)          // next existing number above n
 //	func (st *Store) Last(group string, n int64) (int64, bool)          // previous existing number below n
+//	func (st *Store) RemoveArticle(group string, n int64) bool          // expiry/cancel: High is kept (not reused), Low/Count follow, the location leaves ByMessageID; an emptied group has Low High+1
+//	func (st *Store) Expire(group string, below int64) int              // RemoveArticle of every number below below
+//	func (st *Store) Cancel(id string) int                              // RemoveArticle of every location of id
+//	func (st *Store) HighestExisting(conn int, g Group) Group           // for StoreOptions.GroupNumbers: High = highest existing number (Low-1 when empty)
 //	func (a Article) Header(name string) string                         // first matching header value, case-insensitive, unfolded; "" when absent
 //	func (a Article) WithDefaults(group string) Article                 // copy with Message-ID, Newsgroups (when group != "") and Date headers added when missing
 //	const DateLayout = "Mon, 02 Jan 2006 15:04:05 -0700"
 //
-//	type StoreOptions struct { User, Pass string; ReaderOnly bool; OverviewFmt []string }
+//	type StoreOptions struct {
+//		User, Pass        string
+//		ReaderOnly        bool
+//		OverviewFmt       []string
+//		GroupNumbers      func(conn int, g Group) Group // numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection (lagging frontends, "211 0 0 0")
+//		ListgroupRange    string   // "" RFC 3977; "reject": 501 for the range form; "ignore": the whole group
+//		NoOver, NoXover   bool     // that command is unknown (500); NoOver drops "OVER MSGID" from CAPABILITIES
+//		EmptyOverReply    []string // instead of 423 for a range without articles
+//		MaxOverRange      int64    // >0: cap of one OVER/XOVER range (open ranges end at High)
+//		OverRangeTooLarge []string // reply to a larger range; nil = only its first MaxOverRange numbers
+//	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
 //	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST
 //	// unless ReaderOnly, AUTHINFO USER while auth is required, IMPLEMENTATION fakeserver), MODE
@@ -108,12 +125,15 @@
 //		Drip            map[string]time.Duration // command → write its reply one byte at a time, this pause between bytes
 //		Endless         map[string]bool          // command → reply without terminator, then "<n> endless" lines until close or Deadline
 //		LongLine        map[string]int           // command → one line of N "x" bytes after the status line
+//		LineDelay       map[string]time.Duration // command → write its reply one line at a time, this pause between lines
+//		OverrideFrom    map[string]int           // command → its Override/OverrideLine apply only from its N-th use on a connection
+//		OverrideTimes   map[string]int           // command → its Override/OverrideLine apply at most N times per connection
 //	}
 //	// Keys are upper-cased command names ("ARTICLE"), OverrideLine's the whole client line
 //	// normalised (command upper-cased, arguments joined by single spaces); the hooks apply in
 //	// Store mode and in Script mode (there: only to a matched step's reply), in this order:
 //	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
-//	// then Endless. DropInMultiline counts the status line; 0 closes before writing anything.
+//	// then Endless (LineDelay pauses between the lines of the write). DropInMultiline counts the status line; 0 closes before writing anything.
 //	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
 //	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
