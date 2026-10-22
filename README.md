@@ -15,9 +15,8 @@ and the fake upstream talk to it). The kit never contacts a host a test did not 
 go get github.com/go-while/nntp-testkit
 ```
 
-The module is on GitHub but not tagged yet: `go get github.com/go-while/nntp-testkit@main` gives a
-pseudo-version. For local work on the kit itself, a `replace` directive to a checkout works, e.g.
-`replace github.com/go-while/nntp-testkit => ../nntp-testkit`.
+Releases are tagged (`@latest`, or a version such as `@v0.3.0`). For local work on the kit itself,
+a `replace` directive to a checkout works, e.g. `replace github.com/go-while/nntp-testkit => ../nntp-testkit`.
 
 ## Hang guard
 
