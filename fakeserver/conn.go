@@ -24,6 +24,7 @@ type Conn struct {
 	id   int            // accept order, from 1 (Conn.ID)
 	seen map[string]int // commands read on this conn (Faults.OverrideFrom)
 	used map[string]int // overrides applied on this conn (Faults.OverrideTimes)
+	last string         // status line of the last reply written by writeReply (after the faults)
 }
 
 // ID returns the connection's number in accept order, starting at 1 (connections rejected by
@@ -225,6 +226,9 @@ func (c *Conn) writeReply(line string, lines ...string) bool {
 		return false
 	}
 	lines, drop := c.faultReply(line, lines)
+	if len(lines) > 0 {
+		c.last = lines[0]
+	}
 	f := c.s.o.Faults
 	endless := f.Endless[cmd]
 	if endless && len(lines) > 0 && lines[len(lines)-1] == "." {

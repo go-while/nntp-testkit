@@ -288,3 +288,29 @@ func TestFaultOverrideTimes(t *testing.T) {
 	wantBlock(t, c2, "XOVER 1-3", 224)
 	wantCode(t, c2, "XOVER 1-3", 480) // per connection
 }
+
+// TestStoreLoginDropped: a 480 from Faults.Override ends the login of an authenticated
+// connection, so AUTHINFO works again (not 502) and then the command is answered normally.
+func TestStoreLoginDropped(t *testing.T) {
+	f := Faults{
+		Override:      map[string][]string{"GROUP": {"480 Authentication required"}},
+		OverrideFrom:  map[string]int{"GROUP": 2},
+		OverrideTimes: map[string]int{"GROUP": 1},
+	}
+	_, c := storeServer(t, testStore(), StoreOptions{User: "u", Pass: "p"}, f)
+	wantCode(t, c, "AUTHINFO USER u", 381)
+	wantCode(t, c, "AUTHINFO PASS p", 281)
+	wantCode(t, c, "GROUP alt.test", 211)
+	wantCode(t, c, "GROUP alt.test", 480)
+	wantCode(t, c, "LIST ACTIVE", 480) // the login is gone
+	wantCode(t, c, "AUTHINFO USER u", 381)
+	wantCode(t, c, "AUTHINFO PASS p", 281)
+	wantCode(t, c, "GROUP alt.test", 211)
+	wantCode(t, c, "AUTHINFO USER u", 502) // logged in again
+
+	// without auth configured a 480 changes nothing
+	f2 := Faults{Override: map[string][]string{"GROUP": {"480 Authentication required"}}}
+	_, c2 := storeServer(t, testStore(), StoreOptions{}, f2)
+	wantCode(t, c2, "GROUP alt.test", 480)
+	wantBlock(t, c2, "LIST ACTIVE alt.test", 215)
+}

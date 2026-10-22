@@ -118,9 +118,20 @@ func (h *storeConn) serve() {
 				return
 			}
 		}
+		h.after480()
 		if h.c.closeDue() {
 			return
 		}
+	}
+}
+
+// after480 ends the login when the last reply was a 480, also one from Faults.Override: a
+// server that asks for authentication has dropped the login (a login that timed out), so it
+// takes AUTHINFO again instead of answering 502. Only for a connection that had logged in,
+// with User or Pass configured.
+func (h *storeConn) after480() {
+	if h.authed && strings.HasPrefix(h.c.last, "480") && (h.o.User != "" || h.o.Pass != "") {
+		h.authed, h.user, h.userSeen = false, "", false
 	}
 }
 

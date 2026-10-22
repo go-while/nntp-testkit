@@ -116,7 +116,7 @@ Three modes, chosen per server:
 
 | field | effect |
 |---|---|
-| `User, Pass string` | require AUTHINFO USER/PASS (480 before it) |
+| `User, Pass string` | require AUTHINFO USER/PASS (480 before it); a 480 written to a logged-in connection, also one from `Faults.Override`, ends the login, as a login that timed out |
 | `ReaderOnly bool` | greet 201, POST answers 440 |
 | `OverviewFmt []string` | the LIST OVERVIEW.FMT answer |
 | `GroupNumbers func(conn int, g Group) Group` | the numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection: a lagging frontend of a server farm (lower `High` on some connections), `211 0 0 0` for an empty group, or `st.HighestExisting`; the articles served stay the stored ones |

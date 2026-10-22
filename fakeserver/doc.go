@@ -111,7 +111,9 @@
 //	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
 //	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone
 //	// answers 281/481 when Pass is empty; 502 when not configured or done), QUIT (205).
-//	// When User or Pass is set every other command answers 480 until authenticated. Unknown
+//	// When User or Pass is set every other command answers 480 until authenticated; any 480
+//	// the handler writes to an authenticated connection (also one from Faults.Override) ends
+//	// its login, so AUTHINFO is taken again (a login that timed out). Unknown
 //	// command 500, bad arguments 501. Served headers: the stored Headers plus Message-ID,
 //	// Newsgroups (every group the article is filed in) and Date when missing. Faults apply to
 //	// every reply (for POST: to the 340).
