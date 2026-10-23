@@ -67,6 +67,7 @@ type Step struct {
 	Reply      []string      // lines written with CRLF; multi-line replies include their "." line
 	Hang       bool          // after the match (and ReadDot, Delay, Reply), never reply again; held until Close
 	CloseAfter bool          // close the connection after the reply
+	Compress   bool          // after the reply (e.g. "206 Compression active"), compress both directions (Conn.StartCompress)
 }
 
 // StoreOptions configures the store handler (Options.StoreOpts, StoreHandler).
@@ -111,6 +112,20 @@ type StoreOptions struct {
 	// that differs from the articles, e.g. a Message-ID that is not the one in the article's
 	// header (an overview database out of step with the spool).
 	OverviewFields func(conn int, group string, fields []string) []string
+
+	// Compress offers COMPRESS DEFLATE (RFC 8054): CAPABILITIES lists "COMPRESS DEFLATE"
+	// while compression is off (after authentication when it is required), and COMPRESS
+	// answers 206 and compresses both directions from the CRLF of the 206 on (Conn.StartCompress);
+	// 501 for a missing or syntactically invalid algorithm (names are case-sensitive:
+	// "deflate" is invalid), 502 once compression is active, 503 for another algorithm, 480
+	// before required authentication. AUTHINFO after it gets 502 (it is only taken before
+	// authentication, and COMPRESS needs that first). Off: COMPRESS is an unknown command (500).
+	Compress bool
+
+	// CompressOutputOnly offers COMPRESS like Compress (which need not be set too), but after
+	// the 206 only the server's output is deflated and the client's input is read without
+	// inflating it (Conn.StartCompressOutputOnly): a broken server, for client tests.
+	CompressOutputOnly bool
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store
@@ -132,6 +147,11 @@ type StoreOptions struct {
 // and the arguments as sent, joined by single spaces ("ARTICLE 2", "OVER 11-20",
 // "ARTICLE <a@b>"); New and Start normalise its keys the same way. Drip and Endless are bounded
 // by Options.Deadline like every server-side wait: after it the connection is closed.
+//
+// On a compressed connection (COMPRESS DEFLATE) every fault works on the inflated stream as
+// without compression: each write is deflated and sync-flushed, so a Drip byte or a
+// LineDelay line reaches the client on its own, and a reply cut by DropInMultiline or
+// CloseAfter ends at a flush.
 type Faults struct {
 	Delay           map[string]time.Duration // command → sleep before its reply
 	CloseAfter      int                      // >0: close the connection after this many commands
@@ -451,6 +471,9 @@ func (s *Server) runScript(c *Conn) {
 			return
 		}
 		if !c.writeReply(line, st.Reply...) {
+			return
+		}
+		if st.Compress && !c.Compressed() && c.StartCompress() != nil {
 			return
 		}
 		if st.Hang {

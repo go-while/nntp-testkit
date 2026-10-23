@@ -29,7 +29,7 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
@@ -44,11 +44,21 @@ func init() { storeHandler = StoreHandler }
 //	NEWNEWS wm d t [GMT] 230 message-ids of the articles in groups matching wm whose Arrived is at or after d t (date and time as NEWGROUPS); 501; 503 when a matching generated group spans more numbers than its limit
 //	DATE                111 yyyymmddhhmmss (UTC)
 //	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
+//	COMPRESS alg        only with Compress or CompressOutputOnly (else 500): 206, then both directions compressed (RFC 8054); 501 for a missing or invalid algorithm name; 502 when active; 503 for an algorithm other than DEFLATE
 //	QUIT                205, then the connection is closed
 //
 // With StoreOptions.User or Pass set, every command but CAPABILITIES, MODE, HELP, AUTHINFO, DATE
 // and QUIT answers 480 until AUTHINFO succeeds. An unknown command gets 500, a known one with a
 // wrong argument count or syntax 501. Ranges are "n", "n-" and "n-m".
+//
+// COMPRESS (RFC 8054) switches the connection to compression when the status line written
+// for it, after the Faults, is a 206 and compression is off; so Faults.Override "COMPRESS"
+// {"403 Unable to activate compression"} is a server that cannot compress, and {} one that
+// never answers. Once active, every reply and the Faults go through the compressor (each
+// write is sync-flushed) and Lines, Counts and Articles record the inflated client stream.
+// The handler has no STARTTLS (TLS is Options.TLS, from the first byte; crypto/tls has no
+// TLS-level compression), so the RFC's STARTTLS rules do not arise; MODE READER is still
+// answered after COMPRESS.
 //
 // A served article has the stored Headers plus the defaults of Article.WithDefaults (Message-ID,
 // Date, and Newsgroups = every group it is filed in) when missing; head and body lines are
@@ -125,6 +135,9 @@ func (h *storeConn) serve() {
 			if !h.c.writeReply(line, reply...) || act == actQuit {
 				return
 			}
+			if !h.c.compressAfter(cmd, h.c.last, h.o.CompressOutputOnly) {
+				return
+			}
 		}
 		h.after480()
 		if h.c.closeDue() {
@@ -151,7 +164,7 @@ var argCount = map[string][2]int{
 	"CAPABILITIES": {0, 1}, "MODE": {1, 1}, "HELP": {0, 0}, "AUTHINFO": {2, -1}, "LIST": {0, 2},
 	"GROUP": {1, 1}, "LISTGROUP": {0, 2}, "ARTICLE": {0, 1}, "HEAD": {0, 1}, "BODY": {0, 1}, "STAT": {0, 1},
 	"NEXT": {0, 0}, "LAST": {0, 0}, "OVER": {0, 1}, "XOVER": {0, 1}, "NEWGROUPS": {2, 3}, "NEWNEWS": {3, 4}, "DATE": {0, 0},
-	"POST": {0, 0}, "QUIT": {0, 0},
+	"POST": {0, 0}, "QUIT": {0, 0}, "COMPRESS": {1, 1},
 }
 
 // dispatch answers one command; POST and QUIT are flagged for serve.
@@ -199,6 +212,8 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 		return h.newnews(args), actReply
 	case "DATE":
 		return []string{"111 " + time.Now().UTC().Format("20060102150405")}, actReply
+	case "COMPRESS":
+		return []string{compressReply(args, h.c.Compressed())}, actReply
 	case "POST":
 		if h.o.ReaderOnly {
 			return []string{"440 Posting not permitted"}, actReply
@@ -209,9 +224,11 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	}
 }
 
-// disabled reports whether a known command is made unknown by NoOver, NoXover or NoNewnews.
+// disabled reports whether a known command is made unknown by NoOver, NoXover or NoNewnews,
+// or is COMPRESS without Compress or CompressOutputOnly.
 func (h *storeConn) disabled(cmd string) bool {
-	return (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) || (cmd == "NEWNEWS" && h.o.NoNewnews)
+	return (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) || (cmd == "NEWNEWS" && h.o.NoNewnews) ||
+		(cmd == "COMPRESS" && !h.o.Compress && !h.o.CompressOutputOnly)
 }
 
 func (h *storeConn) capabilities() []string {
@@ -227,6 +244,9 @@ func (h *storeConn) capabilities() []string {
 	}
 	if !h.authed {
 		out = append(out, "AUTHINFO USER")
+	}
+	if h.authed && !h.disabled("COMPRESS") && !h.c.Compressed() {
+		out = append(out, "COMPRESS DEFLATE")
 	}
 	return append(out, "IMPLEMENTATION fakeserver", ".")
 }

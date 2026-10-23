@@ -25,10 +25,11 @@
 //	// NoGreeting; then Handler when set, else Store when set, else Script (with NoGreeting and
 //	// no Handler the Script/Store is not run: lines are only recorded).
 //
-//	type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter bool }
+//	type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }
 //	// Semantics as go-pugleaf's cliFakeStep: Expect is an anchored regexp ("" = any line); a
 //	// non-matching line gets "500 fakeserver: unexpected <line>" and is recorded in Mismatches();
-//	// after the last step the connection keeps reading and recording until EOF.
+//	// after the last step the connection keeps reading and recording until EOF. Compress
+//	// switches the connection to COMPRESS DEFLATE after the step's reply (Conn.StartCompress).
 //
 //	type Server struct { ... }
 //	func New(tb testing.TB, o Options) *Server       // listens, serves, tb.Cleanup(Close); fails tb on listen error
@@ -51,7 +52,10 @@
 //	func (c *Conn) ReadLine() (string, error)        // CRLF/LF stripped; records the line and counts the command
 //	func (c *Conn) WriteLines(lines ...string) error // each + CRLF
 //	func (c *Conn) ReadDotBlock() ([]string, error)  // raw wire lines up to "."; recorded in Articles()
-//	func (c *Conn) Raw() net.Conn                    // the TLS conn when TLS, else the TCP conn
+//	func (c *Conn) Raw() net.Conn                    // the TLS conn when TLS, else the TCP conn; after StartCompress the compressing conn on top
+//	func (c *Conn) StartCompress() error             // RFC 8054 COMPRESS DEFLATE from now on, both directions; call it after writing the 206; error when already on
+//	func (c *Conn) StartCompressOutputOnly() error   // broken COMPRESS: deflate only the server's output, read the client's bytes uncompressed
+//	func (c *Conn) Compressed() bool
 //	func (c *Conn) Server() *Server
 //	func (c *Conn) ID() int                          // accept order from 1 (rejected connections count too)
 //
@@ -66,8 +70,10 @@
 //		NoStream        bool            // innd with streaming off: MODE STREAM 501, CHECK/TAKETHIS unknown (500, TAKETHIS's article lines are read as commands), no STREAMING capability
 //		StallModeStream time.Duration   // sleep before the handler's first MODE STREAM reply
 //		OnArticle       func(msgID string, wire []string) // before the 239/235 reply
+//		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
+//		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
 //	}
-//	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, QUIT; else 500
+//	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING, COMPRESS DEFLATE), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, COMPRESS, QUIT; else 500
 //	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
 //	// Defer436Once; else 335, the article (dot block), then 437 (Reject, or held meanwhile) or
 //	// 235 (added to Have, OnArticle).
@@ -120,10 +126,13 @@
 //		MaxOverRange      int64    // >0: cap of one OVER/XOVER range (open ranges end at High)
 //		OverRangeTooLarge []string // reply to a larger range; nil = only its first MaxOverRange numbers
 //		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
+//		Compress           bool // offer COMPRESS DEFLATE (RFC 8054), see below
+//		CompressOutputOnly bool // offer it broken: after the 206 only the output is compressed, the client's input is read uncompressed
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
 //	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS, OVER MSGID, POST
-//	// unless ReaderOnly, AUTHINFO USER while auth is required, IMPLEMENTATION fakeserver), MODE
+//	// unless ReaderOnly, AUTHINFO USER while auth is required, COMPRESS DEFLATE with Compress
+//	// once authenticated and while compression is off, IMPLEMENTATION fakeserver), MODE
 //	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT], GROUP,
 //	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current; 412/420/423/430),
 //	// XOVER/OVER (range "n", "n-", "n-m" or message-id; 423 for an empty range), NEXT/LAST
@@ -134,7 +143,10 @@
 //	// ReaderOnly; 340 then 240/441: Newsgroups, Subject and From required, Message-ID must be
 //	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
 //	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone
-//	// answers 281/481 when Pass is empty; 502 when not configured or done), QUIT (205).
+//	// answers 281/481 when Pass is empty; 502 when not configured or done), COMPRESS alg (with
+//	// Compress or CompressOutputOnly, else 500; 480 before required auth; 501 missing or
+//	// invalid algorithm name, case-sensitive; 502 when active; 503 not DEFLATE; 206 and
+//	// compression from the CRLF of the 206 on), QUIT (205).
 //	// When User or Pass is set every other command answers 480 until authenticated; any 480
 //	// the handler writes to an authenticated connection (also one from Faults.Override) ends
 //	// its login, so AUTHINFO is taken again (a login that timed out). Unknown
@@ -160,7 +172,21 @@
 //	// Store mode and in Script mode (there: only to a matched step's reply), in this order:
 //	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
 //	// then Endless (LineDelay pauses between the lines of the write). DropInMultiline counts the status line; 0 closes before writing anything.
+//	// On a compressed connection the faults work on the inflated stream; each write is deflated and sync-flushed.
 //	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
 //	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
+//
+// COMPRESS DEFLATE (RFC 8054): a Handler switches a connection with Conn.StartCompress right
+// after it wrote the 206; StoreHandler and PeerHandler do it with Compress, a Script step with
+// Step.Compress. Compression starts after the CRLF of the 206 in both directions: every write
+// (replies, Faults, Raw().Write) is raw DEFLATE, sync-flushed at its end; the client stream is
+// inflated as it arrives, whatever flush the client uses, so ReadLine, ReadDotBlock, Lines,
+// Counts, Articles and Mismatches see the commands as the client wrote them. Corrupt input
+// closes the connection (RFC 8054 2.2.2). The handlers answer COMPRESS while active with 502,
+// any syntactically valid algorithm (RFC 8054 2.2.2), do not list COMPRESS DEFLATE in
+// CAPABILITIES then, and answer AUTHINFO with 502. StartCompressOutputOnly (CompressOutputOnly
+// in the options) models a half implementation for client tests: the 206 and everything after
+// it is compressed, but the client's compressed commands are read as they are, so a client
+// that follows the RFC gets no answer or "500" answers to binary lines.
 package fakeserver

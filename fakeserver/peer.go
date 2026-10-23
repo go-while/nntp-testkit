@@ -16,6 +16,17 @@ type PeerOptions struct {
 	StallModeStream time.Duration   // sleep before the first MODE STREAM reply of the handler; capped at Options.Deadline
 	OnArticle       func(msgID string, wire []string)
 
+	// Compress offers COMPRESS DEFLATE (RFC 8054) as StoreOptions.Compress does:
+	// "COMPRESS DEFLATE" in CAPABILITIES while compression is off, COMPRESS 206 (then both
+	// directions compressed), 501, 502 once active, 503 for another algorithm, 480 before
+	// required authentication; AUTHINFO answers 502 once compression is active. Off: COMPRESS
+	// is unknown (500). innd itself has no COMPRESS (INN's nnrpd has).
+	Compress bool
+	// CompressOutputOnly offers COMPRESS like Compress, but after the 206 deflates only the
+	// peer's output and reads the client's input uncompressed (Conn.StartCompressOutputOnly):
+	// a broken peer, for client tests.
+	CompressOutputOnly bool
+
 	// Reject are the articles the peer refuses once it has read them, as a server whose
 	// filter refuses the content does: CHECK still answers 238 (the id alone is wanted),
 	// TAKETHIS answers 439 and IHAVE 335 then 437 after the article. A rejected article is
@@ -32,8 +43,9 @@ type PeerOptions struct {
 }
 
 // PeerHandler returns a Handler that answers like a transit peer: CAPABILITIES (VERSION 2,
-// IHAVE, READER, STREAMING unless NoStream), MODE STREAM/READER, AUTHINFO USER/PASS, CHECK,
-// TAKETHIS, IHAVE, QUIT; anything else gets 500. Have is guarded by a mutex inside the
+// IHAVE, READER, STREAMING unless NoStream, COMPRESS DEFLATE with Compress), MODE
+// STREAM/READER, AUTHINFO USER/PASS, CHECK, TAKETHIS, IHAVE, COMPRESS (with Compress or
+// CompressOutputOnly), QUIT; anything else gets 500. Have is guarded by a mutex inside the
 // handler: read it from a test only after the server is closed. OnArticle runs before the 239
 // or 235 reply is written, on the connection's goroutine. The handler keeps its state (Have,
 // the 431 and 436 deferrals, the stall) across the connections of one server.
@@ -54,6 +66,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 	deferred := make(map[string]bool)      // ids already answered 431 once
 	deferredIHAVE := make(map[string]bool) // ids already answered 436 once
 	needAuth := o.User != "" || o.Pass != ""
+	offerCompress := o.Compress || o.CompressOutputOnly
 	const unknown = "500 fakeserver: unknown command"
 	// take marks id as held unless it is rejected or already held; reject reports why not.
 	take := func(id string) (reject bool) {
@@ -88,6 +101,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				if !o.NoStream {
 					reply = append(reply, "STREAMING")
 				}
+				if offerCompress && authed && !c.Compressed() {
+					reply = append(reply, "COMPRESS DEFLATE")
+				}
 				reply = append(reply, ".")
 			case "MODE":
 				switch strings.ToUpper(arg) {
@@ -108,7 +124,20 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				default:
 					reply = []string{unknown}
 				}
+			case "COMPRESS":
+				switch {
+				case !offerCompress:
+					reply = []string{unknown}
+				case !authed:
+					reply = []string{"480 authentication required"}
+				default:
+					reply = []string{compressReply(strings.Fields(arg), c.Compressed())}
+				}
 			case "AUTHINFO":
+				if c.Compressed() {
+					reply = []string{"502 compression active"}
+					break
+				}
 				sub, val := arg, ""
 				if i := strings.IndexByte(arg, ' '); i >= 0 {
 					sub, val = arg[:i], arg[i+1:]
@@ -207,6 +236,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				reply = []string{unknown}
 			}
 			if err := c.WriteLines(reply...); err != nil {
+				return
+			}
+			if offerCompress && !c.compressAfter(verb, reply[0], o.CompressOutputOnly) {
 				return
 			}
 		}

@@ -30,8 +30,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | package | what |
 |---|---|
 | `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline` |
-| `client` | strict NNTP test client |
-| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; transit peer (streaming and IHAVE) |
+| `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
+| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
 | `conformance` | stub: planned black-box RFC 3977/4643/4644 checks against any address |
 
@@ -51,6 +51,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryReadDotLines()` / `ReadDotLines()` | dot block, un-stuffed, line ends stripped |
 | `RawUntilDot() []byte` | exact bytes up to and including the terminator |
 | `ExpectNoPending(d) error` | nothing may arrive within `d` |
+| `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
+| `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
 | `Close()` | idempotent, nil-safe |
 | `ParseCode`, `ExpectCode`, `ExpectLines`, `Unstuff` | text helpers |
 | `type StrictError struct { Kind Kind; Line string; Bytes []byte; Err error }`, `type Kind int` | strict-mode error |
@@ -70,6 +72,19 @@ Strict mode (on for `Dial`, `DialWith`, `TryDial` and `New`) returns a `*StrictE
 | `Pending` | `ExpectNoPending` saw bytes (they stay in `R`; `Bytes` holds them) |
 
 `Err` holds the read error and `Unwrap` returns it, so `errors.Is(err, io.EOF)` works.
+
+**COMPRESS DEFLATE** (RFC 8054): after `StartCompress`, `c.Conn` deflates every write (raw
+DEFLATE, sync-flushed per `Send`/`Cmd`) and `c.R` reads the inflated server stream, starting with
+the bytes buffered after the 206 line. Strict mode, `ReadDotLines`, `RawUntilDot` and
+`ExpectNoPending` work on the inflated stream as before (an empty flush block inflates to
+nothing, so `ExpectNoPending` still waits and returns nil). A goroutine inflates the socket and
+passes on each byte as soon as it can be decoded, whatever flush the server uses: also zlib's
+`Z_PARTIAL_FLUSH`, which INN's nnrpd sends and which Go's `compress/flate` reader holds back
+until more data arrives. Read deadlines (the hang guard, `ExpectNoPending`) apply to the inflated
+stream, so a timeout loses nothing. A closed connection reads as `io.EOF`, corrupt data as an
+error wrapping `flate.CorruptInputError`. Keep `c.Conn` from before `Compress` to write bytes past
+the compressor. A second `COMPRESS`, `STARTTLS` or `AUTHINFO` can still be sent to check the
+server's 502.
 `ExpectNoPending(d)` returns nil on timeout or EOF, never consumes data and restores the deadline;
 call it after a reply to catch a stray byte or a second status line (e.g. a NUL after
 `400 too many users`). With `Strict: false` a bare LF is a line end, like a lenient client.
@@ -80,13 +95,14 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 |---|---|
 | `New(tb, Options) *Server` / `Start(Options) (*Server, error)` | listen (default `127.0.0.1:0`) and serve; `New` registers `tb.Cleanup(Close)` |
 | `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration; MaxConns int; MaxConnsGreeting string }` | server config; `MaxConns` > 0: one more simultaneous connection gets `MaxConnsGreeting` (default `502 Too many connections`) and is closed |
-| `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line |
+| `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
 | `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
 | `Accepted`, `Open`, `WaitOpen(tb, n, d)`, `WaitLines(tb, want)` | connection counts and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
+| `(*Conn) StartCompress() error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
@@ -109,7 +125,8 @@ Three modes, chosen per server:
   it returns. `StoreHandler` and `PeerHandler` are ready-made handlers.
 - **Store**: `Options.Store` serves a `Store` with the built-in RFC 3977 handler: CAPABILITIES, MODE
   READER, HELP, LIST (ACTIVE, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
-  OVER/XOVER, NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, QUIT. `StoreOpts.User`/`Pass`
+  OVER/XOVER, NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, COMPRESS (with
+  `StoreOpts.Compress`), QUIT. `StoreOpts.User`/`Pass`
   require authentication (480 before it); `ReaderOnly` greets 201 (unless `Greeting` is set) and
   answers POST with 440.
 
@@ -134,6 +151,8 @@ at its Date.
 | `EmptyOverReply []string` | instead of 423 for a range without articles, e.g. `{"420 No article(s) selected"}` or `{"224 Overview follows", "."}` |
 | `MaxOverRange int64`, `OverRangeTooLarge []string` | cap one OVER/XOVER range (an open range ends at `High`): a larger range gets `OverRangeTooLarge`, or when that is nil the records of its first `MaxOverRange` numbers only |
 | `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
+| `Compress bool` | offer COMPRESS DEFLATE (RFC 8054): listed in CAPABILITIES while off (after authentication when required); COMPRESS answers 206 and compresses both directions; 501 missing or invalid algorithm name (case-sensitive), 502 once active (any valid algorithm), 503 another algorithm, 480 before required auth; AUTHINFO after it 502 |
+| `CompressOutputOnly bool` | offer COMPRESS, but after the 206 compress only the server's output and read the client's commands uncompressed: a half implementation, for client tests |
 
 **Generated groups.** `st.AddGenerated(group, desc, fakeserver.Generator{Low: 1, High: 10_000_000})`
 makes a group of any size whose articles are built on demand and never stored, like a provider's
@@ -168,6 +187,7 @@ connections of one server and answers as innd does:
 | `NoStream bool` | a peer without streaming, as innd with streaming off: MODE STREAM 501, CHECK and TAKETHIS unknown (500, the article lines after a TAKETHIS are then read as commands), no `STREAMING` capability; innfeed and innxmit fall back to IHAVE |
 | `StallModeStream time.Duration` | sleep before the first MODE STREAM reply (capped at the Deadline) |
 | `OnArticle func(msgID string, wire []string)` | runs before the 239/235 with the raw (dot-stuffed) lines |
+| `Compress`, `CompressOutputOnly bool` | COMPRESS DEFLATE as in `StoreOptions` (innd itself has none; INN's nnrpd has); AUTHINFO answers 502 once active |
 
 Precedence: `RawStall` wins over everything (accept TCP, never write). Otherwise the greeting is
 written unless `NoGreeting`; then `Handler` when set, else `Store` when set, else `Script`. With
@@ -198,6 +218,16 @@ server-side wait.
 
 `Count(cmd)` and `Counts()` count the upper-cased first word of every client line read through
 `Conn.ReadLine`, in all modes and on all connections (dot-block payload lines are not counted).
+
+**COMPRESS DEFLATE** (RFC 8054): compression starts after the CRLF of the 206 in both directions.
+Every write (replies, every fault, `Raw().Write`) is deflated and sync-flushed; the client stream is
+inflated as it arrives, whatever flush the client uses, so `Lines`, `Counts`, `Articles` and
+`Mismatches` record the commands as the client wrote them. The Store handler starts compression
+when the status it wrote for COMPRESS, after the faults, is a 206: `Faults.Override` `"COMPRESS"`
+`{"403 Unable to activate compression"}` is a server that cannot, `{}` one that never answers.
+Corrupt compressed input closes the connection. Bytes a client pipelines after `COMPRESS DEFLATE`
+are inflated too (INN's nnrpd reads them as plain commands). There is no STARTTLS (TLS is
+`Options.TLS`), and crypto/tls has no TLS-level compression.
 
 ### proc
 
