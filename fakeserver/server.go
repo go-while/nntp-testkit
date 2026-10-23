@@ -98,6 +98,14 @@ type StoreOptions struct {
 	// records of its first MaxOverRange numbers only, as providers that truncate do.
 	MaxOverRange      int64
 	OverRangeTooLarge []string
+
+	// OverviewFields changes the fields of every OVER/XOVER line before they are joined:
+	// fields[0] is the article number, then Subject, From, Date, Message-ID, References,
+	// :bytes, :lines and "Xref: ..."; conn is Conn.ID and group the group the line is for. It
+	// returns the fields to send (it may change, drop or add fields). Use it for overview data
+	// that differs from the articles, e.g. a Message-ID that is not the one in the article's
+	// header (an overview database out of step with the spool).
+	OverviewFields func(conn int, group string, fields []string) []string
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store

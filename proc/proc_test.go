@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -450,5 +451,40 @@ func TestWaitDeadlineStops(t *testing.T) {
 	}
 	if err2 := p.Wait(); !killed(err2) || strings.Contains(err2.Error(), "not exited within") {
 		t.Errorf("second Wait: %v, want the recorded SIGKILL exit", err2)
+	}
+}
+
+func TestUlimit(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	p := StartStdio(t, Options{
+		Path:   "/bin/sh",
+		Args:   []string{"-c", `ulimit -n; ulimit -f; echo "$$"; read x`},
+		Ulimit: []string{"-n 17", "-f 64"},
+	})
+	br := bufio.NewReader(p.Conn())
+	if got := readLine(t, br); got != "17" {
+		t.Errorf("ulimit -n: %q, want 17", got)
+	}
+	if got := readLine(t, br); got != "64" {
+		t.Errorf("ulimit -f: %q, want 64", got)
+	}
+	if got := readLine(t, br); got != strconv.Itoa(p.Pid()) {
+		t.Errorf("pid %q, want %d (the wrapper execs)", got, p.Pid())
+	}
+
+	for _, bad := range []string{"-n", "-n 1; rm -rf x", "n 5", "-nn 5"} {
+		ftb := &fakeTB{TB: t}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			StartStdio(ftb, Options{Path: "/bin/sh", Args: []string{"-c", "true"}, Ulimit: []string{bad}})
+		}()
+		<-done
+		ftb.runCleanups()
+		if !ftb.Failed() {
+			t.Errorf("Ulimit %q did not fail the TB", bad)
+		}
 	}
 }

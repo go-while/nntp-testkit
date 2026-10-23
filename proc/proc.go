@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,7 +34,16 @@ type Options struct {
 	StopTimeout time.Duration // SIGTERM → SIGKILL; 0 = DefaultStopTimeout
 	Deadline    time.Duration // readiness wait and pipe deadlines; 0 = testkit.Deadline()
 	Logs        []string      // files (relative to Dir unless absolute) to dump on failure
+
+	// Ulimit sets resource limits of the process, each one "-<letter> <value>" as the shell's
+	// ulimit takes it: "-n 16" (open files), "-f 64" (file size, in 512-byte blocks for sh),
+	// "-v 200000" ... The process is started through /bin/sh, which sets them and execs Path
+	// (so the PID and the signals stay the binary's). An entry of another form fails tb.
+	Ulimit []string
 }
+
+// ulimitArg is the form of an Options.Ulimit entry.
+var ulimitArg = regexp.MustCompile(`^-[A-Za-z] ([0-9]+|unlimited)$`)
 
 // Process is a started external process. Stop it with Stop (also run by tb.Cleanup).
 type Process struct {
@@ -101,7 +111,19 @@ func newProcess(tb testing.TB, o Options) *Process {
 		}
 		path = abs
 	}
-	cmd := exec.Command(path, o.Args...)
+	args := o.Args
+	if len(o.Ulimit) > 0 {
+		script := ""
+		for _, u := range o.Ulimit {
+			if !ulimitArg.MatchString(u) {
+				tb.Fatalf("proc: Ulimit entry %q is not \"-<letter> <number|unlimited>\"", u)
+			}
+			script += "ulimit " + u + " || exit 126; "
+		}
+		args = append([]string{"-c", script + `exec "$0" "$@"`, path}, args...)
+		path = "/bin/sh"
+	}
+	cmd := exec.Command(path, args...)
 	cmd.Dir = p.dir
 	cmd.Env = append(os.Environ(), o.Env...)
 	cmd.Stderr = p.out

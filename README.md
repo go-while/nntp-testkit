@@ -93,6 +93,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
 | `Article`, `ByMessageID`, `Group`, `Groups`, `Numbers`, `Overview`, `Next`, `Last` | lookups |
 | `RemoveArticle(group, n)`, `Expire(group, below)`, `Cancel(id)` | expiry and cancels: the high-water mark `High` is kept (numbers are not reused), `Low` and `Count` follow; an emptied group has `Low` = `High`+1 |
+| `AddGenerated(group, desc, Generator)`, `SetGeneratedHigh(group, high)`, `NumbersIn(group, from, to)`, `GenLimit(group)` | generated groups, see below |
 | `HighestExisting(conn, Group) Group` | for `StoreOptions.GroupNumbers`: report the highest existing number as `High`, like servers whose last number goes down |
 | `AddPosted`, `Posted` | articles accepted by POST |
 | `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model |
@@ -124,6 +125,19 @@ Three modes, chosen per server:
 | `NoOver`, `NoXover bool` | that command is unknown (500); `NoOver` also drops `OVER MSGID` from CAPABILITIES |
 | `EmptyOverReply []string` | instead of 423 for a range without articles, e.g. `{"420 No article(s) selected"}` or `{"224 Overview follows", "."}` |
 | `MaxOverRange int64`, `OverRangeTooLarge []string` | cap one OVER/XOVER range (an open range ends at `High`): a larger range gets `OverRangeTooLarge`, or when that is nil the records of its first `MaxOverRange` numbers only |
+| `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
+
+**Generated groups.** `st.AddGenerated(group, desc, fakeserver.Generator{Low: 1, High: 10_000_000})`
+makes a group of any size whose articles are built on demand and never stored, like a provider's
+group of 10^7 articles. `Generator.Article(group, n)` makes article `n` (false = a hole; nil =
+`GeneratedArticle`: Message-ID `<n.group@fakeserver.invalid>`, Date 2020-01-01 plus `n`
+seconds); `Generator.Lookup(id)` maps a Message-ID back to its number (nil = that form).
+`Count` is `High-Low+1`. GROUP, LIST, ARTICLE by number or Message-ID, NEXT/LAST and ranged
+OVER/XOVER/LISTGROUP work as for stored articles; one OVER, XOVER or LISTGROUP that spans more
+than `Generator.Limit` numbers (default `DefaultGenLimit`, 100000; < 0 = none) gets
+`503 fakeserver: ...` instead of a reply the test cannot hold, so a client that asks for a whole
+huge group shows up as an error. `Expire` raises `Low`, `SetGeneratedHigh` lets new articles
+arrive; `AddArticle` panics on a generated group, `RemoveArticle` and `Cancel` find nothing.
 
 Precedence: `RawStall` wins over everything (accept TCP, never write). Otherwise the greeting is
 written unless `NoGreeting`; then `Handler` when set, else `Store` when set, else `Script`. With
@@ -159,7 +173,7 @@ server-side wait.
 
 | API | what |
 |---|---|
-| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs []string }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()` |
+| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG) |
 | `StartStdio(tb, Options) *Process` | stdin/stdout are the client connection (inetd style): `Conn()` |
 | `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT) |
 | `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `Wait`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode |
