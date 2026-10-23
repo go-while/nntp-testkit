@@ -22,8 +22,8 @@ var genEpoch = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 type Generator struct {
 	Low, High int64
 
-	// Article returns article n of group; false makes n a hole. The store sets Number to n.
-	// nil: GeneratedArticle.
+	// Article returns article n of group; false makes n a hole. The store sets Number to n,
+	// and a zero Date (2020-01-01 plus n seconds) and Arrived (= Date). nil: GeneratedArticle.
 	Article func(group string, n int64) (Article, bool)
 
 	// Lookup returns the number of the article with message-id id, for ARTICLE <id>, OVER
@@ -103,6 +103,9 @@ func (g *Generator) article(group string, low, n int64) (Article, bool) {
 	}
 	if a.Date.IsZero() {
 		a.Date = genEpoch.Add(time.Duration(n) * time.Second)
+	}
+	if a.Arrived.IsZero() {
+		a.Arrived = a.Date
 	}
 	return a, true
 }

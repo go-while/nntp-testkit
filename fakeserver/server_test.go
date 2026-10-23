@@ -245,7 +245,7 @@ func TestPeerStream(t *testing.T) {
 	}
 	wantCode(t, c, "CHECK <x@test.invalid>", 480)
 	wantCode(t, c, "CAPABILITIES", 101)
-	if caps := c.ReadDotLines(); !reflect.DeepEqual(caps, []string{"VERSION 2", "READER", "STREAMING"}) {
+	if caps := c.ReadDotLines(); !reflect.DeepEqual(caps, []string{"VERSION 2", "IHAVE", "READER", "STREAMING"}) {
 		t.Fatalf("capabilities %q", caps)
 	}
 	wantCode(t, c, "AUTHINFO USER u", 381)

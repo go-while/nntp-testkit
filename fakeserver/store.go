@@ -14,13 +14,17 @@ const DateLayout = "Mon, 02 Jan 2006 15:04:05 -0700"
 
 // Article is one stored article. Headers holds the header lines without CRLF ("Name: value";
 // continuation lines start with a space or tab), Body the body lines without CRLF and without
-// dot-stuffing. Number is the article number in the group it was returned from.
+// dot-stuffing. Number is the article number in the group it was returned from. Date is the
+// date it is served with when it has no Date header; Arrived is when it reached the server,
+// for NEWNEWS (INN's arrival time): AddArticle sets a zero Arrived to time.Now(), a generated
+// article without one arrived at its Date.
 type Article struct {
 	Number    int64
 	MessageID string
 	Headers   []string
 	Body      []string
 	Date      time.Time
+	Arrived   time.Time
 }
 
 // Group is the state of one newsgroup. A new group has Low 1, High 0 and Count 0; otherwise
@@ -132,10 +136,11 @@ func (st *Store) SetPosting(group string, posting bool) bool {
 
 // AddArticle files a copy of a in group and returns its number there: a.Number when > 0 (a
 // number that is already taken panics, it is a test-setup bug), else High+1 (the first article
-// of a group gets 1). A zero Date becomes time.Now(). An empty MessageID is taken from the
-// Message-ID header when present, else "<number.group@fakeserver.invalid>" is generated (the
-// id WithDefaults then serves) and indexed; Headers stay as given. A group that does not exist
-// is created. To file one article in several groups, call AddArticle once per group;
+// of a group gets 1). A zero Date and a zero Arrived become time.Now() (set Arrived for a
+// NEWNEWS test). An empty MessageID is taken from the Message-ID header when present, else
+// "<number.group@fakeserver.invalid>" is generated (the id WithDefaults then serves) and
+// indexed; Headers stay as given. A group that does not exist is created. To file one article
+// in several groups, call AddArticle once per group (each copy has its own Arrived);
 // ByMessageID then returns every location. An empty group name, a negative number or a
 // MessageID that differs from the Message-ID header panics as well (test-setup bugs).
 func (st *Store) AddArticle(group string, a Article) int64 {
@@ -146,8 +151,12 @@ func (st *Store) AddArticle(group string, a Article) int64 {
 		panic(fmt.Sprintf("fakeserver: Store.AddArticle(%q): negative article number %d", group, a.Number))
 	}
 	a = a.clone()
+	now := time.Now()
 	if a.Date.IsZero() {
-		a.Date = time.Now()
+		a.Date = now
+	}
+	if a.Arrived.IsZero() {
+		a.Arrived = now
 	}
 	if hdr := a.Header("Message-ID"); a.MessageID == "" {
 		a.MessageID = hdr

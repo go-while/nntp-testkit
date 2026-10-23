@@ -180,6 +180,21 @@ func TestStoreCreatedAndPosting(t *testing.T) {
 	}
 }
 
+func TestStoreArrived(t *testing.T) {
+	st := NewStore()
+	before := time.Now()
+	st.AddArticle("g", art("<a@x>"))
+	at := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	st.AddArticle("g", Article{MessageID: "<b@x>", Arrived: at})
+	a, _ := st.Article("g", 1)
+	if a.Arrived.Before(before) || !a.Arrived.Equal(a.Date) {
+		t.Errorf("zero Arrived: %v (Date %v), want now", a.Arrived, a.Date)
+	}
+	if b, _ := st.Article("g", 2); !b.Arrived.Equal(at) || b.Date.Before(before) {
+		t.Errorf("explicit Arrived: %v, Date %v", b.Arrived, b.Date)
+	}
+}
+
 func TestStoreMultiGroup(t *testing.T) {
 	st := NewStore()
 	st.AddArticle("b.two", art("<filler@x>"))

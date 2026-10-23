@@ -31,7 +31,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 |---|---|
 | `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline` |
 | `client` | strict NNTP test client |
-| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; streaming peer |
+| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
 | `conformance` | stub: planned black-box RFC 3977/4643/4644 checks against any address |
 
@@ -88,7 +88,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
-| `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | streaming peer (RFC 4644): MODE STREAM, CHECK, TAKETHIS, AUTHINFO |
+| `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
 | `Article`, `ByMessageID`, `Group`, `Groups`, `Numbers`, `Overview`, `Next`, `Last` | lookups |
@@ -96,7 +96,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `AddGenerated(group, desc, Generator)`, `SetGeneratedHigh(group, high)`, `NumbersIn(group, from, to)`, `GenLimit(group)` | generated groups, see below |
 | `HighestExisting(conn, Group) Group` | for `StoreOptions.GroupNumbers`: report the highest existing number as `High`, like servers whose last number goes down |
 | `AddPosted`, `Posted` | articles accepted by POST |
-| `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model |
+| `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model; `Article.Arrived` is the arrival time NEWNEWS uses (`AddArticle` sets a zero one to now) |
 | `StoreHandler(*Store, StoreOptions) func(*Conn)`; `type StoreOptions` | RFC 3977 reader over a Store; options below |
 | `DefaultGreeting`, `DefaultGreetingNoPost`, `DateLayout` | constants |
 
@@ -109,9 +109,16 @@ Three modes, chosen per server:
   it returns. `StoreHandler` and `PeerHandler` are ready-made handlers.
 - **Store**: `Options.Store` serves a `Store` with the built-in RFC 3977 handler: CAPABILITIES, MODE
   READER, HELP, LIST (ACTIVE, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
-  OVER/XOVER, NEXT/LAST, NEWGROUPS, DATE, POST, AUTHINFO USER/PASS, QUIT. `StoreOpts.User`/`Pass`
+  OVER/XOVER, NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, QUIT. `StoreOpts.User`/`Pass`
   require authentication (480 before it); `ReaderOnly` greets 201 (unless `Greeting` is set) and
   answers POST with 440.
+
+**NEWNEWS** (`NEWNEWS wildmat yyyymmdd hhmmss [GMT]`, RFC 3977 7.4) answers 230 and the
+Message-IDs, each once, of the articles in matching groups whose `Article.Arrived` is at or
+after the time (date and time as NEWGROUPS, always UTC), in group name order and by number.
+`AddArticle` sets a zero `Arrived` to now (set it to date an article for a test; a POSTed
+article arrives when it is posted, whatever its Date header says); a generated article arrives
+at its Date.
 
 `StoreOptions` make the Store server behave like particular real servers:
 
@@ -122,7 +129,8 @@ Three modes, chosen per server:
 | `OverviewFmt []string` | the LIST OVERVIEW.FMT answer |
 | `GroupNumbers func(conn int, g Group) Group` | the numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection: a lagging frontend of a server farm (lower `High` on some connections), `211 0 0 0` for an empty group, or `st.HighestExisting`; the articles served stay the stored ones |
 | `ListgroupRange string` | `"reject"`: 501 for `LISTGROUP group range` (RFC 977/2980 servers); `"ignore"`: the whole group whatever the range |
-| `NoOver`, `NoXover bool` | that command is unknown (500); `NoOver` also drops `OVER MSGID` from CAPABILITIES |
+| `NoOver`, `NoXover bool` | that command is unknown (500, not listed by HELP); `NoOver` also drops `OVER MSGID` from CAPABILITIES |
+| `NoNewnews bool` | NEWNEWS is unknown (500) and not in CAPABILITIES or HELP, as on the many servers without it; INN's `502 NEWNEWS command disabled by administrator` is `Faults.Override` `"NEWNEWS"` |
 | `EmptyOverReply []string` | instead of 423 for a range without articles, e.g. `{"420 No article(s) selected"}` or `{"224 Overview follows", "."}` |
 | `MaxOverRange int64`, `OverRangeTooLarge []string` | cap one OVER/XOVER range (an open range ends at `High`): a larger range gets `OverRangeTooLarge`, or when that is nil the records of its first `MaxOverRange` numbers only |
 | `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
@@ -136,8 +144,30 @@ seconds); `Generator.Lookup(id)` maps a Message-ID back to its number (nil = tha
 OVER/XOVER/LISTGROUP work as for stored articles; one OVER, XOVER or LISTGROUP that spans more
 than `Generator.Limit` numbers (default `DefaultGenLimit`, 100000; < 0 = none) gets
 `503 fakeserver: ...` instead of a reply the test cannot hold, so a client that asks for a whole
-huge group shows up as an error. `Expire` raises `Low`, `SetGeneratedHigh` lets new articles
+huge group shows up as an error. NEWNEWS examines a matching generated group whole, so it gets
+that 503 too when the group spans more than the limit, whatever the time. `Expire` raises `Low`, `SetGeneratedHigh` lets new articles
 arrive; `AddArticle` panics on a generated group, `RemoveArticle` and `Cancel` find nothing.
+
+**PeerHandler** is a transit peer for feeders such as innfeed and innxmit. It
+advertises `VERSION 2`, `IHAVE`, `READER` and `STREAMING` (not with `NoStream`), keeps its state across the
+connections of one server and answers as innd does:
+
+| command | replies |
+|---|---|
+| `MODE STREAM` | 203; 501 `Unknown MODE variant` with `NoStream` |
+| `CHECK <id>` | 238; 438 when held; 431 once for `Defer431Once`; 480 before auth; 500 with `NoStream` |
+| `TAKETHIS <id>` + article | 239 (added to `Have`, `OnArticle` runs); 439 when held or in `Reject`; 480 before auth (after the article); 500 with `NoStream` (no article read) |
+| `IHAVE <id>` | 335, then after the article 235 (added to `Have`, `OnArticle` runs) or 437 (in `Reject`, or held meanwhile); at once: 435 when held or the id is not `<...>`, 436 once for `Defer436Once`, 480 before auth |
+
+| `PeerOptions` field | effect |
+|---|---|
+| `User, Pass string` | require AUTHINFO USER/PASS |
+| `Have map[string]bool` | ids the peer already holds; accepted articles are added (read it after `Close`) |
+| `Defer431Once`, `Defer436Once map[string]bool` | CHECK (431) or IHAVE (436) of these ids is deferred the first time only; innd's 436 comes before the transfer (paused, or the article is arriving on another connection) |
+| `Reject map[string]bool` | refused once the article is read, every time, as a content filter does: CHECK 238, TAKETHIS 439, IHAVE 335 then 437; ids refused by id alone are `Have` |
+| `NoStream bool` | a peer without streaming, as innd with streaming off: MODE STREAM 501, CHECK and TAKETHIS unknown (500, the article lines after a TAKETHIS are then read as commands), no `STREAMING` capability; innfeed and innxmit fall back to IHAVE |
+| `StallModeStream time.Duration` | sleep before the first MODE STREAM reply (capped at the Deadline) |
+| `OnArticle func(msgID string, wire []string)` | runs before the 239/235 with the raw (dot-stuffed) lines |
 
 Precedence: `RawStall` wins over everything (accept TCP, never write). Otherwise the greeting is
 written unless `NoGreeting`; then `Handler` when set, else `Store` when set, else `Script`. With
