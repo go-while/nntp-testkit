@@ -18,6 +18,7 @@
 //		StopTimeout time.Duration // SIGTERM → SIGKILL; 0 = 5s
 //		Deadline    time.Duration // readiness wait and pipe deadlines; 0 = testkit.Deadline()
 //		Logs        []string      // files (relative to Dir unless absolute) to dump on failure
+//		Ulimit      []string      // "-n 16", "-f 64", ...: limits set by /bin/sh before it execs Path
 //	}
 //	type Process struct { ... }
 //	func StartStdio(tb testing.TB, o Options) *Process // stdin/stdout piped; Conn() is the client side

@@ -58,6 +58,7 @@ type storeGroup struct {
 	meta     Group
 	articles map[int64]Article
 	nums     []int64
+	gen      *Generator // non-nil: a generated group (AddGenerated); articles and nums stay empty
 }
 
 // NewStore returns an empty Store.
@@ -157,6 +158,9 @@ func (st *Store) AddArticle(group string, a Article) int64 {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	g := st.groupLocked(group)
+	if g.gen != nil {
+		panic(fmt.Sprintf("fakeserver: Store.AddArticle(%q): generated group", group))
+	}
 	n := a.Number
 	if n > 0 {
 		if _, taken := g.articles[n]; taken {
@@ -201,6 +205,16 @@ func (st *Store) Expire(group string, below int64) int {
 	g, ok := st.groups[group]
 	if !ok {
 		return 0
+	}
+	if g.gen != nil {
+		if below <= g.meta.Low {
+			return 0
+		}
+		top := min(below, g.meta.High+1)
+		gone := top - g.meta.Low
+		g.meta.Low = top
+		g.meta.Count = g.meta.High - g.meta.Low + 1
+		return int(gone)
 	}
 	var gone []int64
 	for _, n := range g.nums {
@@ -257,8 +271,8 @@ func (st *Store) removeLocked(group string, g *storeGroup, n int64) bool {
 // newest articles are cancelled or expire. Its signature fits StoreOptions.GroupNumbers:
 // GroupNumbers: st.HighestExisting.
 func (st *Store) HighestExisting(conn int, g Group) Group {
-	if nums := st.Numbers(g.Name); len(nums) > 0 {
-		g.High = nums[len(nums)-1]
+	if n, ok := st.Last(g.Name, int64(^uint64(0)>>1)); ok {
+		g.High = n
 	} else {
 		g.High = g.Low - 1
 	}
@@ -272,6 +286,9 @@ func (st *Store) Article(group string, n int64) (Article, bool) {
 	g, ok := st.groups[group]
 	if !ok {
 		return Article{}, false
+	}
+	if g.gen != nil {
+		return g.gen.article(group, g.meta.Low, n)
 	}
 	a, ok := g.articles[n]
 	if !ok {
@@ -287,7 +304,7 @@ func (st *Store) ByMessageID(id string) (Article, []Location, bool) {
 	defer st.mu.Unlock()
 	locs := st.byID[id]
 	if len(locs) == 0 {
-		return Article{}, nil, false
+		return st.generatedByIDLocked(id)
 	}
 	first := locs[0]
 	a := st.groups[first.Group].articles[first.Number]
@@ -326,6 +343,12 @@ func (st *Store) Numbers(group string) []int64 {
 	if !ok {
 		return []int64{}
 	}
+	if g.gen != nil {
+		if lim := g.gen.limit(); lim > 0 && g.meta.High-g.meta.Low+1 > lim {
+			panic(fmt.Sprintf("fakeserver: Store.Numbers(%q): generated group spans more than %d numbers", group, lim))
+		}
+		return g.numbersLocked(group, g.meta.Low, g.meta.High)
+	}
 	out := make([]int64, len(g.nums))
 	copy(out, g.nums)
 	return out
@@ -345,6 +368,14 @@ func (st *Store) Overview(group string, from, to int64) []Article {
 		to = g.meta.High
 	}
 	if from > to {
+		return out
+	}
+	if g.gen != nil {
+		for n := max(from, g.meta.Low); n <= min(to, g.meta.High); n++ {
+			if a, ok := g.gen.article(group, g.meta.Low, n); ok {
+				out = append(out, a)
+			}
+		}
 		return out
 	}
 	i := sort.Search(len(g.nums), func(i int) bool { return g.nums[i] >= from })
@@ -381,6 +412,14 @@ func (st *Store) Next(group string, n int64) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
+	if g.gen != nil {
+		for m := max(n+1, g.meta.Low); m <= g.meta.High && m > n; m++ {
+			if _, ok := g.gen.article(group, g.meta.Low, m); ok {
+				return m, true
+			}
+		}
+		return 0, false
+	}
 	i := sort.Search(len(g.nums), func(i int) bool { return g.nums[i] > n })
 	if i == len(g.nums) {
 		return 0, false
@@ -394,6 +433,14 @@ func (st *Store) Last(group string, n int64) (int64, bool) {
 	defer st.mu.Unlock()
 	g, ok := st.groups[group]
 	if !ok {
+		return 0, false
+	}
+	if g.gen != nil {
+		for m := min(n-1, g.meta.High); m >= g.meta.Low; m-- {
+			if _, ok := g.gen.article(group, g.meta.Low, m); ok {
+				return m, true
+			}
+		}
 		return 0, false
 	}
 	i := sort.Search(len(g.nums), func(i int) bool { return g.nums[i] >= n })

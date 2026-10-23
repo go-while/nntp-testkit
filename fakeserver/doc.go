@@ -85,6 +85,13 @@
 //	func (st *Store) Expire(group string, below int64) int              // RemoveArticle of every number below below
 //	func (st *Store) Cancel(id string) int                              // RemoveArticle of every location of id
 //	func (st *Store) HighestExisting(conn int, g Group) Group           // for StoreOptions.GroupNumbers: High = highest existing number (Low-1 when empty)
+//	func (st *Store) AddGenerated(group, description string, gen Generator) // a generated group: articles Low..High made on demand, never stored; Count = High-Low+1
+//	func (st *Store) SetGeneratedHigh(group string, high int64) bool    // new articles arrive in a generated group
+//	func (st *Store) NumbersIn(group string, from, to int64) []int64    // existing numbers within [from,to]; to<=0 = High; also for generated groups (within the limit)
+//	func (st *Store) GenLimit(group string) int64                       // span limit of a generated group, 0 = none / stored group
+//	type Generator struct { Low, High int64; Article func(group string, n int64) (Article, bool); Lookup func(id string) (int64, bool); Limit int64 }
+//	func GeneratedArticle(group string, n int64) (Article, bool)        // default: <n.group@fakeserver.invalid>, Date 2020-01-01 + n s
+//	const DefaultGenLimit = 100000                                      // OVER/XOVER/LISTGROUP spanning more numbers of a generated group → 503
 //	func (a Article) Header(name string) string                         // first matching header value, case-insensitive, unfolded; "" when absent
 //	func (a Article) WithDefaults(group string) Article                 // copy with Message-ID, Newsgroups (when group != "") and Date headers added when missing
 //	const DateLayout = "Mon, 02 Jan 2006 15:04:05 -0700"
@@ -99,6 +106,7 @@
 //		EmptyOverReply    []string // instead of 423 for a range without articles
 //		MaxOverRange      int64    // >0: cap of one OVER/XOVER range (open ranges end at High)
 //		OverRangeTooLarge []string // reply to a larger range; nil = only its first MaxOverRange numbers
+//		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
 //	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST

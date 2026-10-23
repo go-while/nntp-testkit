@@ -363,9 +363,16 @@ func (h *storeConn) listgroup(args []string) []string {
 	if !ok {
 		return []string{"411 No such newsgroup"}
 	}
+	from, to := max(r.from, g.Low), g.High
+	if !r.open {
+		to = min(r.to, g.High)
+	}
+	if lim := h.st.GenLimit(name); lim > 0 && to-from+1 > lim {
+		return []string{genTooLarge(to-from+1, lim)}
+	}
 	out := []string{groupLine(h.reported(g)) + " list follows"}
-	for _, n := range h.st.Numbers(name) {
-		if r.contains(n) {
+	if from <= to {
+		for _, n := range h.st.NumbersIn(name, from, to) {
 			out = append(out, strconv.FormatInt(n, 10))
 		}
 	}
@@ -499,6 +506,12 @@ func (h *storeConn) over(args []string) []string {
 			}
 			r.to = r.from + lim - 1
 		}
+		if lim := h.st.GenLimit(h.group); lim > 0 {
+			g, _ := h.st.Group(h.group)
+			if span := min(r.to, g.High) - max(r.from, g.Low) + 1; span > lim {
+				return []string{genTooLarge(span, lim)}
+			}
+		}
 		if r.to >= r.from && r.to > 0 {
 			arts = h.st.Overview(h.group, r.from, r.to)
 		}
@@ -533,7 +546,16 @@ func (h *storeConn) overviewLine(a Article, num int64, group string) string {
 		f = append(f, clean.Replace(a.Header(name)))
 	}
 	f = append(f, strconv.Itoa(size), strconv.Itoa(len(a.Body)), "Xref: "+clean.Replace(xref))
+	if h.o.OverviewFields != nil {
+		f = h.o.OverviewFields(h.c.ID(), group, f)
+	}
 	return strings.Join(f, "\t")
+}
+
+// genTooLarge is the reply to an OVER, XOVER or LISTGROUP that spans more numbers of a
+// generated group than its Generator.Limit.
+func genTooLarge(span, lim int64) string {
+	return fmt.Sprintf("503 fakeserver: request spans %d numbers of a generated group, over its limit of %d", span, lim)
 }
 
 // served returns a with the default headers it is served with (Newsgroups = every group it is
