@@ -309,6 +309,11 @@ func (p *Process) Wait() error {
 	return errors.Join(fmt.Errorf("proc: %s not exited within %v, stopped", p.cmd.Path, p.deadline), p.Wait())
 }
 
+// Done returns a channel that is closed once the process has exited and its output has been
+// collected: a non-blocking check (select with default) or a bounded wait (select with a
+// timer) that, unlike Wait, never stops the process.
+func (p *Process) Done() <-chan struct{} { return p.done }
+
 // Stderr returns the output captured so far: stderr, plus stdout in TCP mode. After Wait or
 // Stop it holds everything the process wrote.
 func (p *Process) Stderr() string { return p.out.String() }

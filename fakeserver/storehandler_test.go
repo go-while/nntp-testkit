@@ -56,7 +56,7 @@ func wantEqual(t *testing.T, what string, got, want any) {
 func TestStoreCapabilities(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "MODE READER", 200)
 	wantCode(t, c, "MODE STREAM", 501)
 	wantCode(t, c, "MODE", 501)
@@ -80,7 +80,7 @@ func TestStoreCapabilities(t *testing.T) {
 
 	_, ro := storeServer(t, testStore(), StoreOptions{ReaderOnly: true}, Faults{})
 	_, caps = wantBlock(t, ro, "CAPABILITIES", 101)
-	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "OVER MSGID", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "IMPLEMENTATION fakeserver"})
 	wantCode(t, ro, "MODE READER", 201)
 	wantCode(t, ro, "POST", 440)
 	_, active := wantBlock(t, ro, "LIST", 215)
@@ -359,6 +359,86 @@ func TestStoreNewgroups(t *testing.T) {
 	for _, bad := range []string{"NEWGROUPS 20261301 000000", "NEWGROUPS 2026 000000", "NEWGROUPS 20260101 0000",
 		"NEWGROUPS 20260101 000000 EST", "NEWGROUPS 20260101", "NEWGROUPS x 000000"} {
 		wantCode(t, c, bad, 501)
+	}
+}
+
+func TestStoreNewnews(t *testing.T) {
+	st := NewStore()
+	day := func(m time.Month, d int) time.Time { return time.Date(2026, m, d, 12, 0, 0, 0, time.UTC) }
+	st.AddArticle("alt.a", Article{MessageID: "<old@x>", Arrived: time.Date(2019, 12, 31, 23, 59, 59, 0, time.UTC)})
+	st.AddArticle("alt.a", Article{MessageID: "<new@x>", Arrived: day(6, 1), Date: day(1, 1)}) // Arrived decides, not Date
+	x := Article{MessageID: "<x@x>", Arrived: day(3, 1)}
+	st.AddArticle("alt.a", x)
+	st.AddArticle("comp.b", x)                                // crossposted: listed once
+	st.AddArticle("comp.b", Article{MessageID: "<now@x>"})    // Arrived = now
+	st.AddArticle("alt.gone", Article{MessageID: "<gone@x>"}) // cancelled below
+	st.Cancel("<gone@x>")
+	st.AddGroup("alt.empty", "")
+	_, c := storeServer(t, st, StoreOptions{}, Faults{})
+
+	for _, tc := range []struct {
+		cmd  string
+		want []string
+	}{
+		{"NEWNEWS * 20260101 000000 GMT", []string{"<new@x>", "<x@x>", "<now@x>"}},
+		{"NEWNEWS * 191231 235959", []string{"<old@x>", "<new@x>", "<x@x>", "<now@x>"}}, // yy 19 → 2019
+		{"NEWNEWS alt.* 20260601 120000", []string{"<new@x>"}},                          // at the arrival second: included
+		{"NEWNEWS alt.* 20260601 120001", nil},
+		{"newnews comp.b 20260101 000000 gmt", []string{"<x@x>", "<now@x>"}},
+		{"NEWNEWS *,!alt.* 20260101 000000", []string{"<x@x>", "<now@x>"}},
+		{"NEWNEWS !* 20000101 000000", nil},
+		{"NEWNEWS no.such 20000101 000000", nil},
+		{"NEWNEWS * 20990101 000000 GMT", nil},
+	} {
+		line, got := wantBlock(t, c, tc.cmd, 230)
+		wantEqual(t, tc.cmd, got, tc.want)
+		if !strings.HasPrefix(line, "230 ") {
+			t.Errorf("%s: %q", tc.cmd, line)
+		}
+	}
+	for _, bad := range []string{"NEWNEWS * 20261301 000000", "NEWNEWS * 2026 000000", "NEWNEWS * 20260101 0000",
+		"NEWNEWS * 20260101 000000 EST", "NEWNEWS * 20260101", "NEWNEWS 20260101 000000", "NEWNEWS * x 000000",
+		"NEWNEWS * 20260101 000000 GMT x"} {
+		wantCode(t, c, bad, 501)
+	}
+
+	// a posted article arrives now, whatever its Date header says
+	wantCode(t, c, "POST", 340)
+	if err := c.Send("Newsgroups: alt.a\r\nFrom: p@x\r\nSubject: s\r\nMessage-ID: <posted@x>\r\n" +
+		"Date: Mon, 01 Jan 2001 00:00:00 +0000\r\n\r\nbody\r\n.\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, c, 240)
+	since := time.Now().UTC().Add(-time.Minute).Format("20060102 150405")
+	_, got := wantBlock(t, c, "NEWNEWS alt.a "+since+" GMT", 230)
+	wantEqual(t, "posted", got, []string{"<posted@x>"})
+	if p := st.Posted(); len(p) != 1 || p[0].Arrived.IsZero() || p[0].Date.Year() != 2001 {
+		t.Errorf("Posted() = %+v", p)
+	}
+
+	// NEWNEWS needs authentication like the other reading commands
+	_, ac := storeServer(t, st, StoreOptions{User: "u", Pass: "p"}, Faults{})
+	wantCode(t, ac, "NEWNEWS * 20260101 000000", 480)
+
+	// INN with NEWNEWS turned off: Faults.Override
+	_, oc := storeServer(t, st, StoreOptions{}, Faults{Override: map[string][]string{"NEWNEWS": {"502 NEWNEWS command disabled by administrator"}}})
+	wantCode(t, oc, "NEWNEWS * 20260101 000000", 502)
+}
+
+func TestStoreNoNewnews(t *testing.T) {
+	_, c := storeServer(t, testStore(), StoreOptions{NoNewnews: true, NoOver: true}, Faults{})
+	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "POST", "IMPLEMENTATION fakeserver"})
+	wantCode(t, c, "NEWNEWS * 20260101 000000", 500)
+	wantCode(t, c, "NEWNEWS", 500) // unknown before the argument check
+	_, help := wantBlock(t, c, "HELP", 100)
+	for _, l := range help {
+		if l == "NEWNEWS" || l == "OVER" {
+			t.Errorf("HELP lists the unknown command %s", l)
+		}
+	}
+	if !strings.Contains(strings.Join(help, " "), "XOVER") {
+		t.Errorf("HELP without XOVER: %q", help)
 	}
 }
 

@@ -29,9 +29,9 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST (not ReaderOnly), AUTHINFO USER (auth required and not done), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
-//	HELP                100 command list
+//	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
 //	LIST [ACTIVE [wm]]  215 "name high low y|n" (y when Posting and not ReaderOnly); wm is a wildmat (*, ?, comma list, ! negation)
 //	LIST NEWSGROUPS [wm] 215 "name<TAB>description"; LIST OVERVIEW.FMT 215; other keywords 501
@@ -41,6 +41,7 @@ func init() { storeHandler = StoreHandler }
 //	NEXT, LAST          223 "n <id>"; 412, 420, 421/422
 //	OVER/XOVER [rng|<id>] 224; 412, 420, 423 (empty range or m<n), 430; number 0 for <id>
 //	NEWGROUPS d t [GMT] 231 groups whose Created is at or after d t (yymmdd or yyyymmdd, hhmmss; always UTC); 501
+//	NEWNEWS wm d t [GMT] 230 message-ids of the articles in groups matching wm whose Arrived is at or after d t (date and time as NEWGROUPS); 501; 503 when a matching generated group spans more numbers than its limit
 //	DATE                111 yyyymmddhhmmss (UTC)
 //	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
 //	QUIT                205, then the connection is closed
@@ -56,6 +57,13 @@ func init() { storeHandler = StoreHandler }
 // separating blank line), :lines (body lines) and "Xref: " with the stored Xref header, else
 // "fakeserver group:number ..." over every location. OverviewFmt only changes the LIST
 // OVERVIEW.FMT answer, not the OVER lines.
+//
+// NEWNEWS lists each message-id once, in group name order and ascending numbers within a
+// group (a crossposted article where it is first found). Arrived is the time AddArticle filed
+// the article (or the one the test set); a generated article arrived at its Date. A generated
+// group is examined whole, so a matching one that spans more numbers than its Generator.Limit
+// gets the 503 of OVER, XOVER and LISTGROUP before anything is listed. Without GMT the time is
+// UTC too (the fake server's local time is UTC), where INN would take its local time.
 //
 // POST un-stuffs the article, splits head and body at the first blank line, generates a
 // missing Message-ID as <posted-N@fakeserver.invalid> (N counts per handler, skipping ids
@@ -142,17 +150,14 @@ var authFree = map[string]bool{"CAPABILITIES": true, "MODE": true, "HELP": true,
 var argCount = map[string][2]int{
 	"CAPABILITIES": {0, 1}, "MODE": {1, 1}, "HELP": {0, 0}, "AUTHINFO": {2, -1}, "LIST": {0, 2},
 	"GROUP": {1, 1}, "LISTGROUP": {0, 2}, "ARTICLE": {0, 1}, "HEAD": {0, 1}, "BODY": {0, 1}, "STAT": {0, 1},
-	"NEXT": {0, 0}, "LAST": {0, 0}, "OVER": {0, 1}, "XOVER": {0, 1}, "NEWGROUPS": {2, 3}, "DATE": {0, 0},
+	"NEXT": {0, 0}, "LAST": {0, 0}, "OVER": {0, 1}, "XOVER": {0, 1}, "NEWGROUPS": {2, 3}, "NEWNEWS": {3, 4}, "DATE": {0, 0},
 	"POST": {0, 0}, "QUIT": {0, 0},
 }
 
 // dispatch answers one command; POST and QUIT are flagged for serve.
 func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	n, known := argCount[cmd]
-	if (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) {
-		known = false
-	}
-	if !known {
+	if !known || h.disabled(cmd) {
 		return []string{"500 Unknown command"}, actReply
 	}
 	if !h.authed && !authFree[cmd] {
@@ -190,6 +195,8 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 		return h.over(args), actReply
 	case "NEWGROUPS":
 		return h.newgroups(args), actReply
+	case "NEWNEWS":
+		return h.newnews(args), actReply
 	case "DATE":
 		return []string{"111 " + time.Now().UTC().Format("20060102150405")}, actReply
 	case "POST":
@@ -202,8 +209,16 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	}
 }
 
+// disabled reports whether a known command is made unknown by NoOver, NoXover or NoNewnews.
+func (h *storeConn) disabled(cmd string) bool {
+	return (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) || (cmd == "NEWNEWS" && h.o.NoNewnews)
+}
+
 func (h *storeConn) capabilities() []string {
 	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT"}
+	if !h.o.NoNewnews {
+		out = append(out, "NEWNEWS")
+	}
 	if !h.o.NoOver {
 		out = append(out, "OVER MSGID")
 	}
@@ -219,7 +234,9 @@ func (h *storeConn) capabilities() []string {
 func (h *storeConn) help() []string {
 	out := []string{"100 Help text follows"}
 	for cmd := range argCount {
-		out = append(out, cmd)
+		if !h.disabled(cmd) {
+			out = append(out, cmd)
+		}
 	}
 	slices.Sort(out[1:])
 	return append(out, ".")
@@ -599,6 +616,33 @@ func (h *storeConn) newgroups(args []string) []string {
 	return append(out, ".")
 }
 
+func (h *storeConn) newnews(args []string) []string {
+	if len(args) == 4 && !strings.EqualFold(args[3], "GMT") {
+		return []string{"501 Syntax error"}
+	}
+	since, ok := parseNewgroupsTime(args[1], args[2], time.Now().UTC())
+	if !ok {
+		return []string{"501 Syntax error in date or time"}
+	}
+	out := []string{"230 List of new articles follows"}
+	seen := make(map[string]bool)
+	for _, g := range h.st.Groups() {
+		if !wildmat(args[0], g.Name) {
+			continue
+		}
+		if lim := h.st.GenLimit(g.Name); lim > 0 && g.High-g.Low+1 > lim {
+			return []string{genTooLarge(g.High-g.Low+1, lim)}
+		}
+		for _, a := range h.st.Overview(g.Name, g.Low, g.High) {
+			if !a.Arrived.Before(since) && !seen[a.MessageID] {
+				seen[a.MessageID] = true
+				out = append(out, a.MessageID)
+			}
+		}
+	}
+	return append(out, ".")
+}
+
 // post runs the POST exchange after a 340-able POST: it writes the first reply through the
 // Faults, reads and files the article and writes 240 or 441. False ends the connection.
 func (h *storeConn) post(line string) bool {
@@ -670,8 +714,9 @@ func (h *storeConn) file(wire []string) string {
 			a.Date = t
 		}
 	}
+	a.Arrived = time.Now()
 	if a.Date.IsZero() {
-		a.Date = time.Now()
+		a.Date = a.Arrived
 	}
 	h.st.AddPosted(a)
 	for _, g := range groups {
@@ -738,9 +783,9 @@ func parseNum(s string) (int64, bool) {
 	return n, err == nil
 }
 
-// parseNewgroupsTime parses the NEWGROUPS date (yymmdd or yyyymmdd) and time (hhmmss) as UTC.
-// A two-digit year is in the century of now when it is not after now's year, else in the one
-// before (RFC 3977 7.3.2).
+// parseNewgroupsTime parses the NEWGROUPS and NEWNEWS date (yymmdd or yyyymmdd) and time
+// (hhmmss) as UTC. A two-digit year is in the century of now when it is not after now's year,
+// else in the one before (RFC 3977 7.3.2).
 func parseNewgroupsTime(date, clock string, now time.Time) (time.Time, bool) {
 	if _, ok := parseNum(date); !ok || (len(date) != 6 && len(date) != 8) {
 		return time.Time{}, false

@@ -89,6 +89,11 @@ type StoreOptions struct {
 	// only one of them; NoOver also drops "OVER MSGID" from CAPABILITIES.
 	NoOver, NoXover bool
 
+	// NoNewnews makes NEWNEWS an unknown command (500) and drops it from CAPABILITIES and
+	// HELP, as on the many servers that do not offer it. INN with NEWNEWS disabled answers
+	// "502 NEWNEWS command disabled by administrator" instead: Faults.Override "NEWNEWS".
+	NoNewnews bool
+
 	// EmptyOverReply replaces the 423 that OVER/XOVER answer for a range without articles,
 	// e.g. {"420 No article(s) selected"} (older servers) or {"224 Overview follows", "."}.
 	EmptyOverReply []string

@@ -37,7 +37,7 @@
 //	func (s *Server) Host() string
 //	func (s *Server) Port() int
 //	func (s *Server) Lines() []string                // every client line in order, all connections
-//	func (s *Server) Articles() [][]string           // every dot block read (ReadDot steps, POST/TAKETHIS payloads), raw wire lines
+//	func (s *Server) Articles() [][]string           // every dot block read (ReadDot steps, POST/TAKETHIS/IHAVE payloads), raw wire lines
 //	func (s *Server) Mismatches() []string
 //	func (s *Server) Accepted() int                  // connections accepted so far
 //	func (s *Server) Open() int                      // connections not yet gone
@@ -57,12 +57,24 @@
 //
 //	func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) // self-signed ECDSA cert for 127.0.0.1
 //
-//	type PeerOptions struct { User, Pass string; Have map[string]bool; Defer431Once map[string]bool; StallModeStream time.Duration; OnArticle func(msgID string, wire []string) }
-//	func PeerHandler(o *PeerOptions) func(*Conn)      // streaming peer: CAPABILITIES, MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, QUIT; else 500
+//	type PeerOptions struct {
+//		User, Pass      string          // non-empty: AUTHINFO required; CHECK/TAKETHIS/IHAVE before auth → 480 (TAKETHIS after reading its article, IHAVE before any 335)
+//		Have            map[string]bool // ids the peer holds (CHECK 438, TAKETHIS 439, IHAVE 435); TAKETHIS 239 and IHAVE 235 add to it
+//		Defer431Once    map[string]bool // CHECK of these ids → 431 the first time only
+//		Defer436Once    map[string]bool // IHAVE of these ids → 436 the first time only, as the initial reply (innd: paused, or the article is arriving elsewhere)
+//		Reject          map[string]bool // refused after the transfer, every time: CHECK 238, TAKETHIS 439, IHAVE 335 then 437; not added to Have, no OnArticle
+//		NoStream        bool            // innd with streaming off: MODE STREAM 501, CHECK/TAKETHIS unknown (500, TAKETHIS's article lines are read as commands), no STREAMING capability
+//		StallModeStream time.Duration   // sleep before the handler's first MODE STREAM reply
+//		OnArticle       func(msgID string, wire []string) // before the 239/235 reply
+//	}
+//	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, QUIT; else 500
+//	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
+//	// Defer436Once; else 335, the article (dot block), then 437 (Reject, or held meanwhile) or
+//	// 235 (added to Have, OnArticle).
 //
 // Store (stateful mode; all methods are safe for concurrent use):
 //
-//	type Article struct { Number int64; MessageID string; Headers []string; Body []string; Date time.Time }
+//	type Article struct { Number int64; MessageID string; Headers []string; Body []string; Date, Arrived time.Time } // Arrived: arrival time for NEWNEWS
 //	type Group struct { Name, Description string; Low, High, Count int64; Posting bool; Created time.Time }
 //	type Location struct { Group string; Number int64 }
 //	type Store struct { ... }
@@ -70,7 +82,7 @@
 //	func (st *Store) AddGroup(name, description string)                 // idempotent; Posting true; Created = now when created
 //	func (st *Store) AddGroupAt(name, description string, created time.Time) // AddGroup with an explicit Created (also re-dates an existing group when non-zero)
 //	func (st *Store) SetPosting(group string, posting bool) bool        // LIST ACTIVE flag; false for an unknown group
-//	func (st *Store) AddArticle(group string, a Article) int64          // number = a.Number when > 0 (must be free, else panic) else High+1; Date zero → now; a missing Message-ID (field and header) is generated as <n.group@fakeserver.invalid> and indexed; a field that differs from the header panics; returns the number; a group that does not exist is created
+//	func (st *Store) AddArticle(group string, a Article) int64          // number = a.Number when > 0 (must be free, else panic) else High+1; Date and Arrived zero → now; a missing Message-ID (field and header) is generated as <n.group@fakeserver.invalid> and indexed; a field that differs from the header panics; returns the number; a group that does not exist is created
 //	func (st *Store) Article(group string, n int64) (Article, bool)
 //	func (st *Store) ByMessageID(id string) (Article, []Location, bool) // first article stored under id, every location
 //	func (st *Store) Group(name string) (Group, bool)
@@ -90,8 +102,8 @@
 //	func (st *Store) NumbersIn(group string, from, to int64) []int64    // existing numbers within [from,to]; to<=0 = High; also for generated groups (within the limit)
 //	func (st *Store) GenLimit(group string) int64                       // span limit of a generated group, 0 = none / stored group
 //	type Generator struct { Low, High int64; Article func(group string, n int64) (Article, bool); Lookup func(id string) (int64, bool); Limit int64 }
-//	func GeneratedArticle(group string, n int64) (Article, bool)        // default: <n.group@fakeserver.invalid>, Date 2020-01-01 + n s
-//	const DefaultGenLimit = 100000                                      // OVER/XOVER/LISTGROUP spanning more numbers of a generated group → 503
+//	func GeneratedArticle(group string, n int64) (Article, bool)        // default: <n.group@fakeserver.invalid>, Date 2020-01-01 + n s (a zero Arrived of a generated article = its Date)
+//	const DefaultGenLimit = 100000                                      // OVER/XOVER/LISTGROUP spanning more numbers of a generated group, or NEWNEWS matching such a group → 503
 //	func (a Article) Header(name string) string                         // first matching header value, case-insensitive, unfolded; "" when absent
 //	func (a Article) WithDefaults(group string) Article                 // copy with Message-ID, Newsgroups (when group != "") and Date headers added when missing
 //	const DateLayout = "Mon, 02 Jan 2006 15:04:05 -0700"
@@ -102,19 +114,23 @@
 //		OverviewFmt       []string
 //		GroupNumbers      func(conn int, g Group) Group // numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection (lagging frontends, "211 0 0 0")
 //		ListgroupRange    string   // "" RFC 3977; "reject": 501 for the range form; "ignore": the whole group
-//		NoOver, NoXover   bool     // that command is unknown (500); NoOver drops "OVER MSGID" from CAPABILITIES
+//		NoOver, NoXover   bool     // that command is unknown (500, not in HELP); NoOver drops "OVER MSGID" from CAPABILITIES
+//		NoNewnews         bool     // NEWNEWS is unknown (500), not in CAPABILITIES or HELP (INN's "502 ... disabled": Faults.Override)
 //		EmptyOverReply    []string // instead of 423 for a range without articles
 //		MaxOverRange      int64    // >0: cap of one OVER/XOVER range (open ranges end at High)
 //		OverRangeTooLarge []string // reply to a larger range; nil = only its first MaxOverRange numbers
 //		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
-//	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, OVER MSGID, POST
+//	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS, OVER MSGID, POST
 //	// unless ReaderOnly, AUTHINFO USER while auth is required, IMPLEMENTATION fakeserver), MODE
 //	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT], GROUP,
 //	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current; 412/420/423/430),
 //	// XOVER/OVER (range "n", "n-", "n-m" or message-id; 423 for an empty range), NEXT/LAST
-//	// (421/422), NEWGROUPS (Group.Created; RFC 3977 7.3.2 century rule), DATE, POST (440 when
+//	// (421/422), NEWGROUPS (Group.Created; RFC 3977 7.3.2 century rule), NEWNEWS wildmat date
+//	// time [GMT] (230: the message-ids, each once, of the articles in matching groups whose
+//	// Arrived is at or after the time; date and time as NEWGROUPS, always UTC; 503 when a
+//	// matching generated group spans more than its limit), DATE, POST (440 when
 //	// ReaderOnly; 340 then 240/441: Newsgroups, Subject and From required, Message-ID must be
 //	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
 //	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone

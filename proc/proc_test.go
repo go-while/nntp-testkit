@@ -227,6 +227,28 @@ func TestTCP(t *testing.T) {
 	}
 }
 
+func TestDone(t *testing.T) {
+	bin := buildEcho(t)
+	addr := freeAddr(t)
+	p := StartTCP(t, Options{Path: bin, Args: []string{"-listen", addr}}, addr)
+	select {
+	case <-p.Done():
+		t.Fatal("Done closed while the process runs")
+	default:
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Done not closed 10s after SIGTERM")
+	}
+	if err := p.Wait(); err != nil {
+		t.Errorf("Wait after Done: %v, want nil (exit 0 on SIGTERM)", err)
+	}
+}
+
 func TestStopTimeoutKills(t *testing.T) {
 	bin := buildEcho(t)
 	p := StartStdio(t, Options{Path: bin, Args: []string{"-ignore-term"}, StopTimeout: 200 * time.Millisecond})

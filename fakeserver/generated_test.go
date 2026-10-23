@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Generated groups (huge groups made on demand) and OverviewFields.
@@ -162,4 +163,34 @@ func TestOverviewFields(t *testing.T) {
 		t.Errorf("HEAD 2 has the overview id: %q", head)
 	}
 	wantCode(t, c, "ARTICLE <other@x>", 430)
+}
+
+func TestGeneratedNewnews(t *testing.T) {
+	st := NewStore()
+	st.AddGenerated(genGroup, "", Generator{Low: 1, High: 10_000_000, Limit: 1000})
+	st.AddGenerated("small.gen", "", Generator{Low: 1, High: 3}) // Date and Arrived 2020-01-01 + n s
+	st.AddGenerated("set.gen", "", Generator{Low: 1, High: 2, Article: func(group string, n int64) (Article, bool) {
+		a, _ := GeneratedArticle(group, n)
+		a.Arrived = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // arrived long after its Date
+		return a, true
+	}})
+	if a, _ := st.Article("small.gen", 2); !a.Arrived.Equal(a.Date) || a.Date != genEpoch.Add(2*time.Second) {
+		t.Errorf("generated Arrived %v, Date %v", a.Arrived, a.Date)
+	}
+	_, c := storeServer(t, st, StoreOptions{}, Faults{})
+	_, got := wantBlock(t, c, "NEWNEWS small.gen 20200101 000002 GMT", 230)
+	wantEqual(t, "small.gen", got, []string{"<2.small.gen@fakeserver.invalid>", "<3.small.gen@fakeserver.invalid>"})
+	_, got = wantBlock(t, c, "NEWNEWS *.gen 20250101 000000 GMT", 230)
+	wantEqual(t, "set.gen", got, []string{"<1.set.gen@fakeserver.invalid>", "<2.set.gen@fakeserver.invalid>"})
+	// a matching huge group is examined whole: over its limit → 503, nothing listed
+	if line := wantCode(t, c, "NEWNEWS * 20250101 000000 GMT", 503); !strings.Contains(line, "over its limit of 1000") {
+		t.Errorf("NEWNEWS over a huge group: %q", line)
+	}
+	wantCode(t, c, "NEWNEWS alt.binaries.* 20990101 000000", 503)
+	// within the limit after expiry
+	st.Expire(genGroup, 9_999_001)
+	_, got = wantBlock(t, c, "NEWNEWS alt.binaries.* 20200101 000000", 230)
+	if len(got) != 1000 || got[999] != "<10000000.alt.binaries.huge@fakeserver.invalid>" {
+		t.Errorf("NEWNEWS of 1000: %d ids", len(got))
+	}
 }
