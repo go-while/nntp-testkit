@@ -1,8 +1,8 @@
 # nntp-testkit
 
 Shared NNTP test tools in Go: a fake NNTP server (scripted, handler-driven or backed by a stateful
-store), a strict test client that reports wire-level mistakes, and a runner for external server
-binaries. Standard library only, Go 1.26 or later; CI tests the previous Go release and the
+store), a strict test client that reports wire-level mistakes, a runner for external server
+binaries, and yEnc-encoded test posts. Standard library only, Go 1.26 or later; CI tests the previous Go release and the
 latest on Linux and macOS (`proc` uses Unix signals, so Windows is not tested).
 
 It is written for the test suites of go-pugleaf, nntp-server and nntp-proxy (Go tests import the
@@ -33,6 +33,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `client` | strict NNTP test client |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; streaming peer |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
+| `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
 | `conformance` | stub: planned black-box RFC 3977/4643/4644 checks against any address |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
@@ -182,6 +183,23 @@ server-side wait.
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes
 `Stderr()` (stdout too in TCP mode) and every file in `Options.Logs` to the test output with
 `tb.Log`. `Stop` needs a Unix system.
+
+### yenc
+
+yEnc-encoded article bodies, for testing decoders and clients that fetch binaries. The lines go
+into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (the server adds it).
+
+| API | what |
+|---|---|
+| `type Options struct { Line int; RawDots, RawSpaces bool; ExtraEscapes string; NoBegin, NoEnd, BadSize, BadCRC bool }` | the zero value encodes as yEnc 1.3 recommends: NUL, LF, CR and `=` escaped, tab and space at line ends, `.` at line starts; `Line` 0 = 128 |
+| `Encode(name, data, Options) []string` | a single-part post: `=ybegin`, the data lines, `=yend size= crc32=` |
+| `EncodeParts(name, data, partSize, Options) [][]string` | one post per part: `=ybegin part= total=`, `=ypart begin= end=`, the data, `=yend size= part= pcrc32=` (and `crc32=` of the whole data on the last part) |
+| `Data(Profile, size, seed) []byte`; `Random`, `Plain`, `Escapes`, `Edges` | reproducible data: random bytes (most of Usenet), no escapes, an escape in every second byte, a third of the bytes at `.`, tab and space |
+| `Generator(Profile, low, high, size func(n int64) int, Options) fakeserver.Generator` | a generated group: article n is `Data(p, size(n), n)` named `<p>-<n>.bin`, with `GeneratedArticle`'s headers and a yEnc Subject |
+
+`RawDots` and `RawSpaces` model posting tools that leave those characters to the server's
+dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
+cuts a post off mid-body instead.
 
 ## Example
 
