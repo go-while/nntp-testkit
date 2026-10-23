@@ -27,6 +27,10 @@
 //	func (c *Conn) RawUntilDot() []byte                    // exact bytes up to and including "\r\n.\r\n" (or ".\r\n" when empty); fails tb on error
 //	func (c *Conn) TryRawUntilDot() ([]byte, error)        // the same, returning the error
 //	func (c *Conn) ExpectNoPending(d time.Duration) error  // wait up to d for bytes; any → *StrictError{Kind: Pending, Bytes: ...}; nil on timeout/EOF; never consumes the bytes; restores the deadline
+//	func (c *Conn) TryCompress() (int, string, error)     // send "COMPRESS DEFLATE" (RFC 8054); 206 → StartCompress, nil error; else code, line and an error, c stays plain
+//	func (c *Conn) Compress()                               // TryCompress; fails tb unless 206
+//	func (c *Conn) StartCompress() error                    // compress from now on without sending anything (the test sent COMPRESS and read the 206); error when already on
+//	func (c *Conn) Compressed() bool
 //	func (c *Conn) Close()
 //
 //	func ParseCode(line string) (int, error)               // 3-digit code at the start, followed by space or end
@@ -42,6 +46,20 @@
 // offending line, raw), Bytes (for Pending) and Err (the underlying read error, via Unwrap, so
 // errors.Is(err, io.EOF) and net.Error timeout checks work), and a descriptive Error(). The tb-failing methods (Cmd, ReadDotLines, RawUntilDot) fail with the
 // error text. In non-strict mode a bare LF is accepted as a line end, like a lenient client.
+//
+// Compression (RFC 8054 COMPRESS DEFLATE): after StartCompress c.Conn deflates every Write
+// (raw DEFLATE, no zlib header) and sync-flushes it, so every Send and Cmd reaches the server
+// whole, and c.R reads the inflated server stream, starting with the bytes buffered after the
+// 206 line. Strict mode, ReadDotLines, RawUntilDot and ExpectNoPending keep their contracts on
+// the inflated stream: an empty flush block inflates to nothing, so ExpectNoPending still waits
+// its duration and returns nil, and bytes it reports stay readable. An inflater goroutine
+// reads the socket and passes on every byte as soon as it can be decoded, whatever flush the
+// server uses (sync, full, or zlib's partial flush as INN's nnrpd sends); the hang guard and
+// other read deadlines apply to the inflated stream, so a timeout loses nothing, and writes
+// keep the socket's deadline. A server that closes reads as io.EOF; corrupt compressed data
+// is a read error wrapping flate.CorruptInputError (every later read returns it). Close ends
+// the goroutine. The client does not stop a test from sending COMPRESS, STARTTLS or AUTHINFO
+// after compression, so it can check the server's 502.
 //
 // The kit never contacts any host a test did not name; the deadline only stops a hung test.
 package client
