@@ -206,7 +206,7 @@ server-side wait.
 | `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG) |
 | `StartStdio(tb, Options) *Process` | stdin/stdout are the client connection (inetd style): `Conn()` |
 | `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT) |
-| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `Wait`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode |
+| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `Wait`, `Done`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode; `Done()` is closed once the process exited (a bounded wait that, unlike `Wait`, never stops it) |
 | `Stop()` | SIGTERM, SIGKILL after `StopTimeout` (`DefaultStopTimeout` = 5s); idempotent; run by `tb.Cleanup` |
 
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes

@@ -29,6 +29,7 @@
 //	func (p *Process) Signal(sig os.Signal) error
 //	func (p *Process) Stop()                            // SIGTERM, SIGKILL after StopTimeout, then Wait; idempotent; also run by tb.Cleanup
 //	func (p *Process) Wait() error                      // the exit error, once
+//	func (p *Process) Done() <-chan struct{}            // closed once the process has exited; never stops it
 //	func (p *Process) Stderr() string                   // captured so far (stdout too in TCP mode)
 //	const DefaultStopTimeout = 5 * time.Second
 //
