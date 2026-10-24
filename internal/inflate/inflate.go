@@ -43,6 +43,7 @@ type decoder struct {
 	off  int64  // input bytes read
 	hist []byte // decoded: at least the last 32 KiB passed on, then the bytes not yet passed on
 	sent int    // hist[:sent] was passed on
+	oerr error  // the error of out: it is not called again
 }
 
 // corrupt is the error for invalid input.
@@ -50,10 +51,15 @@ func (d *decoder) corrupt(why string) error {
 	return fmt.Errorf("corrupt compressed stream (%s): %w", why, flate.CorruptInputError(d.off))
 }
 
-// flush passes the decoded bytes on and trims the history to the window.
+// flush passes the decoded bytes on and trims the history to the window. Once out failed it
+// returns that error without calling out again.
 func (d *decoder) flush() error {
+	if d.oerr != nil {
+		return d.oerr
+	}
 	if d.sent < len(d.hist) {
 		if err := d.out(d.hist[d.sent:]); err != nil {
+			d.oerr = err
 			return err
 		}
 		d.sent = len(d.hist)

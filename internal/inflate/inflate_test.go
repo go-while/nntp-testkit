@@ -206,7 +206,7 @@ func TestCorrupt(t *testing.T) {
 }
 
 // TestEnd: the end of the input is io.EOF, the output decoded before it is passed on, and an
-// error of out stops Run.
+// error of out stops Run without another call of out.
 func TestEnd(t *testing.T) {
 	var buf bytes.Buffer
 	zw, _ := flate.NewWriter(&buf, flate.BestSpeed)
@@ -221,7 +221,8 @@ func TestEnd(t *testing.T) {
 		t.Fatalf("Run = %q %v", got, err)
 	}
 	stop := errors.New("stop")
-	if err := Run(bufio.NewReader(bytes.NewReader(buf.Bytes())), func([]byte) error { return stop }); err != stop {
-		t.Fatalf("out error: %v", err)
+	calls := 0
+	if err := Run(bufio.NewReader(bytes.NewReader(buf.Bytes())), func([]byte) error { calls++; return stop }); err != stop || calls != 1 {
+		t.Fatalf("out error: %v after %d calls of out, want 1", err, calls)
 	}
 }
