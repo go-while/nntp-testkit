@@ -13,18 +13,18 @@ import (
 	"github.com/go-while/nntp-testkit/internal/inflate"
 )
 
-// StartCompress switches the connection to COMPRESS DEFLATE (RFC 8054) in both directions:
-// call it right after writing the "206" reply, since the compression layer starts after its
-// CRLF. From then on every write (WriteLines, the replies of the handlers with their Faults,
-// Raw().Write) is deflated (raw DEFLATE, RFC 1951, no zlib header), sync-flushed at its
-// end and sent to the socket in one write, and ReadLine and ReadDotBlock read the inflated client stream, so Lines, Counts,
-// Articles and Mismatches record the commands as the client wrote them. Bytes the client
-// sent after its COMPRESS line before the 206 (a pipelined COMPRESS, which RFC 8054 2.2.1
-// forbids) are inflated too: plain text there is corrupt input (INN's nnrpd reads such
-// buffered bytes as plain commands instead). The input is inflated by a goroutine that
-// passes on every byte as soon as it can be decoded, whatever flush the client uses (sync,
-// full or zlib's partial flush). Corrupt compressed input is a read error: the handlers
-// return and the connection is closed, as RFC 8054 2.2.2 requires. Raw returns the
+// StartCompress switches the connection to COMPRESS DEFLATE (RFC 8054) in both directions: call
+// it right after writing the "206" reply, since the compression layer starts after its CRLF.
+// From then on every write (WriteLines, the replies of the handlers with their Faults,
+// Raw().Write) is deflated (raw DEFLATE, RFC 1951, no zlib header), sync-flushed at its end and
+// sent to the socket in one write, and ReadLine and ReadDotBlock read the inflated client
+// stream, so Lines, Counts, Articles and Mismatches record the commands as the client wrote
+// them. Bytes the client sent after its COMPRESS line before the 206 (a pipelined COMPRESS,
+// which RFC 8054 2.2.1 forbids) are inflated too: plain text there is corrupt input (INN's
+// nnrpd reads such buffered bytes as plain commands instead). The input is inflated by a
+// goroutine that passes on every byte as soon as it can be decoded, whatever flush the client
+// uses (sync, full or zlib's partial flush). Corrupt compressed input is a read error: the
+// handlers return and the connection is closed, as RFC 8054 2.2.2 requires. Raw returns the
 // compressing conn afterwards; keep Raw() from before the call to write bytes past the
 // compressor (corrupt output for a client test). It fails when compression is already on.
 func (c *Conn) StartCompress() error { return c.startCompress(false) }

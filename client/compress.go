@@ -46,24 +46,24 @@ func (c *Conn) Compress() {
 }
 
 // StartCompress switches c to COMPRESS DEFLATE without sending anything: for a test that sent
-// the COMPRESS command itself and read the 206. From then on c.Conn is a net.Conn that
-// deflates every Write (raw DEFLATE, RFC 1951, no zlib header) with a sync flush at its end
-// and sends the result to the socket in one write, so each Send is decodable by the server at
-// once but not before the write of it returned (a server that answers a command and closes,
-// as on QUIT, cannot make the rest of that command's write fail), and inflates what the
-// server sends; c.R
+// the COMPRESS command itself and read the 206. From then on c.Conn is a net.Conn that deflates
+// every Write (raw DEFLATE, RFC 1951, no zlib header) with a sync flush at its end and sends
+// the result to the socket in one write, so each Send is decodable by the server at once but
+// not before the write of it returned (a server that answers a command and closes, as on QUIT,
+// cannot make the rest of that command's write fail), and inflates what the server sends; c.R
 // is a new reader on top of it. Bytes already buffered in the old c.R after the 206 line are
-// the start of the compressed stream and are inflated first. Every inflated byte is readable
-// as soon as the bytes that carry it have arrived, whatever flush the server uses: a sync or
-// full flush (00 00 ff ff) or zlib's Z_PARTIAL_FLUSH (an empty fixed block), which INN's
-// nnrpd uses and which compress/flate's reader would hold back until more data comes.
+// the start of the compressed stream and are inflated first. Every inflated byte is readable as
+// soon as the bytes that carry it have arrived, whatever flush the server uses: a sync or full
+// flush (00 00 ff ff) or zlib's Z_PARTIAL_FLUSH (an empty fixed block), which INN's nnrpd uses
+// and which compress/flate's reader would hold back until more data comes.
 //
-// The socket is read by an inflater goroutine without a read deadline (Close ends it); the
-// read deadline that every blocking step sets applies to the inflated stream instead, so the
-// hang guard, ExpectNoPending and direct deadlines on c.Conn work as before, and a timeout
-// loses nothing. Writes keep the socket's write deadline. Keep the old c.Conn before the call
-// to write bytes past the compressor (corrupt input for a server test).
+// The socket is read by an inflater goroutine without a read deadline (Close ends it); the read
+// deadline that every blocking step sets applies to the inflated stream instead, so the hang
+// guard, ExpectNoPending and direct deadlines on c.Conn work as before, and a timeout loses
+// nothing. Writes keep the socket's write deadline. Keep the old c.Conn before the call to
+// write bytes past the compressor (corrupt input for a server test).
 //
+
 // A connection the server closes reads as io.EOF, as without compression; output the server
 // did not flush before closing is lost (the reply is missing or cut). A corrupt compressed
 // stream is a read error wrapping flate.CorruptInputError, after the bytes inflated before
