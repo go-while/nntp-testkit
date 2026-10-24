@@ -2,6 +2,7 @@ package fakeserver
 
 import (
 	"bufio"
+	"bytes"
 	"compress/flate"
 	"errors"
 	"io"
@@ -15,8 +16,8 @@ import (
 // StartCompress switches the connection to COMPRESS DEFLATE (RFC 8054) in both directions:
 // call it right after writing the "206" reply, since the compression layer starts after its
 // CRLF. From then on every write (WriteLines, the replies of the handlers with their Faults,
-// Raw().Write) is deflated (raw DEFLATE, RFC 1951, no zlib header) and sync-flushed at its
-// end, and ReadLine and ReadDotBlock read the inflated client stream, so Lines, Counts,
+// Raw().Write) is deflated (raw DEFLATE, RFC 1951, no zlib header), sync-flushed at its
+// end and sent to the socket in one write, and ReadLine and ReadDotBlock read the inflated client stream, so Lines, Counts,
 // Articles and Mismatches record the commands as the client wrote them. Bytes the client
 // sent after its COMPRESS line before the 206 (a pipelined COMPRESS, which RFC 8054 2.2.1
 // forbids) are inflated too: plain text there is corrupt input (INN's nnrpd reads such
@@ -47,11 +48,12 @@ func (c *Conn) startCompress(outputOnly bool) error {
 	if c.Compressed() {
 		return errors.New("fakeserver: compression is already active")
 	}
-	zw, err := flate.NewWriter(c.conn, flate.DefaultCompression)
+	d := &deflateConn{Conn: c.conn, r: c.r}
+	zw, err := flate.NewWriter(&d.out, flate.DefaultCompression)
 	if err != nil {
 		return err
 	}
-	d := &deflateConn{Conn: c.conn, r: c.r, zw: zw}
+	d.zw = zw
 	if !outputOnly {
 		pr, pw := io.Pipe()
 		d.r, d.pr = pr, pr
@@ -72,9 +74,11 @@ func (c *Conn) startCompress(outputOnly bool) error {
 // addresses and Close are those of the conn underneath.
 type deflateConn struct {
 	net.Conn
-	r  io.Reader
-	pr *io.PipeReader // the inflater's output; nil for StartCompressOutputOnly
-	zw *flate.Writer
+	r    io.Reader
+	pr   *io.PipeReader // the inflater's output; nil for StartCompressOutputOnly
+	zw   *flate.Writer  // writes into out
+	out  bytes.Buffer   // the deflated bytes of one Write, sent in one write
+	werr error          // the first failed write: the stream is broken from there on
 }
 
 func (d *deflateConn) Read(p []byte) (int, error) { return d.r.Read(p) }
@@ -87,13 +91,24 @@ func (d *deflateConn) Close() error {
 	return d.Conn.Close()
 }
 
-// Write deflates p and flushes the compressor (sync flush), so the client can inflate all of
-// p at once.
+// Write deflates p, flushes the compressor (sync flush) and writes the result to the conn
+// underneath in one write, as a server that flushes its output buffer, so the client can
+// inflate all of p at once (compress/flate's Writer on its own writes a short input in five
+// pieces). After a failed write the deflate stream is broken, so every later Write returns
+// that error.
 func (d *deflateConn) Write(p []byte) (int, error) {
-	if _, err := d.zw.Write(p); err != nil {
+	if d.werr != nil {
+		return 0, d.werr
+	}
+	d.out.Reset()
+	if _, err := d.zw.Write(p); err != nil { // into d.out: cannot fail
 		return 0, err
 	}
 	if err := d.zw.Flush(); err != nil {
+		return 0, err
+	}
+	if _, err := d.Conn.Write(d.out.Bytes()); err != nil {
+		d.werr = err
 		return 0, err
 	}
 	return len(p), nil

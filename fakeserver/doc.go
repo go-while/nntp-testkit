@@ -172,7 +172,7 @@
 //	// Store mode and in Script mode (there: only to a matched step's reply), in this order:
 //	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
 //	// then Endless (LineDelay pauses between the lines of the write). DropInMultiline counts the status line; 0 closes before writing anything.
-//	// On a compressed connection the faults work on the inflated stream; each write is deflated and sync-flushed.
+//	// On a compressed connection the faults work on the inflated stream; each write is deflated, sync-flushed and sent in one socket write.
 //	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
 //	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
@@ -180,13 +180,14 @@
 // COMPRESS DEFLATE (RFC 8054): a Handler switches a connection with Conn.StartCompress right
 // after it wrote the 206; StoreHandler and PeerHandler do it with Compress, a Script step with
 // Step.Compress. Compression starts after the CRLF of the 206 in both directions: every write
-// (replies, Faults, Raw().Write) is raw DEFLATE, sync-flushed at its end; the client stream is
-// inflated as it arrives, whatever flush the client uses, so ReadLine, ReadDotBlock, Lines,
-// Counts, Articles and Mismatches see the commands as the client wrote them. Corrupt input
-// closes the connection (RFC 8054 2.2.2). The handlers answer COMPRESS while active with 502,
-// any syntactically valid algorithm (RFC 8054 2.2.2), do not list COMPRESS DEFLATE in
-// CAPABILITIES then, and answer AUTHINFO with 502. StartCompressOutputOnly (CompressOutputOnly
-// in the options) models a half implementation for client tests: the 206 and everything after
-// it is compressed, but the client's compressed commands are read as they are, so a client
-// that follows the RFC gets no answer or "500" answers to binary lines.
+// (replies, Faults, Raw().Write) is raw DEFLATE, sync-flushed at its end and sent in one socket
+// write; the client stream is inflated as it arrives, whatever flush the client uses, so
+// ReadLine, ReadDotBlock, Lines, Counts, Articles and Mismatches see the commands as the
+// client wrote them. Corrupt input closes the connection (RFC 8054 2.2.2). The handlers answer
+// COMPRESS while active with 502, any syntactically valid algorithm (RFC 8054 2.2.2), do not
+// list COMPRESS DEFLATE in CAPABILITIES then, and answer AUTHINFO with 502.
+// StartCompressOutputOnly (CompressOutputOnly in the options) models a half implementation for
+// client tests: the 206 and everything after it is compressed, but the client's compressed
+// commands are read as they are, so a client that follows the RFC gets no answer or "500"
+// answers to binary lines.
 package fakeserver

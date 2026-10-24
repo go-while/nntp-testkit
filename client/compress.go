@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"compress/flate"
 	"errors"
 	"fmt"
@@ -46,8 +47,11 @@ func (c *Conn) Compress() {
 
 // StartCompress switches c to COMPRESS DEFLATE without sending anything: for a test that sent
 // the COMPRESS command itself and read the 206. From then on c.Conn is a net.Conn that
-// deflates every Write (raw DEFLATE, RFC 1951, no zlib header) with a sync flush at its end,
-// so each Send is decodable by the server at once, and inflates what the server sends; c.R
+// deflates every Write (raw DEFLATE, RFC 1951, no zlib header) with a sync flush at its end
+// and sends the result to the socket in one write, so each Send is decodable by the server at
+// once but not before the write of it returned (a server that answers a command and closes,
+// as on QUIT, cannot make the rest of that command's write fail), and inflates what the
+// server sends; c.R
 // is a new reader on top of it. Bytes already buffered in the old c.R after the 206 line are
 // the start of the compressed stream and are inflated first. Every inflated byte is readable
 // as soon as the bytes that carry it have arrived, whatever flush the server uses: a sync or
@@ -73,11 +77,12 @@ func (c *Conn) StartCompress() error {
 	if err := c.Conn.SetReadDeadline(time.Time{}); err != nil {
 		return err
 	}
-	zw, err := flate.NewWriter(c.Conn, flate.DefaultCompression)
+	d := &deflateConn{raw: c.Conn, wake: make(chan struct{}, 1)}
+	zw, err := flate.NewWriter(&d.out, flate.DefaultCompression)
 	if err != nil {
 		return err
 	}
-	d := &deflateConn{raw: c.Conn, zw: zw, wake: make(chan struct{}, 1)}
+	d.zw = zw
 	d.room = sync.NewCond(&d.mu)
 	go d.inflate(c.R)
 	c.Conn = d
@@ -96,9 +101,11 @@ func (c *Conn) Compressed() bool {
 // deflateConn is c.Conn after StartCompress: writes are deflated and flushed, reads come from
 // the inflater goroutine through buf, bounded by the read deadline.
 type deflateConn struct {
-	raw net.Conn
-	wmu sync.Mutex // serialises Write (the flate.Writer is not safe for concurrent use)
-	zw  *flate.Writer
+	raw  net.Conn
+	wmu  sync.Mutex    // serialises Write (the flate.Writer is not safe for concurrent use)
+	zw   *flate.Writer // writes into out
+	out  bytes.Buffer  // the deflated bytes of one Write, sent to raw in one write
+	werr error         // the first failed write to raw: the stream is broken from there on
 
 	mu       sync.Mutex
 	room     *sync.Cond // the inflater waits on it while buf is full
@@ -189,15 +196,29 @@ func (d *deflateConn) put(b []byte) error {
 	return nil
 }
 
-// Write deflates p and flushes the compressor (sync flush), so the server can inflate all of
-// p at once; it returns len(p) on success.
+// Write deflates p, flushes the compressor (sync flush) and writes the result to the socket
+// in one write, so the server can inflate all of p at once; it returns len(p) on success.
+// compress/flate's Writer on its own writes a short input as five pieces (stored block
+// header, LEN/NLEN, the data, then the empty stored block of the flush in two): the server
+// could decode the whole command from the third piece, answer and close, and the write of
+// the fourth would fail although the answer was waiting. After a failed write the deflate
+// stream is broken (the server lacks bytes the compressor already counted), so every later
+// Write returns that error.
 func (d *deflateConn) Write(p []byte) (int, error) {
 	d.wmu.Lock()
 	defer d.wmu.Unlock()
-	if _, err := d.zw.Write(p); err != nil {
+	if d.werr != nil {
+		return 0, d.werr
+	}
+	d.out.Reset()
+	if _, err := d.zw.Write(p); err != nil { // into d.out: cannot fail
 		return 0, err
 	}
 	if err := d.zw.Flush(); err != nil {
+		return 0, err
+	}
+	if _, err := d.raw.Write(d.out.Bytes()); err != nil {
+		d.werr = err
 		return 0, err
 	}
 	return len(p), nil

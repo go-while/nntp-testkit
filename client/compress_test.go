@@ -13,6 +13,7 @@ import (
 	"time"
 
 	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/internal/inflate"
 )
 
 // zserver is the server side of a peer connection after COMPRESS DEFLATE: plain and deflate
@@ -353,5 +354,65 @@ func TestCompressPartialFlush(t *testing.T) {
 	}
 	if err := c.ExpectNoPending(50 * time.Millisecond); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCompressOneWrite: every Send reaches the socket in one write, so a server that answers a
+// command as soon as it has inflated it and then closes (QUIT, fakeserver's Faults.CloseAfter)
+// cannot make the rest of that Send fail with EPIPE or ECONNRESET. compress/flate's Writer on
+// its own writes "QUIT\r\n" in five pieces, the command complete in the third. net.Pipe keeps
+// write boundaries and a Write returns only once the reader took all of it, so this is
+// deterministic: the server reads one write at a time, answers each line at once and closes
+// after QUIT without reading on.
+func TestCompressOneWrite(t *testing.T) {
+	a, b := net.Pipe()
+	c := New(t, a)
+	go func() {
+		defer b.Close()
+		r := bufio.NewReader(b)
+		if line, err := r.ReadString('\n'); err != nil || line != "COMPRESS DEFLATE\r\n" {
+			return
+		}
+		write(b, "206 Compression active\r\n")
+		var out bytes.Buffer
+		zw, _ := flate.NewWriter(&out, flate.BestSpeed)
+		reply := func(s string) {
+			out.Reset()
+			_, _ = zw.Write([]byte(s))
+			_ = zw.Flush()
+			_, _ = b.Write(out.Bytes())
+		}
+		var in []byte
+		quit := errors.New("quit")
+		_ = inflate.Run(r, func(p []byte) error {
+			in = append(in, p...)
+			for {
+				i := bytes.IndexByte(in, '\n')
+				if i < 0 {
+					return nil
+				}
+				line := strings.TrimRight(string(in[:i]), "\r")
+				in = in[i+1:]
+				switch line {
+				case "DATE":
+					reply("111 20261024000000\r\n")
+				case "QUIT":
+					reply("205 bye\r\n")
+					return quit // close at once, the rest of the client's bytes unread
+				default:
+					reply("500 what?\r\n")
+				}
+			}
+		})
+	}()
+	c.Compress()
+	if code, line := c.Cmd("DATE"); code != 111 {
+		t.Fatalf("DATE = %q", line)
+	}
+	if code, line := c.Cmd("QUIT"); code != 205 {
+		t.Fatalf("QUIT = %q", line)
+	}
+	if l, err := c.ReadLine(); err != io.EOF {
+		t.Fatalf("after QUIT: %q %v, want io.EOF", l, err)
 	}
 }

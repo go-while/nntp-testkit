@@ -73,18 +73,19 @@ Strict mode (on for `Dial`, `DialWith`, `TryDial` and `New`) returns a `*StrictE
 
 `Err` holds the read error and `Unwrap` returns it, so `errors.Is(err, io.EOF)` works.
 
-**COMPRESS DEFLATE** (RFC 8054): after `StartCompress`, `c.Conn` deflates every write (raw
-DEFLATE, sync-flushed per `Send`/`Cmd`) and `c.R` reads the inflated server stream, starting with
-the bytes buffered after the 206 line. Strict mode, `ReadDotLines`, `RawUntilDot` and
-`ExpectNoPending` work on the inflated stream as before (an empty flush block inflates to
-nothing, so `ExpectNoPending` still waits and returns nil). A goroutine inflates the socket and
-passes on each byte as soon as it can be decoded, whatever flush the server uses: also zlib's
-`Z_PARTIAL_FLUSH`, which INN's nnrpd sends and which Go's `compress/flate` reader holds back
+**COMPRESS DEFLATE** (RFC 8054): after `StartCompress`, `c.Conn` deflates every write (raw DEFLATE,
+sync-flushed per `Send`/`Cmd` and sent in one socket write, so a server that answers a command and
+closes, as on QUIT, cannot fail the write of that command) and `c.R` reads the inflated server
+stream, starting with the bytes buffered after the 206 line. Strict mode, `ReadDotLines`,
+`RawUntilDot` and `ExpectNoPending` work on the inflated stream as before (an empty flush block
+inflates to nothing, so `ExpectNoPending` still waits and returns nil). A goroutine inflates the
+socket and passes on each byte as soon as it can be decoded, whatever flush the server uses: also
+zlib's `Z_PARTIAL_FLUSH`, which INN's nnrpd sends and which Go's `compress/flate` reader holds back
 until more data arrives. Read deadlines (the hang guard, `ExpectNoPending`) apply to the inflated
-stream, so a timeout loses nothing. A closed connection reads as `io.EOF`, corrupt data as an
-error wrapping `flate.CorruptInputError`. Keep `c.Conn` from before `Compress` to write bytes past
-the compressor. A second `COMPRESS`, `STARTTLS` or `AUTHINFO` can still be sent to check the
-server's 502.
+stream, so a timeout loses nothing. A closed connection reads as `io.EOF`, corrupt data as an error
+wrapping `flate.CorruptInputError`. Keep `c.Conn` from before `Compress` to write bytes past the
+compressor. A second `COMPRESS`, `STARTTLS` or `AUTHINFO` can still be sent to check the server's
+502.
 `ExpectNoPending(d)` returns nil on timeout or EOF, never consumes data and restores the deadline;
 call it after a reply to catch a stray byte or a second status line (e.g. a NUL after
 `400 too many users`). With `Strict: false` a bare LF is a line end, like a lenient client.
@@ -220,14 +221,14 @@ server-side wait.
 `Conn.ReadLine`, in all modes and on all connections (dot-block payload lines are not counted).
 
 **COMPRESS DEFLATE** (RFC 8054): compression starts after the CRLF of the 206 in both directions.
-Every write (replies, every fault, `Raw().Write`) is deflated and sync-flushed; the client stream is
-inflated as it arrives, whatever flush the client uses, so `Lines`, `Counts`, `Articles` and
-`Mismatches` record the commands as the client wrote them. The Store handler starts compression
-when the status it wrote for COMPRESS, after the faults, is a 206: `Faults.Override` `"COMPRESS"`
-`{"403 Unable to activate compression"}` is a server that cannot, `{}` one that never answers.
-Corrupt compressed input closes the connection. Bytes a client pipelines after `COMPRESS DEFLATE`
-are inflated too (INN's nnrpd reads them as plain commands). There is no STARTTLS (TLS is
-`Options.TLS`), and crypto/tls has no TLS-level compression.
+Every write (replies, every fault, `Raw().Write`) is deflated, sync-flushed and sent in one socket
+write; the client stream is inflated as it arrives, whatever flush the client uses, so `Lines`,
+`Counts`, `Articles` and `Mismatches` record the commands as the client wrote them. The Store
+handler starts compression when the status it wrote for COMPRESS, after the faults, is a 206:
+`Faults.Override` `"COMPRESS"` `{"403 Unable to activate compression"}` is a server that cannot,
+`{}` one that never answers. Corrupt compressed input closes the connection. Bytes a client
+pipelines after `COMPRESS DEFLATE` are inflated too (INN's nnrpd reads them as plain commands).
+There is no STARTTLS (TLS is `Options.TLS`), and crypto/tls has no TLS-level compression.
 
 ### proc
 

@@ -149,9 +149,9 @@ type StoreOptions struct {
 // by Options.Deadline like every server-side wait: after it the connection is closed.
 //
 // On a compressed connection (COMPRESS DEFLATE) every fault works on the inflated stream as
-// without compression: each write is deflated and sync-flushed, so a Drip byte or a
-// LineDelay line reaches the client on its own, and a reply cut by DropInMultiline or
-// CloseAfter ends at a flush.
+// without compression: each write is deflated, sync-flushed and sent in one socket write, so a
+// Drip byte or a LineDelay line reaches the client on its own, and a reply cut by
+// DropInMultiline or CloseAfter ends at a flush.
 type Faults struct {
 	Delay           map[string]time.Duration // command → sleep before its reply
 	CloseAfter      int                      // >0: close the connection after this many commands
