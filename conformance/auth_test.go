@@ -151,8 +151,38 @@ func TestAuthWrongPassAccepted(t *testing.T) {
 		{Expect: "AUTHINFO PASS .*", Reply: []string{"281 anything goes"}},
 	}})
 	r := asRunCheck(t, Options{Addr: s.Addr(), User: "u", Pass: "p"}, asFind(t, authChecks(), "authinfo-wrong-pass"))
-	if r.Status != Fail || !strings.Contains(r.Detail, "want 481") {
-		t.Fatalf("got %v %q, want FAIL want 481", r.Status, r.Detail)
+	if r.Status != Pass || r.Detail != "any password accepted" {
+		t.Fatalf("got %v %q, want PASS any password accepted", r.Status, r.Detail)
+	}
+}
+
+// TestAuth480ToAuthinfo: a 480 in reply to AUTHINFO itself fails (RFC 4643 §2.3.1).
+func TestAuth480ToAuthinfo(t *testing.T) {
+	for _, tc := range []struct{ name, expect string }{
+		{"authinfo-user-pass", "AUTHINFO USER u"},
+		{"authinfo-pass-without-user", "AUTHINFO PASS .*"},
+	} {
+		s := fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+			{Expect: "CAPABILITIES", Reply: asAuthCaps},
+			{Expect: tc.expect, Reply: []string{"480 authenticate first"}},
+		}})
+		r := asRunCheck(t, Options{Addr: s.Addr(), User: "u", Pass: "p"}, asFind(t, authChecks(), tc.name))
+		if r.Status != Fail || !strings.Contains(r.Detail, "§2.3.1") {
+			t.Errorf("%s: got %v %q, want FAIL citing §2.3.1", tc.name, r.Status, r.Detail)
+		}
+	}
+}
+
+// TestAuthNotAdvertised: a server that requires AUTHINFO without listing it (PeerHandler, as
+// innd) is logged in anyway; the check passes and says so.
+func TestAuthNotAdvertised(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(&fakeserver.PeerOptions{User: "u", Pass: "p"})})
+	o := Options{Addr: s.Addr(), User: "u", Pass: "p"}
+	for _, name := range []string{"authinfo-user-pass", "authinfo-wrong-pass", "authinfo-capabilities"} {
+		r := asRunCheck(t, o, asFind(t, authChecks(), name))
+		if r.Status != Pass || r.Detail != asNotAdvertised {
+			t.Errorf("%s: got %v %q, want PASS %q", name, r.Status, r.Detail, asNotAdvertised)
+		}
 	}
 }
 

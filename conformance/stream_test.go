@@ -154,3 +154,151 @@ func TestAsArticleStuffing(t *testing.T) {
 		t.Errorf("article lines %q", lines)
 	}
 }
+
+// asLoginCapsPeer is a transit peer in the style of innd: before AUTHINFO it lists only
+// VERSION 2 and AUTHINFO USER and answers 480 to everything but CAPABILITIES, AUTHINFO and
+// QUIT (MODE STREAM included); after it lists IHAVE and STREAMING and takes CHECK, TAKETHIS
+// and IHAVE.
+func asLoginCapsPeer(c *fakeserver.Conn) {
+	authed, userOK := false, false
+	have := map[string]bool{}
+	for {
+		line, err := c.ReadLine()
+		if err != nil {
+			return
+		}
+		verb, arg, _ := strings.Cut(line, " ")
+		verb = strings.ToUpper(verb)
+		var reply []string
+		switch {
+		case verb == "CAPABILITIES" && authed:
+			reply = []string{"101 caps", "VERSION 2", "IHAVE", "STREAMING", "."}
+		case verb == "CAPABILITIES":
+			reply = []string{"101 caps", "VERSION 2", "AUTHINFO USER", "."}
+		case verb == "AUTHINFO" && arg == "USER u":
+			userOK, reply = true, []string{"381 password"}
+		case verb == "AUTHINFO" && arg == "PASS p" && userOK:
+			authed, reply = true, []string{"281 ok"}
+		case verb == "AUTHINFO":
+			reply = []string{"481 no"}
+		case verb == "QUIT":
+			_ = c.WriteLines("205 bye")
+			return
+		case verb == "TAKETHIS":
+			if _, err := c.ReadDotBlock(); err != nil {
+				return
+			}
+			switch {
+			case !authed:
+				reply = []string{"480 login first"}
+			case have[arg]:
+				reply = []string{"439 " + arg}
+			default:
+				have[arg], reply = true, []string{"239 " + arg}
+			}
+		case !authed:
+			reply = []string{"480 login first"}
+		case verb == "MODE" && strings.EqualFold(arg, "STREAM"):
+			reply = []string{"203 streaming"}
+		case verb == "CHECK" && have[arg]:
+			reply = []string{"438 " + arg}
+		case verb == "CHECK":
+			reply = []string{"238 " + arg}
+		case verb == "IHAVE" && (!strings.HasPrefix(arg, "<") || !strings.HasSuffix(arg, ">")):
+			reply = []string{"435 bad id"}
+		case verb == "IHAVE" && have[arg]:
+			reply = []string{"435 duplicate"}
+		case verb == "IHAVE":
+			if err := c.WriteLines("335 send it"); err != nil {
+				return
+			}
+			if _, err := c.ReadDotBlock(); err != nil {
+				return
+			}
+			have[arg], reply = true, []string{"235 ok"}
+		default:
+			reply = []string{"500 what"}
+		}
+		if err := c.WriteLines(reply...); err != nil {
+			return
+		}
+	}
+}
+
+// TestStreamChecksCapsAfterLogin: STREAMING and IHAVE listed only after AUTHINFO; every stream
+// check logs in, reads the list again and runs.
+func TestStreamChecksCapsAfterLogin(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Handler: asLoginCapsPeer})
+	for name, r := range asRunAll(t, Options{Addr: s.Addr(), User: "u", Pass: "p", PostGroup: "alt.test"}, streamChecks()) {
+		if r.Status != Pass {
+			t.Errorf("%s: %v %s, want PASS", name, r.Status, r.Detail)
+		}
+	}
+	if n := len(s.Articles()); n != 6 {
+		t.Errorf("%d articles on the wire, want 6", n)
+	}
+}
+
+// TestStreamChecksSoftReplies: a deferring and filtering peer (431, 436, 439, 437) makes the
+// checks skip with the reply in Detail, not fail.
+func TestStreamChecksSoftReplies(t *testing.T) {
+	old := asNewID
+	asNewID = func(name string) string { return "<" + name + "@conformance.invalid>" }
+	t.Cleanup(func() { asNewID = old })
+	id := func(name string) string { return asNewID(name) }
+	po := &fakeserver.PeerOptions{
+		Defer431Once: map[string]bool{id("check-new"): true, id("check-pipelined-2"): true},
+		Defer436Once: map[string]bool{id("ihave-have"): true},
+		Reject: map[string]bool{id("takethis"): true, id("check-have"): true,
+			id("takethis-duplicate"): true, id("ihave"): true},
+	}
+	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(po)})
+	res := asRunAll(t, Options{Addr: s.Addr(), PostGroup: "alt.test"}, streamChecks())
+	want := map[string]struct {
+		st     Status
+		detail string
+	}{
+		"mode-stream":            {Pass, ""},
+		"mode-stream-capability": {Pass, ""},
+		"check-new":              {Skip, "server deferred: 431 " + id("check-new")},
+		"check-pipelined":        {Pass, `in order; not 238: "431 ` + id("check-pipelined-2") + `"`},
+		"takethis":               {Skip, "server rejected the article: 439 " + id("takethis")},
+		"check-have":             {Skip, "server rejected the article: 439 " + id("check-have")},
+		"takethis-duplicate":     {Skip, "server rejected the article: 439 " + id("takethis-duplicate")},
+		"ihave":                  {Skip, "server rejected the article: 437 Rejected " + id("ihave")},
+		"ihave-have":             {Skip, "server deferred: 436 Retry later"},
+		"ihave-malformed":        {Pass, `malformed id answered "435 Syntax error in message-ID"`},
+	}
+	for name, w := range want {
+		if r := res[name]; r.Status != w.st || r.Detail != w.detail {
+			t.Errorf("%s: got %v %q, want %v %q", name, r.Status, r.Detail, w.st, w.detail)
+		}
+	}
+}
+
+// TestStreamSoftReplyWrongID: a legal negative reply that names another message-id fails.
+func TestStreamSoftReplyWrongID(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "STREAMING", "."}},
+		{Expect: "MODE STREAM", Reply: []string{"203 streaming"}},
+		{Expect: "CHECK .*", Reply: []string{"431 <other@x>"}},
+	}})
+	r := asRunCheck(t, Options{Addr: s.Addr()}, asFind(t, streamChecks(), "check-new"))
+	if r.Status != Fail || !strings.Contains(r.Detail, "does not name") {
+		t.Fatalf("got %v %q, want FAIL naming the wrong id", r.Status, r.Detail)
+	}
+}
+
+// TestIhaveMalformed335: a server that wants an article for a malformed id fails, and the
+// transfer is ended with an empty article whose reply is read.
+func TestIhaveMalformed335(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "IHAVE", "."}},
+		{Expect: "IHAVE conformance-no-message-id", Reply: []string{"335 send it"}},
+		{Expect: `\.`, Reply: []string{"437 empty"}},
+	}})
+	r := asRunCheck(t, Options{Addr: s.Addr()}, asFind(t, streamChecks(), "ihave-malformed"))
+	if r.Status != Fail || !strings.Contains(r.Detail, `the empty article got "437 empty"`) {
+		t.Fatalf("got %v %q, want FAIL with the aborted transfer", r.Status, r.Detail)
+	}
+}
