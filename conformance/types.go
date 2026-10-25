@@ -54,7 +54,7 @@ func (s Status) String() string {
 type Result struct {
 	Name   string // check name, stable (used by Options.Skip)
 	Status Status
-	Detail string // why it failed or was skipped; empty on Pass
+	Detail string // why it failed or was skipped; on Pass a note worth reading (e.g. "not restricted"), usually empty
 	RFC    string // the section the check is about, e.g. "RFC 3977 §5.1.1"
 }
 
