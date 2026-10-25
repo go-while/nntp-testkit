@@ -35,6 +35,13 @@ const unknownGroup = "conformance.invalid.no-such-group"
 // farAbove is added to a group's high water mark for an article number that cannot exist.
 const farAbove = 1000000
 
+// maxArticle is the largest article number farNumber gives (2^31-1: servers with 32-bit
+// numbers must still parse it).
+const maxArticle = 2147483647
+
+// farNumber returns an article number far above high, at most maxArticle.
+func farNumber(high int64) int64 { return min(high+farAbove, maxArticle) }
+
 // readerChecks returns the RFC 3977 checks, in report order.
 func readerChecks() []check {
 	return []check{
@@ -58,7 +65,7 @@ func readerChecks() []check {
 		{Name: "list-unknown-keyword", RFC: "RFC 3977 §7.6.1", Needs: "LIST", Run: checkListUnknown},
 		{Name: "over", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOver},
 		{Name: "over-errors", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOverErrors},
-		{Name: "date", RFC: "RFC 3977 §7.1", Run: checkDate},
+		{Name: "date", RFC: "RFC 3977 §7.1", Needs: "READER", Run: checkDate},
 		{Name: "help", RFC: "RFC 3977 §7.2", Run: checkHelp},
 		{Name: "unknown-command", RFC: "RFC 3977 §3.2.1", Run: checkUnknownCommand},
 		{Name: "bad-arguments", RFC: "RFC 3977 §3.2.1", Needs: "READER", Run: checkBadArguments},
@@ -141,8 +148,8 @@ func (s *session) multi(want int, format string, args ...any) (string, []string,
 
 // ready prepares a session for a reader check: MODE READER on a mode-switching server (one
 // that advertises MODE-READER but not READER), AUTHINFO when Options.User is set and the
-// session is not authenticated yet, and the capability list read again after either. A check
-// whose Needs the server still does not advertise is skipped.
+// session is not authenticated yet (see login), and the capability list read again after
+// either. A check whose Needs the server still does not advertise is skipped.
 func (s *session) ready(c check) (Result, bool) {
 	if !s.has("READER") && s.has("MODE-READER") {
 		if _, _, err := s.single([]int{200, 201}, "MODE READER"); err != nil {
@@ -153,20 +160,51 @@ func (s *session) ready(c check) (Result, bool) {
 		}
 	}
 	if s.o.User != "" && !s.authed {
-		if err := s.auth(); err != nil {
-			return c.failf("AUTHINFO: %s", describe(err)), false
+		done, err := s.login()
+		if err != nil {
+			return c.fail(err.Error()), false
 		}
-		if err := s.quiet(quietWindow); err != nil {
-			return c.failf("after AUTHINFO: %s", describe(err)), false
-		}
-		if _, err := s.capabilities(); err != nil {
-			return c.failf("CAPABILITIES after AUTHINFO: %s", describe(err)), false
+		if done {
+			if _, err := s.capabilities(); err != nil {
+				return c.failf("CAPABILITIES after AUTHINFO: %s", describe(err)), false
+			}
 		}
 	}
 	if c.Needs != "" && !s.has(c.Needs) {
 		return c.skip("server does not advertise " + c.Needs), false
 	}
 	return Result{}, true
+}
+
+// login tries AUTHINFO USER/PASS with the session's credentials, whether or not AUTHINFO is
+// advertised: done is true after 281. A 500, 501 or 502 to AUTHINFO USER means the server does
+// not offer (or need) it: the check goes on unauthenticated (the auth checks report that case).
+// A 481, 482, any other code or a wire mistake is an error.
+func (s *session) login() (bool, error) {
+	code, line, err := s.single([]int{281, 381, 500, 501, 502}, "AUTHINFO USER %s", s.o.User)
+	if err != nil {
+		return false, err
+	}
+	switch code {
+	case 281:
+		s.authed = true
+		return true, nil
+	case 500, 501, 502:
+		return false, nil
+	}
+	// not through single: its error messages would quote the password
+	code, line, err = s.cmd("AUTHINFO PASS %s", s.o.Pass)
+	if err != nil {
+		return false, fmt.Errorf("AUTHINFO PASS: %s", describe(err))
+	}
+	if code != 281 {
+		return false, fmt.Errorf("AUTHINFO PASS: got %q, want 281", line)
+	}
+	if err := s.quiet(quietWindow); err != nil {
+		return false, fmt.Errorf("after AUTHINFO PASS: %s", describe(err))
+	}
+	s.authed = true
+	return true, nil
 }
 
 // ---- parsing helpers ----
@@ -178,9 +216,11 @@ type activeEntry struct {
 	status    string
 }
 
-var activeStatus = regexp.MustCompile(`^(?:[ymnxj]|=\S+)$`)
+// usualStatus matches the LIST ACTIVE status values RFC 3977 §7.6.3 names (y, n, m) and the
+// common private ones (x, j, =group); §7.6.3.2 allows others, which list-active only notes.
+var usualStatus = regexp.MustCompile(`^(?:[ymnxj]|=\S+)$`)
 
-// parseActive parses "name high low status".
+// parseActive parses "name high low status"; status is any token (see usualStatus).
 func parseActive(l string) (activeEntry, error) {
 	f := strings.Fields(l)
 	if len(f) != 4 {
@@ -191,16 +231,13 @@ func parseActive(l string) (activeEntry, error) {
 	if err1 != nil || err2 != nil {
 		return activeEntry{}, fmt.Errorf("LIST ACTIVE line %q: high and low must be numbers", l)
 	}
-	if !activeStatus.MatchString(f[3]) {
-		return activeEntry{}, fmt.Errorf("LIST ACTIVE line %q: status %q is not y, n, m, x, j or =group", l, f[3])
-	}
 	return activeEntry{name: f[0], high: high, low: low, status: f[3]}, nil
 }
 
-// parseNum parses an unsigned decimal article number (RFC 3977: 1 to 16 digits; leading
+// parseNum parses an unsigned decimal article number (RFC 3977 §3.1: 1 to 16 digits; leading
 // zeros are allowed, as INN pads its active file).
 func parseNum(s string) (int64, error) {
-	if s == "" || len(s) > 20 {
+	if s == "" || len(s) > 16 {
 		return 0, fmt.Errorf("bad number %q", s)
 	}
 	for i := 0; i < len(s); i++ {
@@ -429,7 +466,8 @@ func (s *session) emptyGroup(c check) (groupInfo, Result, bool) {
 	}
 	tried := 0
 	for _, e := range list {
-		if e.high >= e.low {
+		// the empty forms of RFC 3977 §6.1.1.2: high below low, or all zeros
+		if e.high >= e.low && (e.high != 0 || e.low != 0) {
 			continue
 		}
 		if tried == maxCandidates {
@@ -444,7 +482,7 @@ func (s *session) emptyGroup(c check) (groupInfo, Result, bool) {
 			return g, Result{}, true
 		}
 	}
-	return groupInfo{}, c.skip("no empty group (LIST ACTIVE high < low and GROUP count 0) to make the current article invalid"), false
+	return groupInfo{}, c.skip("no empty group (LIST ACTIVE high < low or 0 0, and GROUP count 0) to make the current article invalid"), false
 }
 
 // ---- checks ----
@@ -453,8 +491,12 @@ func checkGreeting(s *session, c check) Result {
 	if _, err := client.ParseCode(s.greeting); err != nil {
 		return c.failf("greeting %q: %v", s.greeting, err)
 	}
-	if s.code != 200 && s.code != 201 {
-		return c.failf("greeting %q: want 200 or 201", s.greeting)
+	switch s.code {
+	case 200, 201:
+	case 400, 502:
+		return c.failf("greeting %q: service unavailable (want 200 or 201)", s.greeting)
+	default:
+		return c.failf("greeting %q: not a greeting code (want 200 or 201)", s.greeting)
 	}
 	if err := s.quiet(quietWindow); err != nil {
 		return c.failf("after CAPABILITIES (read right after the greeting): %s", describe(err))
@@ -483,6 +525,7 @@ func checkCapabilities(s *session, c check) Result {
 	if !slices.Contains(f[1:], "2") {
 		return c.failf("capability %q does not list version 2", lines[0])
 	}
+	seen := map[string]bool{}
 	for _, l := range lines {
 		f := strings.Fields(l)
 		if len(f) == 0 || l != strings.TrimSpace(l) {
@@ -491,11 +534,24 @@ func checkCapabilities(s *session, c check) Result {
 		if !capLabel.MatchString(f[0]) {
 			return c.failf("capability line %q: %q is not a capability label", l, f[0])
 		}
+		kw := strings.ToUpper(f[0])
+		if seen[kw] {
+			return c.failf("capability %s is listed twice", kw)
+		}
+		seen[kw] = true
 	}
-	if !slices.Equal(first, lines) {
+	// §5.2.2: the order need not be the same, the set must
+	a, b := slices.Clone(first), slices.Clone(lines)
+	slices.Sort(a)
+	slices.Sort(b)
+	if !slices.Equal(a, b) {
 		return c.failf("CAPABILITIES gave %q and then %q in the same state", first, lines)
 	}
-	return c.pass()
+	r := c.pass()
+	if !slices.Equal(first, lines) {
+		r.Detail = "the two CAPABILITIES lists are in a different order (allowed)"
+	}
+	return r
 }
 
 func checkModeReader(s *session, c check) Result {
@@ -548,7 +604,8 @@ func checkListgroup(s *session, c check) Result {
 		return r
 	}
 	// a window from low, so a large group is not listed whole
-	from, to := t.g.low, t.g.low+999
+	from := max(1, t.g.low)
+	to := from + 999
 	line, lines, err := s.multi(211, "LISTGROUP %s %d-%d", t.g.name, from, to)
 	if err != nil {
 		return c.fail(err.Error())
@@ -621,20 +678,20 @@ func checkNextLast(s *session, c check) Result {
 	if back != t.num || id != t.id {
 		return c.failf("LAST from %d gave %q, want %d %s", n, line, t.num, t.id)
 	}
-	// the end: the high water mark when it exists, else walk a bounded number of NEXTs
-	if _, _, err := s.single([]int{223, 423}, "STAT %d", t.g.high); err != nil {
+	// the end: at the high water mark article NEXT must answer 421
+	code, line, err = s.single([]int{223, 423}, "STAT %d", t.g.high)
+	if err != nil {
 		return c.fail(err.Error())
 	}
-	for i := 0; i < 1000; i++ {
-		code, line, err = s.single([]int{223, 421}, "NEXT")
-		if err != nil {
-			return c.fail(err.Error())
-		}
-		if code == 421 {
-			return c.pass()
-		}
+	if code == 423 {
+		r := c.pass()
+		r.Detail = fmt.Sprintf("421 at the end not checked: the high water mark article %d does not exist (%q)", t.g.high, line)
+		return r
 	}
-	return c.pass() // 1000 NEXTs without reaching the end: the 421 case is not reached, the rest passed
+	if _, _, err := s.single([]int{421}, "NEXT"); err != nil {
+		return c.failf("at the high water mark article %d: %v", t.g.high, err)
+	}
+	return c.pass()
 }
 
 // articleCheck returns the check of ARTICLE, HEAD, BODY or STAT (status code ok) by number,
@@ -744,7 +801,7 @@ func checkOutOfRange(s *session, c check) Result {
 	if !ok {
 		return r
 	}
-	n := g.high + farAbove
+	n := farNumber(g.high)
 	for _, cmd := range []string{"ARTICLE", "HEAD", "BODY", "STAT"} {
 		if _, _, err := s.single([]int{423}, "%s %d", cmd, n); err != nil {
 			return c.failf("in %s (high %d): %v", g.name, g.high, err)
@@ -765,29 +822,39 @@ func checkUnknownID(s *session, c check) Result {
 	return c.pass()
 }
 
-// listKeyword skips c unless the LIST capability names kw.
-func (s *session) listKeyword(c check, kw string) (Result, bool) {
-	if !slices.ContainsFunc(capArgs(s.caps, "LIST"), func(a string) bool { return strings.EqualFold(a, kw) }) {
-		return c.skip("LIST capability does not name " + kw), false
+// listKeyword reports whether the LIST capability names kw; when it does not, ok is false and
+// r fails c when capability mandatory is advertised (RFC 3977 §3.3.2/§8.4: ACTIVE and
+// NEWSGROUPS with READER, OVERVIEW.FMT with OVER), else skips it.
+func (s *session) listKeyword(c check, kw, mandatory string) (r Result, ok bool) {
+	if slices.ContainsFunc(capArgs(s.caps, "LIST"), func(a string) bool { return strings.EqualFold(a, kw) }) {
+		return Result{}, true
 	}
-	return Result{}, true
+	if s.has(mandatory) {
+		return c.failf("LIST capability does not name %s, which is mandatory with %s", kw, mandatory), false
+	}
+	return c.skip("LIST capability does not name " + kw), false
 }
 
 func checkListActive(s *session, c check) Result {
 	if r, ok := s.ready(c); !ok {
 		return r
 	}
-	if r, ok := s.listKeyword(c, "ACTIVE"); !ok {
+	if r, ok := s.listKeyword(c, "ACTIVE", "READER"); !ok {
 		return r
 	}
+	var unusual []string
 	for _, cmd := range []string{"LIST", "LIST ACTIVE"} {
 		_, lines, err := s.multi(215, "%s", cmd)
 		if err != nil {
 			return c.fail(err.Error())
 		}
 		for _, l := range lines {
-			if _, err := parseActive(l); err != nil {
+			e, err := parseActive(l)
+			if err != nil {
 				return c.failf("%s: %v", cmd, err)
+			}
+			if !usualStatus.MatchString(e.status) && !slices.Contains(unusual, e.status) && len(unusual) < 5 {
+				unusual = append(unusual, e.status)
 			}
 		}
 		if cmd == "LIST" || len(lines) == 0 {
@@ -803,14 +870,18 @@ func checkListActive(s *session, c check) Result {
 			return c.failf("LIST ACTIVE %s does not list %s: %q", e.name, e.name, wl)
 		}
 	}
-	return c.pass()
+	r := c.pass()
+	if len(unusual) > 0 {
+		r.Detail = fmt.Sprintf("private status values (allowed by §7.6.3.2): %q", unusual)
+	}
+	return r
 }
 
 func checkListNewsgroups(s *session, c check) Result {
 	if r, ok := s.ready(c); !ok {
 		return r
 	}
-	if r, ok := s.listKeyword(c, "NEWSGROUPS"); !ok {
+	if r, ok := s.listKeyword(c, "NEWSGROUPS", "READER"); !ok {
 		return r
 	}
 	_, lines, err := s.multi(215, "LIST NEWSGROUPS")
@@ -858,7 +929,7 @@ func checkListOverviewFmt(s *session, c check) Result {
 	if r, ok := s.ready(c); !ok {
 		return r
 	}
-	if r, ok := s.listKeyword(c, "OVERVIEW.FMT"); !ok {
+	if r, ok := s.listKeyword(c, "OVERVIEW.FMT", "OVER"); !ok {
 		return r
 	}
 	if _, err := s.overviewFmt(); err != nil {
@@ -878,15 +949,16 @@ func checkListUnknown(s *session, c check) Result {
 }
 
 // checkOverLine checks one OVER line: the field count (number + the 7 mandatory fields, and
-// exactly the OVERVIEW.FMT fields when known), the number (want >= 0), the Message-ID field
+// not more than the OVERVIEW.FMT fields; §8.3.2 lets trailing empty fields go), the number (want >= 0), the Message-ID field
 // (wantID when not ""), :bytes and :lines, and the "Name: value" form of the full fields.
 func checkOverLine(l string, fmtLines []string, want int64, wantID string) (int64, error) {
 	f := strings.Split(l, "\t")
 	if len(f) < 1+len(mandatoryOverview) {
-		return 0, fmt.Errorf("OVER line %q has %d fields, want at least %d (number and %d mandatory fields)", l, len(f), 1+len(mandatoryOverview), len(mandatoryOverview))
+		return 0, fmt.Errorf("OVER line %q has %d fields, want at least %d: the number and the %d mandatory fields "+
+			"(trailing empty fields may be left out, but :bytes and :lines are never empty)", l, len(f), 1+len(mandatoryOverview), len(mandatoryOverview))
 	}
-	if fmtLines != nil && len(f) != 1+len(fmtLines) {
-		return 0, fmt.Errorf("OVER line %q has %d fields, want %d (number and the %d of LIST OVERVIEW.FMT)", l, len(f), 1+len(fmtLines), len(fmtLines))
+	if len(f) > 1+len(fmtLines) {
+		return 0, fmt.Errorf("OVER line %q has %d fields, want at most %d (number and the %d of LIST OVERVIEW.FMT)", l, len(f), 1+len(fmtLines), len(fmtLines))
 	}
 	n, err := parseNum(f[0])
 	if err != nil {
@@ -921,12 +993,12 @@ func checkOver(s *session, c check) Result {
 	if r, ok := s.ready(c); !ok {
 		return r
 	}
-	var fmtLines []string // nil without OVERVIEW.FMT: only the mandatory field count is checked
-	if _, ok := s.listKeyword(c, "OVERVIEW.FMT"); ok {
-		var err error
-		if fmtLines, err = s.overviewFmt(); err != nil {
-			return c.fail(err.Error())
-		}
+	if r, ok := s.listKeyword(c, "OVERVIEW.FMT", "OVER"); !ok {
+		return r // OVER is advertised (Needs): a missing OVERVIEW.FMT fails
+	}
+	fmtLines, err := s.overviewFmt()
+	if err != nil {
+		return c.fail(err.Error())
 	}
 	t, r, ok := s.pickTarget(c)
 	if !ok {
@@ -996,7 +1068,7 @@ func checkOverErrors(s *session, c check) Result {
 	if !ok {
 		return r
 	}
-	if _, _, err := s.single([]int{423}, "OVER %d-%d", g.high+farAbove, g.high+farAbove+10); err != nil {
+	if _, _, err := s.single([]int{423}, "OVER %d-%d", farNumber(g.high), min(farNumber(g.high)+10, maxArticle)); err != nil {
 		return c.failf("in %s (high %d): %v", g.name, g.high, err)
 	}
 	if slices.ContainsFunc(capArgs(s.caps, "OVER"), func(a string) bool { return strings.EqualFold(a, "MSGID") }) {
@@ -1008,6 +1080,9 @@ func checkOverErrors(s *session, c check) Result {
 }
 
 func checkDate(s *session, c check) Result {
+	if r, ok := s.ready(c); !ok {
+		return r
+	}
 	_, line, err := s.single([]int{111}, "DATE")
 	if err != nil {
 		return c.fail(err.Error())
@@ -1026,6 +1101,9 @@ func checkDate(s *session, c check) Result {
 }
 
 func checkHelp(s *session, c check) Result {
+	if r, ok := s.ready(c); !ok {
+		return r
+	}
 	if _, _, err := s.multi(100, "HELP"); err != nil {
 		return c.fail(err.Error())
 	}
@@ -1060,6 +1138,7 @@ func checkQuit(s *session, c check) Result {
 	case err == nil:
 		rest, _ := s.c.R.Peek(s.c.R.Buffered())
 		return c.failf("after 205: %q pending instead of the connection closing", append([]byte{b}, rest...))
+	// syscall.ECONNRESET exists on the platforms the kit runs on (linux, darwin, windows)
 	case errors.Is(err, io.EOF), errors.Is(err, syscall.ECONNRESET), errors.Is(err, net.ErrClosed):
 		return c.pass()
 	case errors.Is(err, os.ErrDeadlineExceeded):

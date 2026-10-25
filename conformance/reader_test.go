@@ -82,25 +82,44 @@ func report(res []Result) string { return Report{Results: res}.String() }
 
 func TestReaderChecksPassAgainstStore(t *testing.T) {
 	cases := []struct {
-		name string
-		so   fakeserver.StoreOptions
-		o    Options
+		name   string
+		so     fakeserver.StoreOptions
+		o      Options
+		prep   func(st *fakeserver.Store)
+		detail map[string]string // check → substring of its Pass Detail
 	}{
 		{name: "default"},
 		{name: "post-group", o: Options{PostGroup: "conf.test.b"}},
 		{name: "reader-only", so: fakeserver.StoreOptions{ReaderOnly: true}},
 		{name: "auth", so: fakeserver.StoreOptions{User: "u", Pass: "p"}, o: Options{User: "u", Pass: "p"}},
+		// credentials given, but the server has no login (AUTHINFO answers 502): the checks go
+		// on unauthenticated
+		{name: "auth-not-offered", o: Options{User: "u", Pass: "p"}},
+		// the high water mark article of conf.test.a is gone (expired): next-last cannot check
+		// the 421 at the end and says so
+		{
+			name:   "expired-high",
+			prep:   func(st *fakeserver.Store) { st.RemoveArticle("conf.test.a", 3) },
+			detail: map[string]string{"next-last": "not checked"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), StoreOpts: tc.so})
+			st := testStore()
+			if tc.prep != nil {
+				tc.prep(st)
+			}
+			srv := fakeserver.New(t, fakeserver.Options{Store: st, StoreOpts: tc.so})
 			o := tc.o
 			o.Addr = srv.Addr()
 			res := runReader(t, o, readerChecks())
 			for _, r := range res {
 				if r.Status != Pass {
 					t.Errorf("%s: %s %s", r.Name, r.Status, r.Detail)
+				}
+				if want, ok := tc.detail[r.Name]; ok && !strings.Contains(r.Detail, want) {
+					t.Errorf("%s: Detail %q, want it to say %q", r.Name, r.Detail, want)
 				}
 			}
 			if t.Failed() {
@@ -266,5 +285,28 @@ func TestReaderCheckNames(t *testing.T) {
 		if c.Run == nil || c.Posts || c.Auth {
 			t.Errorf("check %q: Run nil or flagged Posts/Auth", c.Name)
 		}
+	}
+}
+
+// TestParseHelpers: LIST ACTIVE takes any status token (§7.6.3.2), numbers have 1 to 16 digits.
+func TestParseHelpers(t *testing.T) {
+	for _, l := range []string{"a.b 10 1 y", "a.b 0000000010 0000000001 m", "a.b 2 1 =c.d", "a.b 2 1 private"} {
+		if _, err := parseActive(l); err != nil {
+			t.Errorf("parseActive(%q): %v", l, err)
+		}
+	}
+	for _, l := range []string{"a.b 10 1", "a.b x 1 y", "a.b 10 1 y extra"} {
+		if _, err := parseActive(l); err == nil {
+			t.Errorf("parseActive(%q): no error", l)
+		}
+	}
+	if _, err := parseNum("1234567890123456"); err != nil {
+		t.Errorf("16 digits: %v", err)
+	}
+	if _, err := parseNum("12345678901234567"); err == nil {
+		t.Error("17 digits: no error")
+	}
+	if n := farNumber(maxArticle - 5); n != maxArticle {
+		t.Errorf("farNumber near the 32-bit limit: %d", n)
 	}
 }
