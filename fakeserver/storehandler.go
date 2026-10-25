@@ -29,17 +29,18 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
 //	LIST [ACTIVE [wm]]  215 "name high low y|n" (y when Posting and not ReaderOnly); wm is a wildmat (*, ?, comma list, ! negation)
-//	LIST NEWSGROUPS [wm] 215 "name<TAB>description"; LIST OVERVIEW.FMT 215; other keywords 501
+//	LIST NEWSGROUPS [wm] 215 "name<TAB>description"; LIST OVERVIEW.FMT 215; LIST HEADERS 215 (":", ":bytes", ":lines"; 501 with NoHdr); other keywords 501
 //	GROUP g             211 "count low high g" (current article = low, none when empty); 411
 //	LISTGROUP [g [rng]] 211 + numbers; 411; 412 without g and without a selected group
 //	ARTICLE/HEAD/BODY/STAT [n|<id>]  220/221/222/223 "n <id>"; 412, 420, 423, 430; n selects the current article, <id> does not (n is 0 when the article is not in the selected group)
 //	NEXT, LAST          223 "n <id>"; 412, 420, 421/422
 //	OVER/XOVER [rng|<id>] 224; 412, 420, 423 (empty range or m<n), 430; number 0 for <id>
+//	HDR/XHDR f [rng|<id>] 225/221 "n value" (HDR: 0 for <id>, empty value for an absent header; XHDR: the <id> itself, "(none)"); :bytes, :lines, Xref as OVER; 412, 420, 423, 430
 //	NEWGROUPS d t [GMT] 231 groups whose Created is at or after d t (yymmdd or yyyymmdd, hhmmss; always UTC); 501
 //	NEWNEWS wm d t [GMT] 230 message-ids of the articles in groups matching wm whose Arrived is at or after d t (date and time as NEWGROUPS); 501; 503 when a matching generated group spans more numbers than its limit
 //	DATE                111 yyyymmddhhmmss (UTC)
@@ -164,7 +165,7 @@ var argCount = map[string][2]int{
 	"CAPABILITIES": {0, 1}, "MODE": {1, 1}, "HELP": {0, 0}, "AUTHINFO": {2, -1}, "LIST": {0, 2},
 	"GROUP": {1, 1}, "LISTGROUP": {0, 2}, "ARTICLE": {0, 1}, "HEAD": {0, 1}, "BODY": {0, 1}, "STAT": {0, 1},
 	"NEXT": {0, 0}, "LAST": {0, 0}, "OVER": {0, 1}, "XOVER": {0, 1}, "NEWGROUPS": {2, 3}, "NEWNEWS": {3, 4}, "DATE": {0, 0},
-	"POST": {0, 0}, "QUIT": {0, 0}, "COMPRESS": {1, 1},
+	"POST": {0, 0}, "QUIT": {0, 0}, "COMPRESS": {1, 1}, "HDR": {1, 2}, "XHDR": {1, 2},
 }
 
 // dispatch answers one command; POST and QUIT are flagged for serve.
@@ -206,6 +207,8 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 		return h.nextLast(cmd), actReply
 	case "OVER", "XOVER":
 		return h.over(args), actReply
+	case "HDR", "XHDR":
+		return h.hdr(cmd, args), actReply
 	case "NEWGROUPS":
 		return h.newgroups(args), actReply
 	case "NEWNEWS":
@@ -224,10 +227,11 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	}
 }
 
-// disabled reports whether a known command is made unknown by NoOver, NoXover or NoNewnews,
-// or is COMPRESS without Compress or CompressOutputOnly.
+// disabled reports whether a known command is made unknown by NoOver, NoXover, NoHdr, NoXhdr
+// or NoNewnews, or is COMPRESS without Compress or CompressOutputOnly.
 func (h *storeConn) disabled(cmd string) bool {
 	return (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) || (cmd == "NEWNEWS" && h.o.NoNewnews) ||
+		(cmd == "HDR" && h.o.NoHdr) || (cmd == "XHDR" && h.o.NoXhdr) ||
 		(cmd == "COMPRESS" && !h.o.Compress && !h.o.CompressOutputOnly)
 }
 
@@ -238,6 +242,9 @@ func (h *storeConn) capabilities() []string {
 	}
 	if !h.o.NoOver {
 		out = append(out, "OVER MSGID")
+	}
+	if !h.o.NoHdr {
+		out = append(out, "HDR")
 	}
 	if !h.o.ReaderOnly {
 		out = append(out, "POST")
@@ -338,6 +345,11 @@ func (h *storeConn) list(args []string) []string {
 			}
 		}
 		return append(out, ".")
+	case "HEADERS":
+		if h.o.NoHdr {
+			return []string{"501 Syntax error"}
+		}
+		return []string{"215 Metadata and headers available", ":", ":bytes", ":lines", "."}
 	case "OVERVIEW.FMT":
 		if pattern != "" {
 			return []string{"501 Syntax error"}
