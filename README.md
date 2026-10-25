@@ -171,7 +171,7 @@ that 503 too when the group spans more than the limit, whatever the time. `Expir
 arrive; `AddArticle` panics on a generated group, `RemoveArticle` and `Cancel` find nothing.
 
 **PeerHandler** is a transit peer for feeders such as innfeed and innxmit. It
-advertises `VERSION 2`, `IHAVE`, `READER` and `STREAMING` (not with `NoStream`), keeps its state across the
+advertises `VERSION 2`, `IHAVE` and `STREAMING` (not with `NoStream`; no `READER`: MODE READER answers 502 as innd with reader access denied), keeps its state across the
 connections of one server and answers as innd does:
 
 | command | replies |

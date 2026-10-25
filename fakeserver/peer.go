@@ -43,7 +43,7 @@ type PeerOptions struct {
 }
 
 // PeerHandler returns a Handler that answers like a transit peer: CAPABILITIES (VERSION 2,
-// IHAVE, READER, STREAMING unless NoStream, COMPRESS DEFLATE with Compress), MODE
+// IHAVE, STREAMING unless NoStream (no READER: MODE READER answers 502), COMPRESS DEFLATE with Compress), MODE
 // STREAM/READER, AUTHINFO USER/PASS, CHECK, TAKETHIS, IHAVE, COMPRESS (with Compress or
 // CompressOutputOnly), QUIT; anything else gets 500. Have is guarded by a mutex inside the
 // handler: read it from a test only after the server is closed. OnArticle runs before the 239
@@ -80,7 +80,8 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 	}
 	return func(c *Conn) {
 		authed := !needAuth
-		userOK := false
+		userOK := false   // AUTHINFO USER named the configured user
+		userSent := false // an AUTHINFO USER was seen (RFC 4643 §2.3.2: PASS before it is 482)
 		for {
 			line, err := c.ReadLine()
 			if err != nil {
@@ -97,7 +98,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			var reply []string
 			switch verb {
 			case "CAPABILITIES":
-				reply = []string{"101 capability list follows", "VERSION 2", "IHAVE", "READER"}
+				reply = []string{"101 capability list follows", "VERSION 2", "IHAVE"}
 				if !o.NoStream {
 					reply = append(reply, "STREAMING")
 				}
@@ -120,7 +121,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 						reply = []string{"501 Unknown MODE variant"}
 					}
 				case "READER":
-					reply = []string{"200 reader"}
+					reply = []string{"502 Transfer permission denied"} // innd with reader access denied: no READER, no MODE-READER capability
 				default:
 					reply = []string{unknown}
 				}
@@ -138,12 +139,17 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = []string{"502 compression active"}
 					break
 				}
+				if authed && needAuth {
+					reply = []string{"502 Command unavailable"} // RFC 4643 §2.3: no AUTHINFO after a successful one
+					break
+				}
 				sub, val := arg, ""
 				if i := strings.IndexByte(arg, ' '); i >= 0 {
 					sub, val = arg[:i], arg[i+1:]
 				}
 				switch strings.ToUpper(sub) {
 				case "USER":
+					userSent = true
 					userOK = o.User == "" || val == o.User
 					if userOK {
 						reply = []string{"381 password required"}
@@ -151,10 +157,14 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 						reply = []string{"481 authentication failed"}
 					}
 				case "PASS":
-					if userOK && (o.Pass == "" || val == o.Pass) {
+					switch {
+					case !userSent:
+						reply = []string{"482 Authentication commands issued out of sequence"}
+					case userOK && (o.Pass == "" || val == o.Pass):
 						authed = true
 						reply = []string{"281 authentication accepted"}
-					} else {
+					default:
+						userOK, userSent = false, false // start again with AUTHINFO USER
 						reply = []string{"481 authentication failed"}
 					}
 				default:
