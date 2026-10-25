@@ -8,6 +8,7 @@
 //
 //	func Run(tb testing.TB, o Options) Report   // fails tb when a check fails, unless o.ReportOnly
 //	func Check(o Options) (Report, error)       // no testing: err only when the server is unreachable
+//	func Names() []string                       // the check names in report order (Options.Skip)
 //
 // Every check opens its own connection, so one failure cannot poison the next. A check whose
 // capability the server does not advertise (CAPABILITIES) is reported as Skip, not Fail; the
@@ -30,8 +31,15 @@
 //     (335/235/435/436/437) when STREAMING (or IHAVE) is advertised and Options.PostGroup is
 //     set; the articles posted carry a unique Message-ID under @conformance.invalid.
 //
-// cmd/nntp-conformance is the command-line front end: -addr -user -pass -group -tls -deadline
-// -json; it prints the report and exits 1 on any Fail.
+// The checks run concurrently (Options.Workers at a time, default 4, each on its own
+// connection), the ones that post after all the others; Report.Results keeps the order of
+// Names, and Report.Capabilities is the list one extra connection read right after the
+// greeting. A panic inside a check is that check's Fail. A server that greets with 400 or 502
+// fails the greeting check ("service unavailable: <line>") and every other check is skipped.
+//
+// cmd/nntp-conformance is the command-line front end: -addr -user -pass -group -tls
+// -tls-insecure -deadline -workers -skip -json; it prints the report and exits 1 on any Fail,
+// 2 on a usage error or an unreachable server.
 //
 // Self-test: the kit's own fakeserver Store server passes every check (the handler's
 // conformance test), and a scripted fake with deliberate mistakes produces the matching Fail

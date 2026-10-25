@@ -26,6 +26,10 @@ type Options struct {
 
 	// ReportOnly makes Run return the report without failing tb on a Fail.
 	ReportOnly bool
+
+	// Workers is how many checks run at the same time, each on its own connection; 0: 4. Public
+	// servers often allow only 2 to 4 connections per account: a refused dial is a Fail.
+	Workers int
 }
 
 // Status is the outcome of one check.
