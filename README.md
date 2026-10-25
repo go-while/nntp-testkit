@@ -33,7 +33,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
-| `conformance` | stub: planned black-box RFC 3977/4643/4644 checks against any address |
+| `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
+| `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
 
@@ -245,6 +246,53 @@ There is no STARTTLS (TLS is `Options.TLS`), and crypto/tls has no TLS-level com
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes
 `Stderr()` (stdout too in TCP mode) and every file in `Options.Logs` to the test output with
 `tb.Log`. `Stop` needs a Unix system.
+
+### conformance
+
+| API | what |
+|---|---|
+| `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; nothing on tb with `ReportOnly` |
+| `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake is the `greeting` check's Fail, not an error |
+| `Names() []string` | the check names in report order (the values of `Options.Skip`) |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()` |
+| `type Result struct { Name string; Status Status; Detail, RFC string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note) |
+| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
+
+Every check opens its own connection (four run at a time; the results keep the order of
+`Names()`), so one failure cannot poison the next. Before the dial a check is skipped when it is
+in `Options.Skip` ("skipped by option"), needs credentials without `User` or posts without
+`PostGroup`; after the dial and CAPABILITIES it is skipped when its capability is not listed
+(unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
+broken greeting fails `greeting` once and skips the rest; a panic in a check is its Fail.
+The articles that checks post carry a Message-ID under `@conformance.invalid`.
+
+| RFC | checks |
+|---|---|
+| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-newsgroups` `list-overview-fmt` `list-unknown-keyword` `over` `over-errors` `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
+| RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
+| RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
+
+```bash
+go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:1119 [-user u -pass p] [-group g]
+```
+
+| flag | effect |
+|---|---|
+| `-addr host:port` | the server under test (required) |
+| `-user`, `-pass` | AUTHINFO USER/PASS; without `-user` the RFC 4643 checks are skipped |
+| `-group` | a group the checks may post into (TAKETHIS, IHAVE); without it nothing is posted |
+| `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
+| `-deadline` | hang guard per read and write, default `10s` |
+| `-skip a,b` | check names to leave out (an unknown name is a usage error) |
+| `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
+
+Exit status: 0 no Fail, 1 any Fail, 2 a usage error or a server that cannot be reached.
+
+Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
+given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer
+(`PeerHandler`) passes the stream checks, and fakes with one deliberate mistake (a bare-LF
+greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields) fail
+exactly the matching check.
 
 ## Example
 
