@@ -45,6 +45,7 @@ func TestRunExitCodes(t *testing.T) {
 		}
 		h(c)
 	}})
+	busy := fakeserver.New(t, fakeserver.Options{Store: store(), Greeting: "502 Too many connections"})
 	cases := []struct {
 		name   string
 		args   []string
@@ -62,6 +63,10 @@ func TestRunExitCodes(t *testing.T) {
 		{name: "unknown-skip", args: []string{"-addr", good.Addr(), "-skip", "nope"}, code: 2, stderr: `unknown check "nope"`},
 		{name: "closed-port", args: []string{"-addr", closedAddr(t)}, code: 2, stderr: "refused"},
 		{name: "help", args: []string{"-h"}, code: 0, stderr: "quit-eof"},
+		{name: "workers", args: []string{"-addr", good.Addr(), "-workers", "1"}, code: 0, stdout: "0 fail"},
+		{name: "bad-workers", args: []string{"-addr", good.Addr(), "-workers", "0"}, code: 2, stderr: "-workers must be positive"},
+		{name: "tls-no-host", args: []string{"-addr", ":119", "-tls"}, code: 2, stderr: "-tls needs a host"},
+		{name: "unavailable", args: []string{"-addr", busy.Addr()}, code: 1, stdout: "service unavailable: 502"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,7 +98,7 @@ func TestRunJSON(t *testing.T) {
 	if r.Fail != 0 || len(r.Results) != r.Pass+r.Skip || len(r.Results) == 0 {
 		t.Errorf("counts pass %d fail %d skip %d for %d results", r.Pass, r.Fail, r.Skip, len(r.Results))
 	}
-	if r.Results[0].Name != "greeting" || r.Results[0].Status != "PASS" {
+	if len(r.Results) == 0 || r.Results[0].Name != "greeting" || r.Results[0].Status != "PASS" {
 		t.Errorf("first result %+v, want greeting PASS", r.Results[0])
 	}
 	if len(r.Capabilities) == 0 || r.Capabilities[0] != "VERSION 2" {

@@ -2,7 +2,7 @@
 // server and prints the report.
 //
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
-//	                 [-deadline 10s] [-skip name,name] [-json]
+//	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json]
 //
 // Exit status: 0 when no check failed, 1 on any Fail, 2 on a usage error or when the server
 // cannot be reached.
@@ -58,6 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	useTLS := fs.Bool("tls", false, "TLS from the first byte (no STARTTLS), ServerName = the host of -addr")
 	insecure := fs.Bool("tls-insecure", false, "TLS without certificate verification (implies -tls)")
 	deadline := fs.Duration("deadline", 10*time.Second, "hang guard per read and write")
+	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	fs.Usage = func() {
@@ -89,7 +90,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *deadline <= 0 {
 		return usage("-deadline must be positive")
 	}
-	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline}
+	if *workers <= 0 {
+		return usage("-workers must be positive")
+	}
+	if (*useTLS || *insecure) && host == "" {
+		return usage("-tls needs a host in -addr (the TLS ServerName)")
+	}
+	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline, Workers: *workers}
 	names := conformance.Names()
 	for _, n := range strings.Split(*skip, ",") {
 		if n = strings.TrimSpace(n); n == "" {
@@ -112,7 +119,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *asJSON {
 		p, f, s := r.Counts()
-		out := jsonReport{Addr: *addr, Capabilities: r.Capabilities, Pass: p, Fail: f, Skip: s}
+		out := jsonReport{Addr: *addr, Results: []jsonResult{}, Capabilities: r.Capabilities, Pass: p, Fail: f, Skip: s}
 		if out.Capabilities == nil {
 			out.Capabilities = []string{}
 		}
@@ -121,11 +128,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
+		// a report that cannot be written is not a verdict about the server: 2, as a usage error
 		if err := enc.Encode(out); err != nil {
 			fmt.Fprintf(stderr, "nntp-conformance: %v\n", err)
 			return 2
 		}
-	} else if _, err := io.WriteString(stdout, r.String()); err != nil {
+	} else if _, err := io.WriteString(stdout, r.String()); err != nil { // as above: 2
 		fmt.Fprintf(stderr, "nntp-conformance: %v\n", err)
 		return 2
 	}

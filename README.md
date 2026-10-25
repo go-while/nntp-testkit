@@ -251,15 +251,16 @@ Log dump: the cleanup of both Start functions stops the process and, when the te
 
 | API | what |
 |---|---|
-| `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; nothing on tb with `ReportOnly` |
-| `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake is the `greeting` check's Fail, not an error |
+| `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; no Errorf with `ReportOnly` (an unreachable server is logged) |
+| `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()` |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time |
 | `type Result struct { Name string; Status Status; Detail, RFC string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note) |
 | `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
 
-Every check opens its own connection (four run at a time; the results keep the order of
-`Names()`), so one failure cannot poison the next. Before the dial a check is skipped when it is
+Every check opens its own connection (`Options.Workers` at a time, default 4; the results keep
+the order of `Names()`), so one failure cannot poison the next. The checks that post run after
+all the others, so no article arrives in `PostGroup` while a reader check counts its articles. Before the dial a check is skipped when it is
 in `Options.Skip` ("skipped by option"), needs credentials without `User` or posts without
 `PostGroup`; after the dial and CAPABILITIES it is skipped when its capability is not listed
 (unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
@@ -283,10 +284,12 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-group` | a group the checks may post into (TAKETHIS, IHAVE); without it nothing is posted |
 | `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
 | `-deadline` | hang guard per read and write, default `10s` |
+| `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
 | `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
 
-Exit status: 0 no Fail, 1 any Fail, 2 a usage error or a server that cannot be reached.
+Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
+cannot be reached.
 
 Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
 given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer

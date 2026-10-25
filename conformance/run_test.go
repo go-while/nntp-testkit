@@ -334,45 +334,112 @@ func TestRunReportOnly(t *testing.T) {
 }
 
 // TestRunChecksOrderPanicBound: results come back in check order; a panic in a check is that
-// check's Fail; no more than workers checks hold a session at the same time.
+// check's Fail; no more than Options.Workers checks (0: 4) hold a session at the same time.
 func TestRunChecksOrderPanicBound(t *testing.T) {
 	srv := fakeserver.New(t, fakeserver.Options{Store: testStore()})
-	var cur, peak atomic.Int32
+	for _, tc := range []struct{ workers, max int }{{0, defaultWorkers}, {2, 2}, {1, 1}, {100, 12}} {
+		t.Run(fmt.Sprint(tc.workers), func(t *testing.T) {
+			var cur, peak atomic.Int32
+			var list []check
+			for i := range 12 {
+				c := check{Name: fmt.Sprintf("c%02d", i), RFC: "test", Run: func(s *session, c check) Result {
+					n := cur.Add(1)
+					defer cur.Add(-1)
+					for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+					}
+					if _, _, err := s.cmd("DATE"); err != nil { // a round trip while the slot is held
+						return c.fail(err.Error())
+					}
+					if c.Name == "c05" {
+						panic("boom")
+					}
+					return c.pass()
+				}}
+				list = append(list, c)
+			}
+			res := runChecks(Options{Addr: srv.Addr(), Workers: tc.workers}, list)
+			for i, r := range res {
+				if r.Name != list[i].Name {
+					t.Errorf("result %d is %q, want %q", i, r.Name, list[i].Name)
+				}
+				want := Pass
+				if r.Name == "c05" {
+					want = Fail
+					if !strings.Contains(r.Detail, "panic: boom") {
+						t.Errorf("c05 Detail %q, want the panic text", r.Detail)
+					}
+				}
+				if r.Status != want {
+					t.Errorf("%s: %s %q, want %s", r.Name, r.Status, r.Detail, want)
+				}
+			}
+			if p := peak.Load(); p > int32(tc.max) {
+				t.Errorf("%d checks at once, want at most %d", p, tc.max)
+			}
+		})
+	}
+}
+
+// TestRunChecksPostsLast: the checks that post start only after every other check finished,
+// wherever they stand in the list, and the results keep the list order.
+func TestRunChecksPostsLast(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: testStore()})
+	var done atomic.Int32
+	reader := func(s *session, c check) Result {
+		defer done.Add(1)
+		if _, _, err := s.cmd("DATE"); err != nil {
+			return c.fail(err.Error())
+		}
+		return c.pass()
+	}
 	var list []check
-	for i := range 12 {
-		c := check{Name: fmt.Sprintf("c%02d", i), RFC: "test", Run: func(s *session, c check) Result {
-			n := cur.Add(1)
-			defer cur.Add(-1)
-			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+	readers := 0
+	for i := range 10 {
+		c := check{Name: fmt.Sprintf("r%02d", i), RFC: "test", Run: reader}
+		if i == 1 || i == 6 {
+			c.Name, c.Posts = fmt.Sprintf("p%02d", i), true
+			c.Run = func(_ *session, c check) Result {
+				if n := done.Load(); n != int32(readers) {
+					return c.failf("started after %d of %d non-posting checks", n, readers)
+				}
+				return c.pass()
 			}
-			if _, _, err := s.cmd("DATE"); err != nil { // a round trip while the slot is held
-				return c.fail(err.Error())
-			}
-			if c.Name == "c05" {
-				panic("boom")
-			}
-			return c.pass()
-		}}
+		} else {
+			readers++
+		}
 		list = append(list, c)
 	}
-	res := runChecks(Options{Addr: srv.Addr()}, list)
+	res := runChecks(Options{Addr: srv.Addr(), PostGroup: "conf.test.b", Workers: 4}, list)
 	for i, r := range res {
-		if r.Name != list[i].Name {
-			t.Errorf("result %d is %q, want %q", i, r.Name, list[i].Name)
-		}
-		want := Pass
-		if r.Name == "c05" {
-			want = Fail
-			if !strings.Contains(r.Detail, "panic: boom") {
-				t.Errorf("c05 Detail %q, want the panic text", r.Detail)
-			}
-		}
-		if r.Status != want {
-			t.Errorf("%s: %s %q, want %s", r.Name, r.Status, r.Detail, want)
+		if r.Name != list[i].Name || r.Status != Pass {
+			t.Errorf("result %d: %s %s %q, want %s PASS", i, r.Name, r.Status, r.Detail, list[i].Name)
 		}
 	}
-	if p := peak.Load(); p > workers {
-		t.Errorf("%d checks at once, want at most %d", p, workers)
+}
+
+// TestCheckServiceUnavailable: a server that greets with 400 or 502 fails the greeting check
+// with the line; every other check is skipped, also when greeting is in Options.Skip.
+func TestCheckServiceUnavailable(t *testing.T) {
+	for _, greet := range []string{"400 Service temporarily unavailable", "502 Too many connections"} {
+		t.Run(greet[:3], func(t *testing.T) {
+			srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), Greeting: greet})
+			r := mustCheck(t, Options{Addr: srv.Addr(), Skip: []string{"greeting", "help"}})
+			fails := r.Failed()
+			if len(fails) != 1 || fails[0].Name != "greeting" || fails[0].Detail != "service unavailable: "+greet {
+				t.Fatalf("failed %+v, want exactly greeting with \"service unavailable: %s\"", fails, greet)
+			}
+			for _, res := range r.Results {
+				if res.Name != "greeting" && res.Status != Skip {
+					t.Errorf("%s: %s %q, want SKIP", res.Name, res.Status, res.Detail)
+				}
+			}
+			if d := byName(r)["help"].Detail; d != "skipped by option" {
+				t.Errorf("help Detail %q, want \"skipped by option\"", d)
+			}
+			if n := srv.Count("CAPABILITIES"); n != 0 {
+				t.Errorf("CAPABILITIES sent %d times to a server that refused service", n)
+			}
+		})
 	}
 }
 

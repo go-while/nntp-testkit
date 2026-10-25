@@ -10,8 +10,16 @@ import (
 	"github.com/go-while/nntp-testkit/client"
 )
 
+// defaultWorkers is the number of checks that run at the same time when Options.Workers is 0.
+const defaultWorkers = 4
+
 // workers is the number of checks that run at the same time, each on its own connection.
-const workers = 4
+func (o Options) workers() int {
+	if o.Workers > 0 {
+		return o.Workers
+	}
+	return defaultWorkers
+}
 
 // allChecks is every check in report order: reader, auth, stream.
 func allChecks() []check {
@@ -56,40 +64,87 @@ func Run(tb testing.TB, o Options) Report {
 // Check runs every check against o.Addr without testing. The error is non-nil only when the
 // first connection (the one that reads the capability list for Report.Capabilities) cannot be
 // opened: no listener, a TLS failure, a dial or greeting timeout. A greeting with a wire
-// mistake (bare LF, ...) is not an error: the greeting check reports it.
+// mistake (bare LF, ...) is not an error: the greeting check reports it. Neither is a server
+// that refuses service (400 or 502 greeting): the greeting check fails with the line, every
+// other check is skipped.
 func Check(o Options) (Report, error) {
 	if o.Addr == "" {
 		return Report{}, errors.New("no Options.Addr")
 	}
-	caps, err := preRead(o)
+	caps, refused, err := preRead(o)
 	if err != nil {
 		return Report{}, err
+	}
+	if refused != "" {
+		return Report{Results: unavailable(o, allChecks(), refused)}, nil
 	}
 	return Report{Results: runChecks(o, allChecks()), Capabilities: caps}, nil
 }
 
 // preRead opens one session and returns the capability list read right after the greeting
-// (nil when CAPABILITIES failed or the greeting is broken).
-func preRead(o Options) ([]string, error) {
+// (nil when CAPABILITIES failed or the greeting is broken), or the greeting line when the
+// server refused service (400 or 502).
+func preRead(o Options) (caps []string, refused string, err error) {
 	s, err := dial(o)
 	if err != nil {
 		var se *client.StrictError
 		if errors.As(err, &se) {
-			return nil, nil
+			return nil, "", nil
 		}
-		return nil, err
+		return nil, "", err
 	}
 	defer s.close()
-	caps, _ := s.capabilities()
-	return caps, nil
+	if s.code == 400 || s.code == 502 {
+		return nil, s.greeting, nil
+	}
+	caps, _ = s.capabilities()
+	return caps, "", nil
 }
 
-// runChecks runs checks with at most workers at a time and returns the results in check order.
+// unavailable is the report of a server that refused service with greeting line: the
+// greeting check fails (whatever Options.Skip says), every other check is skipped.
+func unavailable(o Options, checks []check, line string) []Result {
+	out := make([]Result, len(checks))
+	for i, c := range checks {
+		switch {
+		case c.Name == "greeting":
+			out[i] = c.fail("service unavailable: " + line)
+		case slices.Contains(o.Skip, c.Name):
+			out[i] = c.skip("skipped by option")
+		default:
+			out[i] = c.skip("no usable session, the server refused service (see check greeting)")
+		}
+	}
+	return out
+}
+
+// runChecks runs checks with at most o.workers() at a time and returns the results in check
+// order. It runs in two phases: first every check that does not post, then the ones that do
+// (Posts), so no article lands in Options.PostGroup while a reader check looks at its numbers
+// (next-last, listgroup, over).
 func runChecks(o Options, checks []check) []Result {
 	out := make([]Result, len(checks))
+	var reads, posts []int
+	for i, c := range checks {
+		if c.Posts {
+			posts = append(posts, i)
+		} else {
+			reads = append(reads, i)
+		}
+	}
+	runPhase(o, checks, reads, out)
+	runPhase(o, checks, posts, out)
+	return out
+}
+
+// runPhase runs the checks at the indexes idx, at most o.workers() at a time, into out.
+func runPhase(o Options, checks []check, idx []int, out []Result) {
+	if len(idx) == 0 {
+		return
+	}
 	next := make(chan int)
 	var wg sync.WaitGroup
-	for range min(workers, len(checks)) {
+	for range min(o.workers(), len(idx)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -98,12 +153,11 @@ func runChecks(o Options, checks []check) []Result {
 			}
 		}()
 	}
-	for i := range checks {
+	for _, i := range idx {
 		next <- i
 	}
 	close(next)
 	wg.Wait()
-	return out
 }
 
 // runOne runs check c on a fresh session. The skips that need no connection come first
