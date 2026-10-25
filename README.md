@@ -33,7 +33,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
-| `conformance` | stub: planned black-box RFC 3977/4643/4644 checks against any address |
+| `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
+| `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
 
@@ -126,7 +127,7 @@ Three modes, chosen per server:
   it returns. `StoreHandler` and `PeerHandler` are ready-made handlers.
 - **Store**: `Options.Store` serves a `Store` with the built-in RFC 3977 handler: CAPABILITIES, MODE
   READER, HELP, LIST (ACTIVE, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
-  OVER/XOVER, NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, COMPRESS (with
+  OVER/XOVER, HDR/XHDR (+ LIST HEADERS), NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, COMPRESS (with
   `StoreOpts.Compress`), QUIT. `StoreOpts.User`/`Pass`
   require authentication (480 before it); `ReaderOnly` greets 201 (unless `Greeting` is set) and
   answers POST with 440.
@@ -148,10 +149,12 @@ at its Date.
 | `GroupNumbers func(conn int, g Group) Group` | the numbers GROUP, LISTGROUP and LIST ACTIVE report, per connection: a lagging frontend of a server farm (lower `High` on some connections), `211 0 0 0` for an empty group, or `st.HighestExisting`; the articles served stay the stored ones |
 | `ListgroupRange string` | `"reject"`: 501 for `LISTGROUP group range` (RFC 977/2980 servers); `"ignore"`: the whole group whatever the range |
 | `NoOver`, `NoXover bool` | that command is unknown (500, not listed by HELP); `NoOver` also drops `OVER MSGID` from CAPABILITIES |
+| `NoHdr`, `NoXhdr bool` | HDR or XHDR is unknown (500); `NoHdr` also drops `HDR` from CAPABILITIES and makes LIST HEADERS a 501 |
 | `NoNewnews bool` | NEWNEWS is unknown (500) and not in CAPABILITIES or HELP, as on the many servers without it; INN's `502 NEWNEWS command disabled by administrator` is `Faults.Override` `"NEWNEWS"` |
 | `EmptyOverReply []string` | instead of 423 for a range without articles, e.g. `{"420 No article(s) selected"}` or `{"224 Overview follows", "."}` |
 | `MaxOverRange int64`, `OverRangeTooLarge []string` | cap one OVER/XOVER range (an open range ends at `High`): a larger range gets `OverRangeTooLarge`, or when that is nil the records of its first `MaxOverRange` numbers only |
 | `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
+| `HdrLines func(conn int, group, field string, lines []string) []string` | change the `number value` lines of a HDR/XHDR reply before they are sent (XHDR by `<id>` gives the id instead of the number, an absent header `(none)`; HDR gives 0 and an empty value): header data out of step with the articles |
 | `Compress bool` | offer COMPRESS DEFLATE (RFC 8054): listed in CAPABILITIES while off (after authentication when required); COMPRESS answers 206 and compresses both directions; 501 missing or invalid algorithm name (case-sensitive), 502 once active (any valid algorithm), 503 another algorithm, 480 before required auth; AUTHINFO after it 502 |
 | `CompressOutputOnly bool` | offer COMPRESS, but after the 206 compress only the server's output and read the client's commands uncompressed: a half implementation, for client tests |
 
@@ -169,7 +172,7 @@ that 503 too when the group spans more than the limit, whatever the time. `Expir
 arrive; `AddArticle` panics on a generated group, `RemoveArticle` and `Cancel` find nothing.
 
 **PeerHandler** is a transit peer for feeders such as innfeed and innxmit. It
-advertises `VERSION 2`, `IHAVE`, `READER` and `STREAMING` (not with `NoStream`), keeps its state across the
+advertises `VERSION 2`, `IHAVE` and `STREAMING` (not with `NoStream`; no `READER`: MODE READER answers 502 as innd with reader access denied), keeps its state across the
 connections of one server and answers as innd does:
 
 | command | replies |
@@ -243,6 +246,56 @@ There is no STARTTLS (TLS is `Options.TLS`), and crypto/tls has no TLS-level com
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes
 `Stderr()` (stdout too in TCP mode) and every file in `Options.Logs` to the test output with
 `tb.Log`. `Stop` needs a Unix system.
+
+### conformance
+
+| API | what |
+|---|---|
+| `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; no Errorf with `ReportOnly` (an unreachable server is logged) |
+| `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
+| `Names() []string` | the check names in report order (the values of `Options.Skip`) |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time |
+| `type Result struct { Name string; Status Status; Detail, RFC string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note) |
+| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
+
+Every check opens its own connection (`Options.Workers` at a time, default 4; the results keep
+the order of `Names()`), so one failure cannot poison the next. The checks that post run after
+all the others, so no article arrives in `PostGroup` while a reader check counts its articles. Before the dial a check is skipped when it is
+in `Options.Skip` ("skipped by option"), needs credentials without `User` or posts without
+`PostGroup`; after the dial and CAPABILITIES it is skipped when its capability is not listed
+(unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
+broken greeting fails `greeting` once and skips the rest; a panic in a check is its Fail.
+The articles that checks post carry a Message-ID under `@conformance.invalid`.
+
+| RFC | checks |
+|---|---|
+| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-newsgroups` `list-overview-fmt` `list-unknown-keyword` `over` `over-errors` `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
+| RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
+| RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
+
+```bash
+go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:1119 [-user u -pass p] [-group g]
+```
+
+| flag | effect |
+|---|---|
+| `-addr host:port` | the server under test (required) |
+| `-user`, `-pass` | AUTHINFO USER/PASS; without `-user` the RFC 4643 checks are skipped |
+| `-group` | a group the checks may post into (TAKETHIS, IHAVE); without it nothing is posted |
+| `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
+| `-deadline` | hang guard per read and write, default `10s` |
+| `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
+| `-skip a,b` | check names to leave out (an unknown name is a usage error) |
+| `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
+
+Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
+cannot be reached.
+
+Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
+given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer
+(`PeerHandler`) passes the stream checks, and fakes with one deliberate mistake (a bare-LF
+greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields) fail
+exactly the matching check.
 
 ## Example
 

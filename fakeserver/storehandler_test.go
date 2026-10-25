@@ -56,7 +56,7 @@ func wantEqual(t *testing.T, what string, got, want any) {
 func TestStoreCapabilities(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "HDR", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "MODE READER", 200)
 	wantCode(t, c, "MODE STREAM", 501)
 	wantCode(t, c, "MODE", 501)
@@ -80,7 +80,7 @@ func TestStoreCapabilities(t *testing.T) {
 
 	_, ro := storeServer(t, testStore(), StoreOptions{ReaderOnly: true}, Faults{})
 	_, caps = wantBlock(t, ro, "CAPABILITIES", 101)
-	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "HDR", "IMPLEMENTATION fakeserver"})
 	wantCode(t, ro, "MODE READER", 201)
 	wantCode(t, ro, "POST", 440)
 	_, active := wantBlock(t, ro, "LIST", 215)
@@ -428,7 +428,7 @@ func TestStoreNewnews(t *testing.T) {
 func TestStoreNoNewnews(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{NoNewnews: true, NoOver: true}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "HDR", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "NEWNEWS * 20260101 000000", 500)
 	wantCode(t, c, "NEWNEWS", 500) // unknown before the argument check
 	_, help := wantBlock(t, c, "HELP", 100)

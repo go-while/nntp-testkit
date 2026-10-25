@@ -159,7 +159,7 @@ func TestPeerNoStream(t *testing.T) {
 	s := New(t, Options{Handler: PeerHandler(&PeerOptions{NoStream: true, OnArticle: log.onArticle})})
 	c := client.Dial(t, s.Addr())
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "IHAVE", "READER"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "IHAVE"})
 	if line := wantCode(t, c, "MODE STREAM", 501); line != "501 Unknown MODE variant" {
 		t.Errorf("MODE STREAM %q", line)
 	}

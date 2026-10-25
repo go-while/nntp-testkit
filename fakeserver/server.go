@@ -90,6 +90,10 @@ type StoreOptions struct {
 	// only one of them; NoOver also drops "OVER MSGID" from CAPABILITIES.
 	NoOver, NoXover bool
 
+	// NoHdr and NoXhdr make HDR or XHDR an unknown command (500); NoHdr also drops "HDR" from
+	// CAPABILITIES and makes LIST HEADERS a 501.
+	NoHdr, NoXhdr bool
+
 	// NoNewnews makes NEWNEWS an unknown command (500) and drops it from CAPABILITIES and
 	// HELP, as on the many servers that do not offer it. INN with NEWNEWS disabled answers
 	// "502 NEWNEWS command disabled by administrator" instead: Faults.Override "NEWNEWS".
@@ -112,6 +116,12 @@ type StoreOptions struct {
 	// that differs from the articles, e.g. a Message-ID that is not the one in the article's
 	// header (an overview database out of step with the spool).
 	OverviewFields func(conn int, group string, fields []string) []string
+
+	// HdrLines changes the lines of a HDR/XHDR reply ("number value", without the status line
+	// and the terminator) before they are sent; conn is Conn.ID, group the group the lines are
+	// for and field the requested header. It returns the lines to send (change, drop, add):
+	// header data out of step with the articles, as OverviewFields for OVER.
+	HdrLines func(conn int, group, field string, lines []string) []string
 
 	// Compress offers COMPRESS DEFLATE (RFC 8054): CAPABILITIES lists "COMPRESS DEFLATE"
 	// while compression is off (after authentication when it is required), and COMPRESS
