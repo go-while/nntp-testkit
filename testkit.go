@@ -2,7 +2,7 @@
 // fake server, a strict test client, an external-process runner) for projects that implement or
 // consume NNTP. Only the standard library is used.
 //
-// The sub-packages are client, fakeserver, proc and conformance (stub). This package holds what
+// The sub-packages are client, fakeserver, proc, conformance and yenc. This package holds what
 // they share: the hang guard.
 package testkit
 
