@@ -25,11 +25,18 @@ Every blocking step (dial, read, write, waits) is bounded by `testkit.Deadline()
 hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `client.Conn.Deadline`
 (or the `deadline` argument of `DialWith`/`TryDial`) and `proc.Options.Deadline` override it per use.
 
+## Waiting and ports
+
+| API | what |
+|---|---|
+| `Eventually(tb, d, what, cond func() bool)` | poll `cond` every `PollInterval` (50ms) until it holds; after `d` (0: `Deadline()`) fail tb with "timed out after d waiting for what" |
+| `FreePort(tb) int` | a TCP port on 127.0.0.1 that was free a moment ago, for a server that must be told its port before it starts (prefer port 0 where the server reports its address) |
+
 ## Packages
 
 | package | what |
 |---|---|
-| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline` |
+| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `Eventually`, `FreePort` |
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
