@@ -19,12 +19,18 @@
 // Checks (Result.RFC names the section):
 //
 //   - RFC 3977: greeting code (200/201) and CRLF; CAPABILITIES format (101, VERSION line,
-//     terminator); MODE READER; GROUP and LISTGROUP codes and ranges (211/411/412);
+//     terminator); MODE READER; GROUP and LISTGROUP codes and ranges (211/411/412), the range
+//     forms "n", "n-m" (also m < n: empty) and "n-", and the current article LISTGROUP leaves;
 //     ARTICLE/HEAD/BODY/STAT by number, message-id and current article (220-223, 412, 420, 423,
 //     430) with the dot-stuffing and the terminator checked by the strict client; NEXT/LAST
-//     (421/422); LIST variants and OVERVIEW.FMT; OVER field count; DATE format; HELP; QUIT 205
-//     then EOF with nothing pending; unknown command 500; bad arguments 501; CRLF-only line
-//     ends and nothing pending after any reply.
+//     (421/422); LIST variants, ACTIVE.TIMES (when the LIST capability names it), HEADERS
+//     (mandatory with HDR) and OVERVIEW.FMT; OVER field count; HDR by current article, range
+//     and message-id against the article's header (225, 412, 420, 423, 430); NEWGROUPS (both
+//     date forms, nothing for a future date); NEWNEWS (message-ids, nothing for a future
+//     date); POST into Options.PostGroup (340/240, then the article is found by its
+//     message-id with the dot-stuffed body line intact); DATE format; HELP; QUIT 205 then EOF
+//     with nothing pending; unknown command 500; bad arguments 501; CRLF-only line ends and
+//     nothing pending after any reply.
 //   - RFC 4643: AUTHINFO USER/PASS sequences (381/281/481/482, 480 before authentication on
 //     restricted commands, 502 after success) when Options.User is set.
 //   - RFC 4644: MODE STREAM (203), CHECK (238/431/438), TAKETHIS (239/439) and IHAVE

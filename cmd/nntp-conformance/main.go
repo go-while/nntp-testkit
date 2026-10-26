@@ -54,7 +54,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	addr := fs.String("addr", "", "host:port of the server under test (required)")
 	user := fs.String("user", "", "AUTHINFO USER; empty: the RFC 4643 checks are skipped")
 	pass := fs.String("pass", "", "AUTHINFO PASS")
-	group := fs.String("group", "", "a group the checks may post into (IHAVE, TAKETHIS); empty: no check modifies the server")
+	group := fs.String("group", "", "a group the checks may post into (POST, IHAVE, TAKETHIS); empty: no check modifies the server")
 	useTLS := fs.Bool("tls", false, "TLS from the first byte (no STARTTLS), ServerName = the host of -addr")
 	insecure := fs.Bool("tls-insecure", false, "TLS without certificate verification (implies -tls)")
 	deadline := fs.Duration("deadline", 10*time.Second, "hang guard per read and write")

@@ -50,6 +50,7 @@ func readerChecks() []check {
 		{Name: "mode-reader", RFC: "RFC 3977 §5.3", Run: checkModeReader},
 		{Name: "group", RFC: "RFC 3977 §6.1.1", Needs: "READER", Run: checkGroup},
 		{Name: "listgroup", RFC: "RFC 3977 §6.1.2", Needs: "READER", Run: checkListgroup},
+		{Name: "listgroup-range", RFC: "RFC 3977 §6.1.2", Needs: "READER", Run: checkListgroupRange},
 		{Name: "next-last", RFC: "RFC 3977 §6.1.3-6.1.4", Needs: "READER", Run: checkNextLast},
 		{Name: "article", RFC: "RFC 3977 §6.2.1", Needs: "READER", Run: articleCheck("ARTICLE", 220)},
 		{Name: "head", RFC: "RFC 3977 §6.2.2", Needs: "READER", Run: articleCheck("HEAD", 221)},
@@ -60,11 +61,17 @@ func readerChecks() []check {
 		{Name: "article-out-of-range", RFC: "RFC 3977 §6.2 (423)", Needs: "READER", Run: checkOutOfRange},
 		{Name: "article-unknown-id", RFC: "RFC 3977 §6.2 (430)", Needs: "READER", Run: checkUnknownID},
 		{Name: "list-active", RFC: "RFC 3977 §7.6.3", Needs: "LIST", Run: checkListActive},
+		{Name: "list-active-times", RFC: "RFC 3977 §7.6.4", Needs: "LIST", Run: checkListActiveTimes},
 		{Name: "list-newsgroups", RFC: "RFC 3977 §7.6.6", Needs: "LIST", Run: checkListNewsgroups},
 		{Name: "list-overview-fmt", RFC: "RFC 3977 §8.4", Needs: "LIST", Run: checkListOverviewFmt},
+		{Name: "list-headers", RFC: "RFC 3977 §8.6", Needs: "HDR", Run: checkListHeaders},
 		{Name: "list-unknown-keyword", RFC: "RFC 3977 §7.6.1", Needs: "LIST", Run: checkListUnknown},
 		{Name: "over", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOver},
 		{Name: "over-errors", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOverErrors},
+		{Name: "hdr", RFC: "RFC 3977 §8.5", Needs: "HDR", Run: checkHdr},
+		{Name: "newgroups", RFC: "RFC 3977 §7.3", Needs: "READER", Run: checkNewgroups},
+		{Name: "newnews", RFC: "RFC 3977 §7.4", Needs: "NEWNEWS", Run: checkNewnews},
+		{Name: "post", RFC: "RFC 3977 §6.3.1", Needs: "POST", Posts: true, Run: checkPost},
 		{Name: "date", RFC: "RFC 3977 §7.1", Needs: "READER", Run: checkDate},
 		{Name: "help", RFC: "RFC 3977 §7.2", Run: checkHelp},
 		{Name: "unknown-command", RFC: "RFC 3977 §3.2.1", Run: checkUnknownCommand},
@@ -784,6 +791,9 @@ func checkNoCurrent(s *session, c check) Result {
 	cmds := []string{"ARTICLE", "HEAD", "BODY", "STAT", "NEXT", "LAST"}
 	if s.has("OVER") {
 		cmds = append(cmds, "OVER")
+	}
+	if s.has("HDR") {
+		cmds = append(cmds, "HDR Subject")
 	}
 	for _, cmd := range cmds {
 		if _, _, err := s.single([]int{420}, "%s", cmd); err != nil {
