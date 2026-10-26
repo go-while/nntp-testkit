@@ -43,6 +43,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
 | `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 | `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
+| `canlock` | Cancel-Lock and Cancel-Key values (RFC 8315): compute them, check a key against a lock |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
 
@@ -321,6 +322,26 @@ into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (th
 `RawDots` and `RawSpaces` model posting tools that leave those characters to the server's
 dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
 cuts a post off mid-body instead.
+
+### canlock
+
+Cancel-Lock and Cancel-Key header values (RFC 8315 section 4), for testing servers that check
+them: a key is base64(HMAC-H(secret, uid + Message-ID)), its lock base64(H(key)). The results
+match INN's `tests/lib/canlock-t.c` vectors.
+
+| API | what |
+|---|---|
+| `type Hash string`; `SHA1`, `SHA256` | the schemes; another name panics in the functions below |
+| `Key(h, secret, uid, msgid) string` / `KeyValue(...)` | the Cancel-Key element `sha256:<b64>` / its bare value; `uid` "" for an administrator's key |
+| `Lock(h, key) string` / `LockValue(h, key)` | the Cancel-Lock element / bare value for a key (an element or a bare value) |
+| `Elements(v) []string` | the elements of a header value; comments in parentheses dropped |
+| `Verify(lock, key) bool` | whether some key element opens a lock element of the same scheme (case-insensitive); unknown schemes ignored |
+
+```go
+key := canlock.Key(canlock.SHA256, "secret", "", "<1@example.invalid>")
+art.Headers = append(art.Headers, "Cancel-Lock: "+canlock.Lock(canlock.SHA256, key))
+// ... the cancel carries "Cancel-Key: "+key
+```
 
 ## Example
 
