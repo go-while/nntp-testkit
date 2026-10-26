@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -375,6 +376,72 @@ func TestPostCatchesLostArticle(t *testing.T) {
 	// the article did arrive: the store has it, only STAT was told to deny it
 	if n := len(srv.Articles()); n != 1 {
 		t.Errorf("%d articles posted on the wire, want 1", n)
+	}
+}
+
+// TestModeReaderAuthFirst: a server that answers MODE READER with 480 until the client logs in
+// (it lists AUTHINFO). Without Options.User mode-reader passes and says so; with it the check
+// logs in and MODE READER must then work; a 480 from a server that does not list AUTHINFO
+// fails.
+func TestModeReaderAuthFirst(t *testing.T) {
+	t.Parallel()
+	caps := func(extra ...string) []string {
+		return slices.Concat([]string{"101 Capability list:", "VERSION 2", "READER"}, extra, []string{"."})
+	}
+	authFirst := func(retry bool) []fakeserver.Step {
+		steps := []fakeserver.Step{
+			{Expect: "CAPABILITIES", Reply: caps("AUTHINFO USER")},
+			{Expect: "MODE READER", Reply: []string{"480 Authentication required"}},
+		}
+		if retry {
+			steps = append(steps,
+				fakeserver.Step{Expect: "AUTHINFO USER u", Reply: []string{"381 Password required"}},
+				fakeserver.Step{Expect: "AUTHINFO PASS p", Reply: []string{"281 Authentication accepted"}},
+				fakeserver.Step{Expect: "CAPABILITIES", Reply: caps()},
+				fakeserver.Step{Expect: "MODE READER", Reply: []string{"200 Posting allowed"}},
+				fakeserver.Step{Expect: "CAPABILITIES", Reply: caps()},
+			)
+		}
+		return steps
+	}
+	var modeReader []check
+	for _, c := range readerChecks() {
+		if c.Name == "mode-reader" {
+			modeReader = append(modeReader, c)
+		}
+	}
+	cases := []struct {
+		name   string
+		steps  []fakeserver.Step
+		o      Options
+		status Status
+		detail string
+	}{
+		{name: "no-user", steps: authFirst(false), status: Pass, detail: "needs authentication first"},
+		{name: "login-retry", steps: authFirst(true), o: Options{User: "u", Pass: "p"}, status: Pass, detail: "checked again after the login"},
+		{
+			name: "no-authinfo",
+			steps: []fakeserver.Step{
+				{Expect: "CAPABILITIES", Reply: caps()},
+				{Expect: "MODE READER", Reply: []string{"480 Authentication required"}},
+			},
+			status: Fail, detail: "does not list AUTHINFO",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := fakeserver.New(t, fakeserver.Options{Script: tc.steps})
+			o := tc.o
+			o.Addr = srv.Addr()
+			r := runReader(t, o, modeReader)[0]
+			if r.Status != tc.status || !strings.Contains(r.Detail, tc.detail) {
+				t.Errorf("mode-reader: %s %q, want %s naming %q", r.Status, r.Detail, tc.status, tc.detail)
+			}
+			if m := srv.Mismatches(); len(m) != 0 {
+				t.Errorf("lines the script did not expect: %q", m)
+			}
+		})
 	}
 }
 

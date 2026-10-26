@@ -561,17 +561,51 @@ func checkCapabilities(s *session, c check) Result {
 	return r
 }
 
+// checkModeReader: MODE READER answers 200 or 201 and the capability list then lists READER
+// (not MODE-READER), or 502 on a server that lists neither. A 480 (RFC 3977 §3.2.1: the
+// command needs authentication first; RFC 4643 §2.2) is accepted from a server that lists
+// AUTHINFO: without Options.User the check passes with a Detail saying so; with it the check
+// logs in and sends MODE READER again, which must then answer 200, 201 or 502 as above.
 func checkModeReader(s *session, c check) Result {
 	reader, modeReader := s.has("READER"), s.has("MODE-READER")
-	code, line, err := s.single([]int{200, 201, 502}, "MODE READER")
+	code, line, err := s.single([]int{200, 201, 480, 502}, "MODE READER")
 	if err != nil {
 		return c.fail(err.Error())
+	}
+	detail := ""
+	if code == 480 {
+		if capArgs(s.caps, "AUTHINFO") == nil {
+			return c.failf("MODE READER: %q, but CAPABILITIES does not list AUTHINFO", line)
+		}
+		if s.o.User == "" {
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER needs authentication first (%q, AUTHINFO listed); not retried without Options.User", line)
+			return r
+		}
+		done, err := s.login()
+		if err != nil {
+			return c.failf("login after %q to MODE READER: %v", line, err)
+		}
+		if !done {
+			return c.failf("MODE READER: %q, but AUTHINFO USER is not offered (500, 501 or 502)", line)
+		}
+		caps, err := s.capabilities()
+		if err != nil {
+			return c.failf("CAPABILITIES after AUTHINFO: %s", describe(err))
+		}
+		reader, modeReader = capArgs(caps, "READER") != nil, capArgs(caps, "MODE-READER") != nil
+		detail = fmt.Sprintf("MODE READER answered %q before AUTHINFO; checked again after the login", line)
+		if code, line, err = s.single([]int{200, 201, 502}, "MODE READER"); err != nil {
+			return c.failf("after the login: %v", err)
+		}
 	}
 	if code == 502 {
 		if reader || modeReader {
 			return c.failf("MODE READER: %q although CAPABILITIES lists READER or MODE-READER", line)
 		}
-		return c.pass()
+		r := c.pass()
+		r.Detail = detail
+		return r
 	}
 	caps, err := s.capabilities()
 	if err != nil {
@@ -586,7 +620,9 @@ func checkModeReader(s *session, c check) Result {
 	if capArgs(caps, "MODE-READER") != nil {
 		return c.failf("CAPABILITIES after %q still lists MODE-READER", line)
 	}
-	return c.pass()
+	r := c.pass()
+	r.Detail = detail
+	return r
 }
 
 func checkGroup(s *session, c check) Result {

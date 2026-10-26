@@ -19,7 +19,8 @@
 // Checks (Result.RFC names the section):
 //
 //   - RFC 3977: greeting code (200/201) and CRLF; CAPABILITIES format (101, VERSION line,
-//     terminator); MODE READER; GROUP and LISTGROUP codes and ranges (211/411/412), the range
+//     terminator); MODE READER (a 480 from a server that lists AUTHINFO is accepted: with
+//     Options.User the check logs in and asks again); GROUP and LISTGROUP codes and ranges (211/411/412), the range
 //     forms "n", "n-m" (also m < n: empty) and "n-", and the current article LISTGROUP leaves;
 //     ARTICLE/HEAD/BODY/STAT by number, message-id and current article (220-223, 412, 420, 423,
 //     430) with the dot-stuffing and the terminator checked by the strict client; NEXT/LAST
