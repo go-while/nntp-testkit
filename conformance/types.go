@@ -30,6 +30,12 @@ type Options struct {
 	// Workers is how many checks run at the same time, each on its own connection; 0: 4. Public
 	// servers often allow only 2 to 4 connections per account: a refused dial is a Fail.
 	Workers int
+
+	// StrictOverviewFmt requires the RFC 3977 section 8.4.2 preferred metadata
+	// names :bytes and :lines in LIST OVERVIEW.FMT. The zero value also accepts
+	// the legacy Bytes:/Lines: aliases permitted by that RFC. This is an opt-in
+	// naming policy, not a claim that a legacy-compatible server violates it.
+	StrictOverviewFmt bool
 }
 
 // Status is the outcome of one check.

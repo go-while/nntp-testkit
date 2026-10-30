@@ -913,7 +913,7 @@ func (s *session) overviewFmt() ([]string, error) {
 		return lines, fmt.Errorf("LIST OVERVIEW.FMT lists %d fields, want at least the %d mandatory ones: %q", len(lines), len(mandatoryOverview), lines)
 	}
 	for i, m := range mandatoryOverview {
-		if !strings.EqualFold(lines[i], m[0]) && !strings.EqualFold(lines[i], m[1]) {
+		if !strings.EqualFold(lines[i], m[0]) && (s.o.StrictOverviewFmt || !strings.EqualFold(lines[i], m[1])) {
 			return lines, fmt.Errorf("LIST OVERVIEW.FMT line %d is %q, want %q", i+1, lines[i], m[0])
 		}
 	}

@@ -15,6 +15,8 @@
 // capability list itself is checked for format and for consistency with behaviour (READER →
 // GROUP works, OVER → OVER works, POST/IHAVE/STREAMING per RFC 4644). Options.Skip names checks
 // to leave out.
+// Options.StrictOverviewFmt additionally requires the RFC-preferred :bytes/:lines
+// metadata names; by default the RFC-permitted Bytes:/Lines: aliases remain accepted.
 //
 // Checks (Result.RFC names the section):
 //
@@ -38,7 +40,7 @@
 // fails the greeting check ("service unavailable: <line>") and every other check is skipped.
 //
 // cmd/nntp-conformance is the command-line front end: -addr -user -pass -group -tls
-// -tls-insecure -deadline -workers -skip -json; it prints the report and exits 1 on any Fail,
+// -tls-insecure -deadline -workers -skip -json -strict-overview-fmt; it prints the report and exits 1 on any Fail,
 // 2 on a usage error or an unreachable server.
 //
 // Self-test: the kit's own fakeserver Store server passes every check (the handler's
