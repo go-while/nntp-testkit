@@ -129,6 +129,52 @@ func TestReaderChecksPassAgainstStore(t *testing.T) {
 	}
 }
 
+func TestOverviewFmtStrictMode(t *testing.T) {
+	var checks []check
+	for _, c := range readerChecks() {
+		if c.Name == "list-overview-fmt" || c.Name == "over" {
+			checks = append(checks, c)
+		}
+	}
+	for _, tc := range []struct {
+		name, bytes, lines string
+		legacy             bool
+	}{
+		{"preferred", ":bytes", ":lines", false},
+		{"case-insensitive", ":BYTES", ":LiNeS", false},
+		{"legacy", "Bytes:", "Lines:", true},
+		{"legacy-bytes", "Bytes:", ":lines", true},
+		{"legacy-lines", ":bytes", "Lines:", true},
+	} {
+		for _, mode := range []struct {
+			name   string
+			strict bool
+		}{{"default", false}, {"strict", true}} {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				t.Parallel()
+				fields := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", tc.bytes, tc.lines, "Xref:full", ":extra"}
+				srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), StoreOpts: fakeserver.StoreOptions{OverviewFmt: fields}})
+				res := runReader(t, Options{Addr: srv.Addr(), StrictOverviewFmt: mode.strict}, checks)
+				want := Pass
+				if mode.strict && tc.legacy {
+					want = Fail
+				}
+				if len(res) != 2 {
+					t.Fatalf("got %d checks, want both overview consumers", len(res))
+				}
+				for _, r := range res {
+					if r.Status != want {
+						t.Errorf("%s: %s %s, want %s", r.Name, r.Status, r.Detail, want)
+					}
+					if r.Status == Fail && !strings.Contains(r.Detail, "LIST OVERVIEW.FMT line") {
+						t.Errorf("%s: failed for another reason: %s", r.Name, r.Detail)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestReaderChecksSkipWithoutCapability: a server without OVER skips the OVER checks (and
 // only them); a store without any group skips the checks that need one, with the reason.
 func TestReaderChecksSkipWithoutCapability(t *testing.T) {

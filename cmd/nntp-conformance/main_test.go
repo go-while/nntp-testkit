@@ -84,6 +84,38 @@ func TestRunExitCodes(t *testing.T) {
 	}
 }
 
+func TestRunStrictOverviewFmt(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		legacy, strict bool
+		want           int
+	}{
+		{"preferred-strict", false, true, 0},
+		{"legacy-default", true, false, 0},
+		{"legacy-strict", true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			so := fakeserver.StoreOptions{}
+			if tc.legacy {
+				so.OverviewFmt = []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", "Bytes:", "Lines:", "Xref:full"}
+			}
+			srv := fakeserver.New(t, fakeserver.Options{Store: store(), StoreOpts: so})
+			args := []string{"-addr", srv.Addr()}
+			if tc.strict {
+				args = append(args, "-strict-overview-fmt")
+			}
+			var out, errb bytes.Buffer
+			if code := run(args, &out, &errb); code != tc.want {
+				t.Fatalf("exit %d, want %d\nstdout:\n%s\nstderr:\n%s", code, tc.want, out.String(), errb.String())
+			}
+			if tc.want == 1 && !strings.Contains(out.String(), "LIST OVERVIEW.FMT line 6") {
+				t.Errorf("strict mode failed for another reason:\n%s", out.String())
+			}
+		})
+	}
+}
+
 // TestRunJSON: -json prints the results and the capability list as JSON.
 func TestRunJSON(t *testing.T) {
 	srv := fakeserver.New(t, fakeserver.Options{Store: store()})

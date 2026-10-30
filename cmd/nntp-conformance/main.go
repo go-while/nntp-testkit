@@ -2,7 +2,7 @@
 // server and prints the report.
 //
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
-//	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json]
+//	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
 //
 // Exit status: 0 when no check failed, 1 on any Fail, 2 on a usage error or when the server
 // cannot be reached.
@@ -61,6 +61,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
+	strictOverview := fs.Bool("strict-overview-fmt", false, "require preferred :bytes/:lines metadata names (legacy Bytes:/Lines: aliases allowed by default)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: nntp-conformance -addr host:port [flags]\n\nflags:\n")
 		fs.PrintDefaults()
@@ -97,6 +98,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return usage("-tls needs a host in -addr (the TLS ServerName)")
 	}
 	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline, Workers: *workers}
+	o.StrictOverviewFmt = *strictOverview
 	names := conformance.Names()
 	for _, n := range strings.Split(*skip, ",") {
 		if n = strings.TrimSpace(n); n == "" {

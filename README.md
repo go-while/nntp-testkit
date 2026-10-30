@@ -255,7 +255,7 @@ Log dump: the cleanup of both Start functions stops the process and, when the te
 | `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; no Errorf with `ReportOnly` (an unreachable server is logged) |
 | `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
 | `type Result struct { Name string; Status Status; Detail, RFC string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note) |
 | `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
 
@@ -267,6 +267,12 @@ in `Options.Skip` ("skipped by option"), needs credentials without `User` or pos
 (unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
 broken greeting fails `greeting` once and skips the rest; a panic in a check is its Fail.
 The articles that checks post carry a Message-ID under `@conformance.invalid`.
+
+`Options.StrictOverviewFmt` requires the RFC 3977 section 8.4.2 preferred `:bytes` and
+`:lines` metadata names in both the format and OVER checks. The zero value remains
+compatible with the RFC-permitted legacy `Bytes:`/`Lines:` aliases. This opt-in policy
+does not make those legacy spellings RFC violations; field-name case and optional
+overview extensions are still handled as before.
 
 | RFC | checks |
 |---|---|
@@ -288,6 +294,7 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
 | `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
+| `-strict-overview-fmt` | require preferred `:bytes`/`:lines` instead of the RFC-permitted legacy aliases; off by default |
 
 Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
 cannot be reached.
