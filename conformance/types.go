@@ -85,6 +85,15 @@ func (r Report) Failed() []Result {
 	return out
 }
 
+// ByName returns the results by check name (Result.Name, the values of Names()).
+func (r Report) ByName() map[string]Result {
+	out := make(map[string]Result, len(r.Results))
+	for _, res := range r.Results {
+		out[res.Name] = res
+	}
+	return out
+}
+
 // Counts returns the number of Pass, Fail and Skip results.
 func (r Report) Counts() (pass, fail, skip int) {
 	for _, res := range r.Results {

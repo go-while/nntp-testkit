@@ -40,6 +40,21 @@ func Names() []string {
 // too (with ReportOnly it is only logged).
 func Run(tb testing.TB, o Options) Report {
 	tb.Helper()
+	return run(tb, o, false)
+}
+
+// RunVerbose is Run that first logs every result that is not a Skip with tb.Logf, one line
+// each ("conformance <addr>: PASS <name> (<RFC>): <detail>"), so the test output shows what the
+// server passed as well as what it failed. Fails are then reported as by Run (not with
+// o.ReportOnly); skips are left out, Report.String has them.
+func RunVerbose(tb testing.TB, o Options) Report {
+	tb.Helper()
+	return run(tb, o, true)
+}
+
+// run is Run, logging the results that are not skipped first when verbose.
+func run(tb testing.TB, o Options, verbose bool) Report {
+	tb.Helper()
 	r, err := Check(o)
 	if err != nil {
 		if o.ReportOnly {
@@ -48,6 +63,18 @@ func Run(tb testing.TB, o Options) Report {
 			tb.Errorf("conformance %s: %v", o.Addr, err)
 		}
 		return r
+	}
+	if verbose {
+		for _, res := range r.Results {
+			if res.Status == Skip {
+				continue
+			}
+			detail := ""
+			if res.Detail != "" {
+				detail = ": " + res.Detail
+			}
+			tb.Logf("conformance %s: %s %s (%s)%s", o.Addr, res.Status, res.Name, res.RFC, detail)
+		}
 	}
 	failed := r.Failed()
 	if o.ReportOnly || len(failed) == 0 {
