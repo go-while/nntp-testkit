@@ -39,7 +39,7 @@ type Options struct {
 	Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 	Store      *Store        // stateful mode: the store handler when Handler is nil (see storeHandler)
 	StoreOpts  StoreOptions  // options of the store handler
-	Faults     Faults        // fault hooks of Store and Script mode; copied by New/Start
+	Faults     Faults        // fault hooks of Store and Script mode and LineHandler; copied by New/Start
 	Deadline   time.Duration // hang guard; 0 = testkit.Deadline()
 
 	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
@@ -139,9 +139,9 @@ type StoreOptions struct {
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store
-// mode and in Script mode only: an external Handler cannot apply them. New and Start copy the
-// maps, so changing Options.Faults afterwards has no effect (and does not race); do not mutate
-// the maps while New or Start runs.
+// mode, in Script mode and to a LineHandler only: another Handler cannot apply them. New and
+// Start copy the maps, so changing Options.Faults afterwards has no effect (and does not race);
+// do not mutate the maps while New or Start runs.
 //
 // In Script mode: Delay and Override apply to the Reply of a matched step (not to the
 // "500 fakeserver: unexpected" answer of a mismatch); Delay runs after the step's own Delay;
@@ -291,6 +291,7 @@ type Server struct {
 	counts     map[string]int
 	accepted   int
 	open       int
+	maxOpen    int // the most connections open at once (Open's peak)
 }
 
 // New listens on o.Addr, serves every connection in its own goroutine and registers
@@ -396,6 +397,7 @@ func (s *Server) acceptLoop() {
 		}
 		s.conns[c] = struct{}{}
 		s.open++
+		s.maxOpen = max(s.maxOpen, s.open)
 		s.wg.Add(1)
 		s.mu.Unlock()
 		go s.serve(c, id)
@@ -554,6 +556,15 @@ func (s *Server) Open() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.open
+}
+
+// MaxOpen returns the most connections that were open at the same time (the peak of Open since
+// the start): e.g. whether a client kept to its limit of parallel connections. Connections
+// rejected by Options.MaxConns do not count.
+func (s *Server) MaxOpen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxOpen
 }
 
 // Count returns how many client lines read through Conn.ReadLine started with cmd (compared

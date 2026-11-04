@@ -16,7 +16,7 @@
 //		Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 //		Store      *Store        // stateful mode: StoreHandler(Store, StoreOptions) when Handler is nil
 //		StoreOpts  StoreOptions
-//		Faults     Faults        // apply in Script and Store mode (copied at start); an external Handler cannot use them
+//		Faults     Faults        // apply in Script and Store mode and to a LineHandler (copied at start); another Handler cannot use them
 //		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline; 0 = testkit.Deadline()
 //		MaxConns         int    // >0: one more simultaneous connection gets MaxConnsGreeting and is closed (counts in Accepted, never in Open)
 //		MaxConnsGreeting string // default "502 Too many connections"
@@ -42,6 +42,7 @@
 //	func (s *Server) Mismatches() []string
 //	func (s *Server) Accepted() int                  // connections accepted so far
 //	func (s *Server) Open() int                      // connections not yet gone
+//	func (s *Server) MaxOpen() int                   // the most connections open at once (rejected ones do not count)
 //	func (s *Server) WaitOpen(tb testing.TB, n int, d time.Duration) // polls until Open()==n; fails tb after d
 //	func (s *Server) WaitLines(tb testing.TB, want []string)         // polls until Lines()==want (within Deadline); fails tb
 //	func (s *Server) Count(cmd string) int           // commands seen: upper-cased first word of every client line
@@ -73,6 +74,7 @@
 //		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
 //		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
 //	}
+//	func LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn) // f answers each client line, in any order; Faults apply as in Script mode
 //	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING, COMPRESS DEFLATE), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, COMPRESS, QUIT; else 500
 //	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
 //	// Defer436Once; else 335, the article (dot block), then 437 (Reject, or held meanwhile) or
@@ -169,7 +171,7 @@
 //	}
 //	// Keys are upper-cased command names ("ARTICLE"), OverrideLine's the whole client line
 //	// normalised (command upper-cased, arguments joined by single spaces); the hooks apply in
-//	// Store mode and in Script mode (there: only to a matched step's reply), in this order:
+//	// Store mode, to a LineHandler and in Script mode (there: only to a matched step's reply), in this order:
 //	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
 //	// then Endless (LineDelay pauses between the lines of the write). DropInMultiline counts the status line; 0 closes before writing anything.
 //	// On a compressed connection the faults work on the inflated stream; each write is deflated, sync-flushed and sent in one socket write.
