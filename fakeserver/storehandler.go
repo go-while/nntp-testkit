@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-while/nntp-testkit/internal/dotstuff"
 )
 
 // defaultOverviewFmt is the LIST OVERVIEW.FMT answer when StoreOptions.OverviewFmt is empty; it
@@ -480,17 +482,17 @@ func (h *storeConn) article(cmd string, args []string) []string {
 		return []string{fmt.Sprintf("223 %d %s Article exists", num, id)}
 	case "HEAD":
 		out := []string{fmt.Sprintf("221 %d %s Headers follow", num, id)}
-		out = appendStuffed(out, a.Headers)
+		out = dotstuff.Append(out, a.Headers)
 		return append(out, ".")
 	case "BODY":
 		out := []string{fmt.Sprintf("222 %d %s Body follows", num, id)}
-		out = appendStuffed(out, a.Body)
+		out = dotstuff.Append(out, a.Body)
 		return append(out, ".")
 	default:
 		out := []string{fmt.Sprintf("220 %d %s Article follows", num, id)}
-		out = appendStuffed(out, a.Headers)
+		out = dotstuff.Append(out, a.Headers)
 		out = append(out, "")
-		out = appendStuffed(out, a.Body)
+		out = dotstuff.Append(out, a.Body)
 		return append(out, ".")
 	}
 }
@@ -760,17 +762,6 @@ func (h *storeConn) file(wire []string) string {
 // validMessageID reports whether id has the form "<...>" without white space.
 func validMessageID(id string) bool {
 	return len(id) > 2 && strings.HasPrefix(id, "<") && strings.HasSuffix(id, ">") && !strings.ContainsAny(id, " \t\r\n")
-}
-
-// appendStuffed appends lines to out, dot-stuffing those that start with ".".
-func appendStuffed(out, lines []string) []string {
-	for _, l := range lines {
-		if strings.HasPrefix(l, ".") {
-			l = "." + l
-		}
-		out = append(out, l)
-	}
-	return out
 }
 
 // numRange is an article range: from..to, or from.. when open.

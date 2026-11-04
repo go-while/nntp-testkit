@@ -22,6 +22,10 @@
 //	func (c *Conn) ReadStatus() (int, string, error)       // next status line: code and the full line
 //	func (c *Conn) TryCmd(format string, args ...any) (int, string, error) // Send(format+CRLF) then ReadStatus
 //	func (c *Conn) Cmd(format string, args ...any) (int, string)           // TryCmd; fails tb on error
+//	func (c *Conn) ExpectCmd(want int, format string, args ...any) string // Cmd; fails tb unless the code is want; the status line
+//	func (c *Conn) ExpectStatus(want int, what string) string             // ReadStatus; fails tb on error or unless the code is want
+//	func (c *Conn) MustSend(raw string)                                   // Send; fails tb on error
+//	func (c *Conn) Capabilities() (map[string][]string, []string)         // CAPABILITIES: 101 and a block ParseCapabilities takes, else fails tb
 //	func (c *Conn) TryReadDotLines() ([]string, error)     // dot-terminated block, un-stuffed, CRLF stripped
 //	func (c *Conn) ReadDotLines() []string                 // TryReadDotLines; fails tb on error
 //	func (c *Conn) RawUntilDot() []byte                    // exact bytes up to and including "\r\n.\r\n" (or ".\r\n" when empty); fails tb on error
@@ -37,6 +41,8 @@
 //	func ExpectCode(code int, line string, want ...int) error
 //	func ExpectLines(got, want []string) error
 //	func Unstuff(wire []string) []string                   // ".." prefix → "."
+//	func Stuff(lines []string) string                      // lines → dot-stuffed CRLF block with ".\r\n": what a client sends after POST/IHAVE/TAKETHIS
+//	func ParseCapabilities(lines []string) (map[string][]string, error) // CAPABILITIES lines → upper-cased label → arguments; error on a blank or doubled line
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF
