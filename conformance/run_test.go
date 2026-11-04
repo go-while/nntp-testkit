@@ -22,15 +22,6 @@ func names(list []check) []string {
 	return out
 }
 
-// byName returns the results of r by check name.
-func byName(r Report) map[string]Result {
-	out := make(map[string]Result, len(r.Results))
-	for _, res := range r.Results {
-		out[res.Name] = res
-	}
-	return out
-}
-
 // mustCheck runs Check and fails t on an error; the report is logged.
 func mustCheck(t *testing.T, o Options) Report {
 	t.Helper()
@@ -241,7 +232,7 @@ func TestCheckPeer(t *testing.T) {
 func TestCheckSkipOption(t *testing.T) {
 	srv := fakeserver.New(t, fakeserver.Options{Store: testStore()})
 	r := mustCheck(t, Options{Addr: srv.Addr(), Skip: []string{"date", "help"}})
-	res := byName(r)
+	res := r.ByName()
 	for _, n := range []string{"date", "help"} {
 		if res[n].Status != Skip || res[n].Detail != "skipped by option" {
 			t.Errorf("%s: %s %q, want SKIP \"skipped by option\"", n, res[n].Status, res[n].Detail)
@@ -433,7 +424,7 @@ func TestCheckServiceUnavailable(t *testing.T) {
 					t.Errorf("%s: %s %q, want SKIP", res.Name, res.Status, res.Detail)
 				}
 			}
-			if d := byName(r)["help"].Detail; d != "skipped by option" {
+			if d := r.ByName()["help"].Detail; d != "skipped by option" {
 				t.Errorf("help Detail %q, want \"skipped by option\"", d)
 			}
 			if n := srv.Count("CAPABILITIES"); n != 0 {
@@ -468,5 +459,37 @@ func TestRunNeedsModeReader(t *testing.T) {
 	r = runChecks(Options{Addr: srv.Addr()}, []check{c})[0]
 	if r.Status != Pass || !ran {
 		t.Errorf("with MODE-READER: %s %q (ran %v), want the check run", r.Status, r.Detail, ran)
+	}
+}
+
+// TestRunVerbose: RunVerbose logs every result that is not a Skip, one line each, then
+// reports the Fails as Run does; ByName finds each result.
+func TestRunVerbose(t *testing.T) {
+	srv := bareLFServer(t) // the greeting fails, everything else is skipped
+	rec := &recordTB{TB: t}
+	r := RunVerbose(rec, Options{Addr: srv.Addr()})
+	if len(rec.logs) != 1 || !strings.Contains(rec.logs[0], "FAIL greeting (RFC 3977") {
+		t.Errorf("logs %q, want the greeting Fail only", rec.logs)
+	}
+	if len(rec.errors) != 2 || !strings.Contains(rec.errors[0], "FAIL greeting") {
+		t.Errorf("errors %q, want the greeting Fail and a summary as Run", rec.errors)
+	}
+	res := r.ByName()
+	if len(res) != len(Names()) || res["greeting"].Status != Fail || res["over"].Status != Skip {
+		t.Errorf("ByName: %d results, greeting %v, over %v", len(res), res["greeting"].Status, res["over"].Status)
+	}
+
+	st := fakeserver.New(t, fakeserver.Options{Store: testStore()})
+	rec = &recordTB{TB: t}
+	r = RunVerbose(rec, Options{Addr: st.Addr(), ReportOnly: true})
+	pass, fail, _ := r.Counts()
+	if len(rec.errors) != 0 || len(rec.logs) != pass+fail || pass == 0 {
+		t.Errorf("store server: %d logs, %d errors %q; want %d logs (pass+fail), none", len(rec.logs),
+			len(rec.errors), rec.errors, pass+fail)
+	}
+	for _, l := range rec.logs {
+		if !strings.HasPrefix(l, "conformance "+st.Addr()+": ") || strings.Contains(l, " SKIP ") {
+			t.Errorf("log line %q", l)
+		}
 	}
 }

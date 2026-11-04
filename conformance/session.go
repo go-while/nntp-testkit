@@ -99,13 +99,8 @@ func (s *session) has(kw string) bool {
 // capArgs returns the arguments of capability kw ("" → an empty non-nil slice when listed
 // without arguments), or nil when kw is not listed.
 func capArgs(caps []string, kw string) []string {
-	for _, l := range caps {
-		f := strings.Fields(l)
-		if len(f) > 0 && strings.EqualFold(f[0], kw) {
-			return f[1:]
-		}
-	}
-	return nil
+	m, _ := client.ParseCapabilities(caps) // a blank or doubled line is the capabilities check's to report
+	return m[strings.ToUpper(kw)]
 }
 
 // cmd sends one command and returns code and line; a strict-mode or I/O error is returned.

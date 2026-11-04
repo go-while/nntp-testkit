@@ -7,8 +7,10 @@
 // Entry points:
 //
 //	func Run(tb testing.TB, o Options) Report   // fails tb when a check fails, unless o.ReportOnly
+//	func RunVerbose(tb testing.TB, o Options) Report // Run, logging every result that is not a Skip first
 //	func Check(o Options) (Report, error)       // no testing: err only when the server is unreachable
 //	func Names() []string                       // the check names in report order (Options.Skip)
+//	func (r Report) ByName() map[string]Result  // the results by check name
 //
 // Every check opens its own connection, so one failure cannot poison the next. A check whose
 // capability the server does not advertise (CAPABILITIES) is reported as Skip, not Fail; the

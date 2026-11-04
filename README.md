@@ -29,7 +29,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 
 | package | what |
 |---|---|
-| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline` |
+| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening` |
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
@@ -38,6 +38,15 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
+
+### testkit (root)
+
+| API | what |
+|---|---|
+| `Deadline() time.Duration`, `DefaultDeadline`, `EnvDeadline` | the hang guard (above) |
+| `WaitFor(tb, d, what, cond func() bool)` | poll `cond` every 50 ms until it holds; `tb.Fatalf("timed out after <d> waiting for <what>")` after `d` (0 = `Deadline()`) |
+| `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, for a server that must be told its port (another process may take it first) |
+| `Listening(addr) bool` | a TCP dial to `addr` succeeds within a second (closed at once, nothing written): a server is up, or with `WaitFor` it has stopped |
 
 ### client
 
@@ -56,11 +65,18 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
 | `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
 | `Close()` | idempotent, nil-safe |
+| `ExpectCmd(want, format, args...) string` | `Cmd`, and fail tb unless the code is `want`; returns the status line |
+| `ExpectStatus(want, what) string` | read the next status line (the 240 after a POSTed article, a pipelined reply); fail tb on error or unless the code is `want` |
+| `MustSend(raw)` | `Send` that fails tb |
+| `Capabilities() (map[string][]string, []string)` | send CAPABILITIES; fail tb unless 101 and a list `ParseCapabilities` takes; the map and the lines in order |
 | `ParseCode`, `ExpectCode`, `ExpectLines`, `Unstuff` | text helpers |
+| `Stuff(lines) string` | the lines as a client sends them after POST, IHAVE or TAKETHIS: dot-stuffed, CRLF after each, `.\r\n` at the end |
+| `ParseCapabilities(lines) (map[string][]string, error)` | CAPABILITIES lines → label upper-cased (labels are case-insensitive, RFC 3977 §3.3.1) → arguments as sent (an empty slice for none); error on a blank line or a label listed twice, the map holds the rest |
 | `type StrictError struct { Kind Kind; Line string; Bytes []byte; Err error }`, `type Kind int` | strict-mode error |
 
-`Cmd`, `ReadDotLines` and `RawUntilDot` fail tb; on a `TryDial` Conn without `WithTB` they panic, so
-use the `Try` forms there.
+`Cmd`, `ReadDotLines`, `RawUntilDot`, `ExpectCmd`, `ExpectStatus`, `MustSend` and `Capabilities` fail
+the Conn's tb (`c.For(t)` in a subtest); on a `TryDial` Conn without `WithTB` they panic, so use the
+`Try` forms there.
 
 Strict mode (on for `Dial`, `DialWith`, `TryDial` and `New`) returns a `*StrictError` whose `Kind` is:
 
@@ -101,12 +117,13 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
 | `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
-| `Accepted`, `Open`, `WaitOpen(tb, n, d)`, `WaitLines(tb, want)` | connection counts and polling waits |
+| `Accepted`, `Open`, `MaxOpen`, `WaitOpen(tb, n, d)`, `WaitLines(tb, want)` | connection counts (`MaxOpen`: the most open at once, e.g. a client's parallel-connection limit) and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
 | `(*Conn) StartCompress() error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
+| `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
@@ -125,7 +142,7 @@ Three modes, chosen per server:
   that does not match the current step gets `500 fakeserver: unexpected <line>` and is recorded in
   `Mismatches()`; after the last step the server keeps reading and recording until EOF.
 - **Handler**: `Options.Handler` gets each connection (`*fakeserver.Conn`); the conn is closed when
-  it returns. `StoreHandler` and `PeerHandler` are ready-made handlers.
+  it returns. `StoreHandler`, `PeerHandler` and `LineHandler` are ready-made handlers.
 - **Store**: `Options.Store` serves a `Store` with the built-in RFC 3977 handler: CAPABILITIES, MODE
   READER, HELP, LIST (ACTIVE, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
   OVER/XOVER, HDR/XHDR (+ LIST HEADERS), NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, COMPRESS (with
@@ -199,8 +216,8 @@ written unless `NoGreeting`; then `Handler` when set, else `Store` when set, els
 `NoGreeting` and no Handler neither Store nor Script runs: lines are only recorded.
 
 `Options.Faults` (keys are upper-cased command names, e.g. `"ARTICLE"`) apply in Store and Script
-mode (in Script mode to a matched step's reply), not to an external Handler; New and Start copy the
-maps.
+mode (in Script mode to a matched step's reply) and to a `LineHandler`'s replies, not to another
+Handler; New and Start copy the maps.
 
 | field | effect |
 |---|---|
@@ -253,11 +270,12 @@ Log dump: the cleanup of both Start functions stops the process and, when the te
 | API | what |
 |---|---|
 | `Run(tb, Options) Report` | run every check; each Fail is a `tb.Errorf`, then one summary line; no Errorf with `ReportOnly` (an unreachable server is logged) |
+| `RunVerbose(tb, Options) Report` | `Run` that first logs every result that is not a Skip (`tb.Logf`, one line each), so a passing run shows what passed |
 | `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
 | `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
 | `type Result struct { Name string; Status Status; Detail, RFC string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note) |
-| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
+| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
 
 Every check opens its own connection (`Options.Workers` at a time, default 4; the results keep
 the order of `Names()`), so one failure cannot poison the next. The checks that post run after

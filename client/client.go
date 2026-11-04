@@ -13,6 +13,7 @@ import (
 	"time"
 
 	testkit "github.com/go-while/nntp-testkit"
+	"github.com/go-while/nntp-testkit/internal/dotstuff"
 )
 
 // readerSize is the buffer of Conn.R: large enough for any status line and most article lines.
@@ -339,4 +340,18 @@ func Unstuff(wire []string) []string {
 		out[i] = l
 	}
 	return out
+}
+
+// Stuff returns lines as a multi-line block on the wire, as a client sends an article after
+// POST, IHAVE or TAKETHIS: each line dot-stuffed (a leading "." doubled), followed by CRLF, and
+// the ".\r\n" terminator; no lines give ".\r\n" alone. The lines must not hold line ends.
+// Unstuff undoes the stuffing of the lines (without the terminator); Send writes the block.
+func Stuff(lines []string) string {
+	var b strings.Builder
+	for _, l := range dotstuff.Append(make([]string, 0, len(lines)), lines) {
+		b.WriteString(l)
+		b.WriteString("\r\n")
+	}
+	b.WriteString(".\r\n")
+	return b.String()
 }
