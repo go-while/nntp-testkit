@@ -99,3 +99,29 @@ func TestFreePortAndListening(t *testing.T) {
 		t.Error("Listening on a bad address")
 	}
 }
+
+// TestFreePortSkipsWildcard holds a port on a wildcard address the way another program's
+// listener would and checks that FreePort's check treats it as taken, while 127.0.0.1 may
+// still share it on illumos, macOS and the BSDs (logged, not required).
+func TestFreePortSkipsWildcard(t *testing.T) {
+	for _, a := range []struct{ network, host string }{{"tcp4", "0.0.0.0"}, {"tcp6", "::"}} {
+		t.Run(a.network, func(t *testing.T) {
+			w, err := net.Listen(a.network, net.JoinHostPort(a.host, "0"))
+			if err != nil {
+				t.Skipf("no %s wildcard listener here: %v", a.network, err)
+			}
+			defer func() { _ = w.Close() }()
+			port := w.Addr().(*net.TCPAddr).Port
+			if wildcardFree(port) {
+				t.Errorf("wildcardFree(%d) with a %s listener on it", port, a.network)
+			}
+			if l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err == nil {
+				t.Logf("%s: 127.0.0.1 shares port %d with the wildcard listener", runtime.GOOS, port)
+				_ = l.Close()
+			}
+		})
+	}
+	if port := FreePort(t); !wildcardFree(port) {
+		t.Errorf("FreePort returned %d, which is in use on a wildcard address", port)
+	}
+}
