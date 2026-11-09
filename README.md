@@ -459,4 +459,5 @@ Which Go versions CI covers, and what to change when Go 1.28 is out: [NOTES.md](
 
 ## License
 
-GPLv2, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Versions before v0.11.2 were published as GPLv2; the
+author, who wrote all of it, allows them to be used under the MIT license as well.
