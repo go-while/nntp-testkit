@@ -45,7 +45,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 |---|---|
 | `Deadline() time.Duration`, `DefaultDeadline`, `EnvDeadline` | the hang guard (above) |
 | `WaitFor(tb, d, what, cond func() bool)` | poll `cond` every 50 ms until it holds; `tb.Fatalf("timed out after <d> waiting for <what>")` after `d` (0 = `Deadline()`) |
-| `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, for a server that must be told its port (another process may take it first) |
+| `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, and not in use on 0.0.0.0 or [::] either, for a server that must be told its port (another process may take it first) |
 | `Listening(addr) bool` | a TCP dial to `addr` succeeds within a second (closed at once, nothing written): a server is up, or with `WaitFor` it has stopped |
 
 ### client

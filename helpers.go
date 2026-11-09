@@ -1,7 +1,10 @@
 package testkit
 
 import (
+	"errors"
 	"net"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -30,15 +33,44 @@ func WaitFor(tb testing.TB, d time.Duration, what string, cond func() bool) {
 // FreePort returns a TCP port of 127.0.0.1 that was free a moment ago: it listens on port 0
 // and closes the listener. Another process may take the port before the test uses it, so
 // prefer handing a server a listener (or ":0" and reading its address back) when it can take
-// one; FreePort is for a server that must be told its port in advance. A listen error fails tb.
+// one; FreePort is for a server that must be told its port in advance. A port that something
+// else already uses on 0.0.0.0 or [::] is skipped (see wildcardFree). A listen error fails tb.
 func FreePort(tb testing.TB) int {
 	tb.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		tb.Fatalf("free port: %v", err)
+	for range freePortTries {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			tb.Fatalf("free port: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		_ = l.Close()
+		if wildcardFree(port) {
+			return port
+		}
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port
+	tb.Fatalf("free port: %d ports of 127.0.0.1 were all in use on 0.0.0.0 or [::]", freePortTries)
+	return 0
+}
+
+// freePortTries is how many ports FreePort tries before it gives up.
+const freePortTries = 100
+
+// wildcardFree reports whether port is free on 0.0.0.0 and on [::]. On illumos, macOS and
+// the BSDs a 127.0.0.1 listener can share a port with another program's wildcard listener
+// (Go sets SO_REUSEADDR), and the test's first dial can then reach that program instead of
+// the test server: on illumos, inetd's RPC listeners took a server's port this way. Only
+// "address in use" counts as taken; a host without IPv6 passes.
+func wildcardFree(port int) bool {
+	for _, a := range [...]struct{ network, host string }{{"tcp4", "0.0.0.0"}, {"tcp6", "::"}} {
+		l, err := net.Listen(a.network, net.JoinHostPort(a.host, strconv.Itoa(port)))
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return false
+		}
+		if err == nil {
+			_ = l.Close()
+		}
+	}
+	return true
 }
 
 // listenProbe is the longest Listening waits for its dial.
