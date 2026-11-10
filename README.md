@@ -36,6 +36,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
 | `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 | `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
+| `canlock` | Cancel-Lock and Cancel-Key values (RFC 8315): compute them, check a key against a lock |
+| `mailrec`, `cmd/fakesendmail` | a stand-in sendmail that records each mail, for servers that mail moderators or report by mail |
 
 The `doc.go` of each package holds the full contract; `go doc -all ./<package>` prints it.
 
@@ -341,6 +343,56 @@ into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (th
 `RawDots` and `RawSpaces` model posting tools that leave those characters to the server's
 dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
 cuts a post off mid-body instead.
+
+### canlock
+
+Cancel-Lock and Cancel-Key header values (RFC 8315 section 4), for testing servers that check
+them: a key is base64(HMAC-H(secret, uid + Message-ID)), its lock base64(H(key)). The results
+match INN's `tests/lib/canlock-t.c` vectors.
+
+| API | what |
+|---|---|
+| `type Hash string`; `SHA1`, `SHA256` | the schemes; another name panics in the functions below |
+| `Key(h, secret, uid, msgid) string` / `KeyValue(...)` | the Cancel-Key element `sha256:<b64>` / its bare value; `uid` "" for an administrator's key |
+| `Lock(h, key) string` / `LockValue(h, key)` | the Cancel-Lock element / bare value for a key (an element or a bare value) |
+| `Elements(v) []string` | the elements of a header value; comments in parentheses dropped |
+| `Verify(lock, key) bool` | whether some key element opens a lock element of the same scheme (case-insensitive); unknown schemes ignored |
+
+```go
+key := canlock.Key(canlock.SHA256, "secret", "", "<1@example.invalid>")
+art.Headers = append(art.Headers, "Cancel-Lock: "+canlock.Lock(canlock.SHA256, key))
+// ... the cancel carries "Cancel-Key: "+key
+```
+
+### mailrec
+
+A stand-in for sendmail that records mail instead of sending it, for servers that mail a
+moderated group's submissions or send reports. `New` builds `cmd/fakesendmail` for one test with
+its record directory built in, so it records even when the server clears the environment of the
+programs it runs; give `Recorder.Path` to the server as its sendmail or mailer.
+
+| API | what |
+|---|---|
+| `New(tb) *Recorder`; `Recorder{Path, Dir string}` | build the stand-in into `tb.TempDir()` (needs the `go` command) |
+| `(*Recorder) Mails(tb)`, `Wait(tb, n)`, `ExpectNone(tb)` | the mails so far; wait for n of them (bounded by `testkit.Deadline()`); fail if one arrives within 200ms |
+| `(*Recorder) SetExit(tb, code)`, `Env()` | make the stand-in exit with code from now on (the mail is still recorded); `NNTP_TEST_MAIL_DIR=<Dir>` for a server's environment |
+| `type Mail struct { N int; Argv []string; Msg []byte }` | one mail: `Recipients()`, `From()` (-f), `HeaderMode()` (-t), `Header(name)` (unfolded), `Body()` |
+| `Read(dir)`, `Record(dir, argv, msg)`, `Main(...)` | read or write a record directory without a `Recorder`; `Main` is the command |
+| `EnvDir` (`NNTP_TEST_MAIL_DIR`), `EnvExit` (`NNTP_TEST_MAIL_EXIT`) | the command's record directory (wins over the built-in one) and its default exit status |
+
+A record directory holds `N/argv` (one argument per line, argv[0] first), `N/msg` (stdin) and
+`N/done` (written last; a mail without it is still being written) for N = 1, 2, ...; the file
+`exit` in it, if present, is the exit status. Without a directory the command reads the mail and
+drops it. For a server whose sendmail path is compiled in, install the built command there on a
+test machine only and set `NNTP_TEST_MAIL_DIR` per test; never on a machine that sends real mail.
+
+```go
+mr := mailrec.New(t)
+srv := proc.StartTCP(t, proc.Options{Path: serverBin, Args: []string{"-mailer", mr.Path}}, addr)
+// ... post to a moderated group
+m := mr.Wait(t, 1)[0]
+if got := m.Recipients(); len(got) != 1 || got[0] != "mod@example.invalid" { t.Errorf("to %q", got) }
+```
 
 ## Example
 

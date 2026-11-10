@@ -2,10 +2,10 @@
 // fake server, a strict test client, an external-process runner) for projects that implement or
 // consume NNTP. Only the standard library is used.
 //
-// The sub-packages are client, fakeserver, proc, conformance and yenc. This package holds what
-// they share, the hang guard (Deadline), and small helpers for any test: WaitFor polls a
-// condition within a deadline, FreePort picks a TCP port for a server that must be told one,
-// and Listening probes whether something accepts connections on an address.
+// The sub-packages are client, fakeserver, proc, conformance, yenc, canlock and mailrec. This
+// package holds what they share, the hang guard (Deadline), and small helpers for any test:
+// WaitFor polls a condition within a deadline, FreePort picks a TCP port for a server that must
+// be told one, and Listening probes whether something accepts connections on an address.
 package testkit
 
 import (
