@@ -50,7 +50,7 @@
 // error, the plain forms fail tb only then. The id is the message-ID as it goes on the wire,
 // angle brackets included, sent as given.
 //
-//	func StuffBytes(article []byte) []byte                 // dot-stuff each line start (after CRLF), add the final CRLF when missing, append ".\r\n"; every other byte (bare CR, NUL, 8-bit) stays
+//	func StuffBytes(article []byte) []byte                 // dot-stuff each line start (after CRLF only: a bare LF is not a line start, so a lenient server like innd sees such a "." unstuffed), add the final CRLF when missing, append ".\r\n"; every other byte (bare CR, NUL, 8-bit) stays
 //	func (c *Conn) TryPost(article []byte) (code int, line string, err error)        // POST; on 340 send the article, return the final reply (240, 441 ...), else the first (440, 480 ...)
 //	func (c *Conn) TryIhave(id string, article []byte) (int, string, error)          // IHAVE id; on 335 send and return the final (235, 436, 437), else the first (435, 436, 480 ...)
 //	func (c *Conn) TryCheck(id string) (int, string, error)                          // CHECK id: 238, 431, 438 ...
@@ -66,7 +66,7 @@
 //
 //	type Reply struct { Cmd string; Code int; Line string; Lines []string } // Lines: the un-stuffed block of a multi-line reply, nil otherwise
 //	func MultiLine(cmd string, code int) bool               // RFC 3977/4644/2980 multi-line reply codes (100, 101, 215, 220-222, 224, 225, 230, 231, 282; 211 after LISTGROUP)
-//	func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) // write all cmds (CRLF appended unless the entry ends in one) from a goroutine while reading the replies in order; multi nil = MultiLine; on error the replies so far
+//	func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) // write all cmds (CRLF appended unless the entry ends in one) from a goroutine while reading the replies in order; multi nil = MultiLine; Reply.Cmd and multi's cmd are the entry's first line; the deadline slides per line, a dot block has an absolute bound of 10 deadlines and 64 MiB; on error the replies so far
 //	func (c *Conn) Pipeline(cmds []string, multi func(cmd string, code int) bool) []Reply            // TryPipeline; fails tb on error
 //
 // Dialing (dial.go):
@@ -88,7 +88,8 @@
 // Every wait of these helpers is the Conn's hang guard (testkit.Deadline() by default, so
 // NNTP_TEST_DEADLINE scales it) or the duration the caller passes; none sleeps a fixed time
 // except the caller's pause and DialUntil's 50 ms poll. Pipeline's guard slides: it is moved on
-// with every reply read, so a stalled server fails after one deadline and a long batch does not.
+// with every line read, so a stalled server fails after one deadline and a long batch does not;
+// a dot block also has the absolute bound above.
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF

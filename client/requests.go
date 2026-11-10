@@ -2,7 +2,9 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -12,9 +14,11 @@ import (
 // no stuffing, no terminator (what the article package's Bytes returns). Nothing else is
 // changed: a bare CR, a bare LF, a NUL or an 8-bit byte stays as it is. A line starts after a
 // CRLF only (a lone LF is not a line end for the stuffing, and is not at the start of the
-// article either unless the article begins with "."). An empty article gives ".\r\n". The
-// block ends with "\r\n.\r\n", so an article that ends in "\r\n" gains nothing but the
-// terminator.
+// article either unless the article begins with "."). A server that is lenient and takes a bare
+// LF as a line end (innd does) sees a "." after a bare LF as unstuffed: use CRLF in articles
+// that are meant to be stuffed. An article that ends in a bare CR gets "\r\n" appended
+// ("a\r" becomes "a\r\r\n"): bytes are never changed, only added. An empty article gives
+// ".\r\n". An article that ends in "\r\n" gains nothing but the terminator.
 func StuffBytes(article []byte) []byte {
 	out := make([]byte, 0, len(article)+16)
 	rest := article
@@ -173,7 +177,9 @@ func (c *Conn) Login(user, pass string) (int, string) {
 }
 
 // Reply is one answer of Pipeline: the command it answers, the status line and, for a
-// multi-line reply, the block (un-stuffed, line ends stripped, without the terminator).
+// multi-line reply, the block (un-stuffed, line ends stripped, without the terminator). Cmd is
+// the first line of the pipeline entry (an entry that carries an article, "TAKETHIS <id>\r\n"+
+// article, gives "TAKETHIS <id>"), and it is what the multi function gets.
 type Reply struct {
 	Cmd   string
 	Code  int
@@ -189,7 +195,7 @@ func MultiLine(cmd string, code int) bool {
 	case 100, 101, 215, 220, 221, 222, 224, 225, 230, 231, 282:
 		return true
 	case 211:
-		return len(cmd) >= 9 && (cmd[:9] == "LISTGROUP" || cmd[:9] == "listgroup")
+		return len(cmd) >= 9 && strings.EqualFold(cmd[:9], "LISTGROUP") && (len(cmd) == 9 || cmd[9] == ' ')
 	}
 	return false
 }
@@ -200,8 +206,10 @@ func MultiLine(cmd string, code int) bool {
 // reads, so a server that stops reading until its replies are read (a full socket buffer in
 // both directions) cannot deadlock the test. multi tells whether the reply with that code to
 // that command is followed by a dot block (nil: MultiLine). The hang guard is the Conn's
-// deadline, moved on with every reply read, so a stalled server fails after one deadline. On
-// an error the replies read so far are returned with it.
+// deadline, moved on with every line read, so a stalled server fails after one deadline. A
+// block has an absolute bound as well, so a server that never sends the "." cannot keep the
+// test alive by trickling lines: it must end within 10 times the deadline and hold at most
+// 64 MiB, else the call fails. On an error the replies read so far are returned with it.
 func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) {
 	if multi == nil {
 		multi = MultiLine
@@ -221,7 +229,11 @@ func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool)
 	}()
 	replies := make([]Reply, 0, len(cmds))
 	var rerr error
-	for _, cmd := range cmds {
+	for _, entry := range cmds {
+		cmd := entry
+		if i := strings.Index(cmd, "\r\n"); i >= 0 {
+			cmd = cmd[:i]
+		}
 		code, line, err := c.ReadStatus()
 		if err != nil {
 			rerr = fmt.Errorf("pipeline: reply %d (%q): %w", len(replies)+1, cmd, err)
@@ -229,7 +241,7 @@ func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool)
 		}
 		r := Reply{Cmd: cmd, Code: code, Line: line}
 		if multi(cmd, code) {
-			lines, err := c.TryReadDotLines()
+			lines, err := c.readBlockBounded()
 			if err != nil {
 				rerr = fmt.Errorf("pipeline: block of reply %d (%q): %w", len(replies)+1, cmd, err)
 				break
@@ -265,4 +277,51 @@ func (c *Conn) Pipeline(cmds []string, multi func(cmd string, code int) bool) []
 		c.fatalf("%v (%d of %d replies read)", err, len(replies), len(cmds))
 	}
 	return replies
+}
+
+// maxBlockBytes and blockFactor are the absolute bounds of a dot block in TryPipeline.
+const (
+	maxBlockBytes = 64 << 20
+	blockFactor   = 10
+)
+
+// readBlockBounded is TryReadDotLines with an absolute bound: the block must end within
+// blockFactor hang guards and hold at most maxBlockBytes, whatever the sliding guard says.
+func (c *Conn) readBlockBounded() ([]string, error) {
+	limit := time.Now().Add(blockFactor * c.deadline())
+	size := 0
+	var out []string
+	for {
+		if time.Now().After(limit) || size > maxBlockBytes {
+			return out, &StrictError{Kind: NoTerminator, Err: fmt.Errorf(
+				"block still going after %d lines, %d bytes, %v (bound: %d times the deadline, %d bytes)",
+				len(out), size, blockFactor*c.deadline(), blockFactor, maxBlockBytes)}
+		}
+		line, err := c.ReadLine()
+		if err != nil {
+			var se *StrictError
+			if errors.As(err, &se) {
+				if se.Kind == NoCRLF {
+					return out, &StrictError{Kind: NoTerminator, Line: se.Line,
+						Err: fmt.Errorf("after %d lines: %w", len(out), se.Err)}
+				}
+				return out, err
+			}
+			err = fmt.Errorf("after %d lines: %w", len(out), err)
+			if c.Strict {
+				return out, &StrictError{Kind: NoTerminator, Line: line, Err: err}
+			}
+			return out, err
+		}
+		if line == "." {
+			return out, nil
+		}
+		if strings.HasPrefix(line, "..") {
+			line = line[1:]
+		} else if c.Strict && strings.HasPrefix(line, ".") {
+			return out, &StrictError{Kind: BadDotStuffing, Line: line + "\r\n"}
+		}
+		size += len(line) + 2
+		out = append(out, line)
+	}
 }

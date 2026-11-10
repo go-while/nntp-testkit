@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -37,13 +38,22 @@ func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error)
 		if limit > 0 && limit-len(out) < len(p) {
 			p = p[:limit-len(out)]
 		}
+		// each read waits for quiet, or for what is left of the hang guard when that is less
+		guard := false
 		if c.R.Buffered() == 0 {
-			_ = c.Conn.SetReadDeadline(time.Now().Add(quiet))
+			wait := quiet
+			if left := c.deadline() - time.Since(start); left < wait {
+				wait, guard = max(left, 0), true
+			}
+			_ = c.Conn.SetReadDeadline(time.Now().Add(wait))
 		}
 		n, err := c.R.Read(p)
 		out = append(out, p[:n]...)
 		if err != nil {
 			if timedOut(err) {
+				if guard {
+					return out, fmt.Errorf("server still sending after %v (%d bytes read): %w", c.deadline(), len(out), err)
+				}
 				return out, nil
 			}
 			return out, err
@@ -77,7 +87,7 @@ const (
 // ExpectClosed waits up to d (0 = the Conn's hang guard) for the peer to close the connection
 // and returns the lines it sent before that, CRLF stripped (QUIT's 205, "400 shutting down",
 // "503 timeout"; a last partial line is included). An error is returned when the peer is
-// still connected after d, sends more than 16 lines or 64 KiB, or the read fails other than
+// still connected after d, sends more than 16 lines or 64 KiB (a line without LF counts its bytes: at most 64 KiB are held), or the read fails other than
 // by a close: EOF and a connection reset (a peer that closes with our data unread) both count
 // as closed. The lines read are returned with the error too. Nothing is checked about the
 // bytes (no strict mode: a crashing peer may send anything).
@@ -88,21 +98,34 @@ func (c *Conn) ExpectClosed(d time.Duration) ([]string, error) {
 	_ = c.Conn.SetReadDeadline(time.Now().Add(d))
 	defer c.bump()
 	var lines []string
+	var cur []byte // the line being read; at most closedMaxBytes+1 bytes are ever held
 	total := 0
 	for {
-		line, err := c.R.ReadString('\n')
-		total += len(line)
-		if line != "" {
-			lines = append(lines, strings.TrimRight(line, "\r\n"))
-		}
-		if err == io.EOF || errors.Is(err, syscall.ECONNRESET) {
-			return lines, nil
-		}
+		_, err := c.R.Peek(1) // waits for data without consuming
 		if err != nil {
+			if len(cur) > 0 {
+				lines = append(lines, strings.TrimRight(string(cur), "\r\n"))
+			}
+			if err == io.EOF || errors.Is(err, syscall.ECONNRESET) {
+				return lines, nil
+			}
 			if timedOut(err) {
 				return lines, fmt.Errorf("peer did not close within %v (lines before: %q)", d, lines)
 			}
 			return lines, err
+		}
+		b, _ := c.R.Peek(c.R.Buffered())
+		n := len(b)
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			n = i + 1
+		}
+		n = min(n, closedMaxBytes+1-total)
+		cur = append(cur, b[:n]...)
+		_, _ = c.R.Discard(n)
+		total += n
+		if len(cur) > 0 && cur[len(cur)-1] == '\n' {
+			lines = append(lines, strings.TrimRight(string(cur), "\r\n"))
+			cur = cur[:0]
 		}
 		if len(lines) > closedMaxLines || total > closedMaxBytes {
 			return lines, fmt.Errorf("peer sent %d lines (%d bytes) and has not closed: %q", len(lines), total, lines)
