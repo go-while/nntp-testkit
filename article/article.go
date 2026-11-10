@@ -166,6 +166,35 @@ func ParseLines(lines []string) *Article {
 	return Parse([]byte(b.String()))
 }
 
+// ParseDotBlock parses a multi-line block as it came off the wire: the bytes of the client's
+// RawUntilDot, dot-stuffed and ending in the ".\r\n" terminator. The terminator is dropped and
+// every line that starts with ".." (at the start of the data or after a CRLF) loses one dot;
+// nothing else changes, so a bare CR or LF in the served article survives, unlike with
+// ParseLines on ReadDotLines output (which cannot tell a bare LF from CRLF and drops a CR
+// before CRLF). Input without the terminator is taken as it is.
+func ParseDotBlock(raw []byte) *Article {
+	if bytes.Equal(raw, []byte(".\r\n")) {
+		raw = nil
+	} else if bytes.HasSuffix(raw, []byte("\r\n.\r\n")) {
+		raw = raw[:len(raw)-3]
+	}
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		if (i == 0 || (raw[i-1] == '\n' && i >= 2 && raw[i-2] == '\r')) && bytes.HasPrefix(raw[i:], []byte("..")) {
+			continue
+		}
+		out = append(out, raw[i])
+	}
+	return Parse(out)
+}
+
+// Canon returns Parse(a.Bytes()): the article as it looks once it is on the wire and read back.
+// A bare LF inside a field is a line end there, so Canon splits that field in two (the second
+// part usually without colon, or a new header: Set("Subject", "a\nX-Evil: y") counts an X-Evil
+// field only after Canon), and every field gets the line end it was written with. Compare
+// canonicalises both articles so a server that relays one untouched shows no difference.
+func (a *Article) Canon() *Article { return Parse(a.Bytes()) }
+
 // eolString is the bytes an EOL value stands for.
 func eolString(eol string) string {
 	switch eol {
@@ -310,9 +339,24 @@ func (a *Article) AddRaw(raw string) *Article {
 }
 
 // Set makes "name: value" the only field called name: the first one is replaced in place
-// (written as "name: value" with the name's spelling of this call and a CRLF end), the others
-// are removed; with none, the field is appended. It returns a for chaining.
+// (written as "<name as the old field spelled it>: value" with a CRLF end, so Set("subject",
+// ...) keeps "Subject"; use SetRaw to change the spelling or the exact text), the others are
+// removed; with none, the field is appended spelled as name. It returns a for chaining.
 func (a *Article) Set(name, value string) *Article {
+	return a.set(name, func(old string) string { return old + ": " + value })
+}
+
+// SetRaw is Set with the field text given exactly: raw replaces the first field called name in
+// place (its position and nothing else is kept), the others are removed, and with none raw is
+// appended. Use it for what Set cannot write: SetRaw("Path", "Path:") is an empty Path that
+// stays where it was, SetRaw("Subject", "SUBJECT:x") changes the spelling and the spacing. raw
+// need not start with name (the field found is the one called name now). It returns a for
+// chaining.
+func (a *Article) SetRaw(name, raw string) *Article {
+	return a.set(name, func(string) string { return raw })
+}
+
+func (a *Article) set(name string, text func(old string) string) *Article {
 	out := a.Fields[:0:0]
 	done := false
 	for _, f := range a.Fields {
@@ -321,14 +365,25 @@ func (a *Article) Set(name, value string) *Article {
 			continue
 		}
 		if !done {
-			out = append(out, Field{Raw: name + ": " + value})
+			out = append(out, Field{Raw: text(f.Name())})
 			done = true
 		}
 	}
 	if !done {
-		out = append(out, Field{Raw: name + ": " + value})
+		out = append(out, Field{Raw: text(name)})
 	}
 	a.Fields = out
+	return a
+}
+
+// Insert inserts raw as one field before index i (0 = first; i <= 0 is the start, i >= the
+// number of fields the end), byte for byte like AddRaw. It returns a for chaining.
+func (a *Article) Insert(i int, raw string) *Article {
+	i = max(0, min(i, len(a.Fields)))
+	fields := make([]Field, 0, len(a.Fields)+1)
+	fields = append(fields, a.Fields[:i]...)
+	fields = append(fields, Field{Raw: raw})
+	a.Fields = append(fields, a.Fields[i:]...)
 	return a
 }
 

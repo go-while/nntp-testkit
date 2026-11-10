@@ -27,6 +27,9 @@ type DiffOptions struct {
 	// CRs, and without empty lines at the end. A body that differs in any other byte still
 	// differs. Off: the bodies must be equal byte for byte.
 	IgnoreTrailingSpace bool
+	// CaseSensitiveNames makes a field whose name is spelled differently (From and FROM) a
+	// change; off, names are compared case-insensitively.
+	CaseSensitiveNames bool
 }
 
 // Change is one field whose values differ: the unfolded values of every field of that name,
@@ -34,6 +37,9 @@ type DiffOptions struct {
 type Change struct {
 	Name      string
 	Sent, Got []string
+	// SentNames and GotNames are the spellings of the name, one per field, set only when
+	// CaseSensitiveNames found them different.
+	SentNames, GotNames []string
 }
 
 // Diff is what Compare found between a sent and a received article. All lists keep the order
@@ -79,14 +85,19 @@ func (d Diff) String() string {
 	return b.String()
 }
 
-// Compare compares the article a test sent with the one a server served back. Fields are
-// matched by name (case-insensitive) and compared by their unfolded values, so a server that
-// folds a long header differently is not a difference, but one that trims, re-spaces or
-// re-cases a value is. For each name outside the allow-list it reports: only in got (Added),
-// only in sent (Lost), in both with other values or another number of fields (Changed); and
-// Reordered when the names both hold equally often come in another order. The bodies are
-// compared byte for byte, or as DiffOptions.IgnoreTrailingSpace says. Fields without a colon
-// have the empty name and their whole text as value.
+// Compare compares the article a test sent with the one a server served back. Both are first
+// canonicalised (Article.Canon: written out and parsed again), so a bare LF inside a field is
+// the line end it is on the wire and an untouched relay shows no difference. Fields are matched
+// by name (case-insensitive unless CaseSensitiveNames) and compared by their values with every
+// fold, a line break and the spaces and tabs after it, read as one space and spaces and tabs
+// trimmed from both ends: a server that folds a long header at another place, or with a tab, is
+// no difference, but one that changes a word, re-spaces the inside of a value or re-cases it is.
+// For each name outside the allow-list it reports: only in got (Added), only in sent (Lost), in
+// both with other values or another number of fields (Changed); and Reordered when the names
+// both hold equally often come in another order. The bodies are compared byte for byte, or as
+// DiffOptions.IgnoreTrailingSpace says. Fields without a colon have the empty name and their
+// whole text as value. A server that normalises bare CR or LF (or line ends) cannot be compared
+// byte for byte: the body differs, and IgnoreTrailingSpace covers CRLF against LF only.
 func Compare(sent, got *Article, o DiffOptions) Diff {
 	allowed := map[string]bool{}
 	if !o.Strict {
@@ -98,8 +109,9 @@ func Compare(sent, got *Article, o DiffOptions) Diff {
 		allowed[lowerName(n)] = true
 	}
 	var d Diff
-	sg, sNames, sSpell := groupFields(sent, allowed)
-	gg, gNames, gSpell := groupFields(got, allowed)
+	sent, got = sent.Canon(), got.Canon()
+	sg, sNames, sSpell, sSpellings := groupFields(sent, allowed)
+	gg, gNames, gSpell, gSpellings := groupFields(got, allowed)
 	for _, k := range gNames {
 		if _, ok := sg[k]; !ok {
 			d.Added = append(d.Added, gSpell[k])
@@ -111,8 +123,13 @@ func Compare(sent, got *Article, o DiffOptions) Diff {
 			d.Lost = append(d.Lost, sSpell[k])
 			continue
 		}
-		if !equalStrings(sg[k], gv) {
-			d.Changed = append(d.Changed, Change{Name: sSpell[k], Sent: sg[k], Got: gv})
+		spellDiff := o.CaseSensitiveNames && !equalStrings(sSpellings[k], gSpellings[k])
+		if !equalStrings(sg[k], gv) || spellDiff {
+			c := Change{Name: sSpell[k], Sent: sg[k], Got: gv}
+			if spellDiff {
+				c.SentNames, c.GotNames = sSpellings[k], gSpellings[k]
+			}
+			d.Changed = append(d.Changed, c)
 		}
 	}
 	order := func(a *Article) []string {
@@ -130,19 +147,21 @@ func Compare(sent, got *Article, o DiffOptions) Diff {
 		}
 		return seq
 	}
-	os, og := order(sent), order(got)
-	if !equalStrings(os, og) {
-		d.Reordered, d.OrderSent, d.OrderGot = true, os, og
+	oSent, oGot := order(sent), order(got)
+	if !equalStrings(oSent, oGot) {
+		d.Reordered, d.OrderSent, d.OrderGot = true, oSent, oGot
 	}
 	d.BodyDiffers, d.BodyDetail = compareBodies(sent.Body, got.Body, o.IgnoreTrailingSpace)
 	return d
 }
 
-// groupFields collects the values of the fields that are not allowed by lower-cased name,
-// with the names in order of first appearance and the first spelling of each.
-func groupFields(a *Article, allowed map[string]bool) (map[string][]string, []string, map[string]string) {
+// groupFields collects the comparison values of the fields that are not allowed by
+// lower-cased name, with the names in order of first appearance, the first spelling of each
+// and all the spellings.
+func groupFields(a *Article, allowed map[string]bool) (map[string][]string, []string, map[string]string, map[string][]string) {
 	vals := map[string][]string{}
 	spell := map[string]string{}
+	spellings := map[string][]string{}
 	var names []string
 	for _, f := range a.Fields {
 		k := lowerName(f.Name())
@@ -153,9 +172,61 @@ func groupFields(a *Article, allowed map[string]bool) (map[string][]string, []st
 			names = append(names, k)
 			spell[k] = f.Name()
 		}
-		vals[k] = append(vals[k], f.Value())
+		vals[k] = append(vals[k], compareValue(f))
+		spellings[k] = append(spellings[k], f.Name())
 	}
-	return vals, names, spell
+	return vals, names, spell, spellings
+}
+
+// compareValue is the value Compare compares: Value with every fold (a line break and the
+// spaces and tabs after it) read as one space, so a server that re-folds a long header at
+// another place, or with a tab, shows no change.
+func compareValue(f Field) string {
+	_, v, ok := strings.Cut(f.Raw, ":")
+	if !ok {
+		v = f.Raw
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if (v[i] == '\r' && i+2 < len(v) && v[i+1] == '\n' && isWSP(v[i+2])) || (v[i] == '\n' && i+1 < len(v) && isWSP(v[i+1])) {
+			for i < len(v) && (v[i] == '\r' || v[i] == '\n' || isWSP(v[i])) {
+				i++
+			}
+			i--
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(v[i])
+	}
+	return strings.Trim(b.String(), " \t")
+}
+
+// PathExtends reports whether got's Path is sent's Path with entries added in front, as a
+// server does ("relay!peer!not-for-mail" extends "peer!not-for-mail"), or is the same: the tail
+// is kept whole, entry for entry. Spaces and folds are ignored. It is true when sent has no
+// Path (nothing to keep) and false when only got lacks one. Compare allows Path to change, so
+// use this to check what a server did to it.
+func PathExtends(sent, got *Article) bool {
+	sent, got = sent.Canon(), got.Canon()
+	s, ok := sent.Lookup("Path")
+	if !ok {
+		return true
+	}
+	g, ok := got.Lookup("Path")
+	if !ok {
+		return false
+	}
+	s, g = squashSpace(s), squashSpace(g)
+	return g == s || strings.HasSuffix(g, "!"+s)
+}
+
+func squashSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func equalStrings(a, b []string) bool {

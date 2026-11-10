@@ -418,17 +418,17 @@ terminating `.`; `client.Stuff` (or the client's send) adds both.
 
 | API | what |
 |---|---|
-| `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
-| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body` |
+| `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.nonce.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a per-process nonce, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
+| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra` (more raw header lines) |
 | `type Article struct { Fields []Field; Sep string; Body []byte }`, `type Field struct { Raw, EOL string }` | the raw form: a field is its exact text (folds included) and its line end (`""` = CRLF, `"\n"`, `NoEOL`); `Sep` is what separates head and body (`NoEOL`: no empty line) |
-| `Add(name, value)`, `AddRaw(raw)`, `Set(name, value)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path, `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place and drops duplicates |
+| `Add(name, value)`, `AddRaw(raw)`, `Insert(i, raw)`, `Set(name, value)`, `SetRaw(name, raw)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path (`SetRaw("Path", "Path:")` empties it in place), `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place keeping the old spelling of the name and drops duplicates |
 | `SetBody([]byte)`, `SetBodyLines(lines...)` | the body as bytes, or lines each plus CRLF (a leading `.` is not doubled) |
 | `Get(name)`, `Lookup(name)`, `Values(name)`, `Has`, `Count`, `Duplicates()`, `MessageID()` | read, case-insensitive; values are unfolded |
-| `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()` | the wire form, and CRLF-split lines (what `client.Stuff` takes) |
-| `Parse(raw) *Article` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b` |
-| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, plus `Allow`; `Strict` drops the defaults), and the body byte for byte (`IgnoreTrailingSpace` to relax) |
-| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `folded-subject`, `folded-path`, `no-colon`, `dup-header`, `empty-path`, ... (`Case.Invalid` marks the RFC-breaking ones) |
-| `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature |
+| `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()`, `Canon()` | the wire form, and CRLF-split lines (what `client.Stuff` takes); `Canon()` is `Parse(Bytes())`: a bare LF inside a field is a line end on the wire, so it splits the field |
+| `Parse(raw) *Article` / `ParseDotBlock(raw)` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b`. `ParseDotBlock` takes the client's `RawUntilDot` bytes (drops the terminator and the stuffing dots, nothing else), the right way to read a served article back; `ParseLines` on `ReadDotLines` output loses bare LF and CR-before-CRLF |
+| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, plus `Allow`; `Strict` drops the defaults), and the body byte for byte (`IgnoreTrailingSpace` to relax); both sides are canonicalised, folds count as one space, `CaseSensitiveNames` checks the spelling; a server that normalises bare CR/LF cannot be compared byte for byte. `PathExtends(sent, got)`: the sent Path is the tail of the served one |
+| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `max-line`, `long-message-id`, `folded-subject`, `folded-path`, `lf-only`, `no-colon`, `dup-header`, `empty-path`, `empty-subject`, ... (`Case.Invalid` marks the RFC-breaking ones) |
+| `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature; `Cancel`'s Newsgroups is `Options.Newsgroups`, "test" when empty |
 
 ```go
 for _, c := range article.Corpus() {
@@ -436,8 +436,10 @@ for _, c := range article.Corpus() {
 		sent := c.Article(t, "test")
 		cl.ExpectCmd(340, "POST")
 		cl.MustSend(client.Stuff(sent.Lines())) // stuffing and the final "." are the client's
-		// ... later fetch it back with ARTICLE
-		got := article.ParseLines(cl.ReadDotLines())
+		cl.ExpectStatus(240, "post")
+		// ... later fetch it back with ARTICLE: the raw block keeps bare CR and LF
+		cl.ExpectCmd(220, "ARTICLE %s", sent.MessageID())
+		got := article.ParseDotBlock(cl.RawUntilDot())
 		article.ExpectSame(t, sent, got, article.DiffOptions{Allow: []string{"Content-Length"}})
 	})
 }
@@ -459,7 +461,7 @@ match INN's `tests/lib/canlock-t.c` vectors.
 
 ```go
 key := canlock.Key(canlock.SHA256, "secret", "", "<1@example.invalid>")
-art.Headers = append(art.Headers, "Cancel-Lock: "+canlock.Lock(canlock.SHA256, key))
+art.Add("Cancel-Lock", canlock.Lock(canlock.SHA256, key))
 // ... the cancel carries "Cancel-Key: "+key
 ```
 
