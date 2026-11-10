@@ -108,7 +108,7 @@ func TestCheckStorePasses(t *testing.T) {
 			skip: maps(streamSkip, map[string]string{
 				"takethis": "no Options.PostGroup", "check-have": "no Options.PostGroup",
 				"takethis-duplicate": "no Options.PostGroup", "ihave": "no Options.PostGroup",
-				"ihave-have": "no Options.PostGroup",
+				"ihave-have": "no Options.PostGroup", "post": "no Options.PostGroup",
 			}),
 		},
 	}

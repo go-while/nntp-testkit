@@ -50,6 +50,7 @@ func readerChecks() []check {
 		{Name: "mode-reader", RFC: "RFC 3977 §5.3", Run: checkModeReader},
 		{Name: "group", RFC: "RFC 3977 §6.1.1", Needs: "READER", Run: checkGroup},
 		{Name: "listgroup", RFC: "RFC 3977 §6.1.2", Needs: "READER", Run: checkListgroup},
+		{Name: "listgroup-range", RFC: "RFC 3977 §6.1.2", Needs: "READER", Run: checkListgroupRange},
 		{Name: "next-last", RFC: "RFC 3977 §6.1.3-6.1.4", Needs: "READER", Run: checkNextLast},
 		{Name: "article", RFC: "RFC 3977 §6.2.1", Needs: "READER", Run: articleCheck("ARTICLE", 220)},
 		{Name: "head", RFC: "RFC 3977 §6.2.2", Needs: "READER", Run: articleCheck("HEAD", 221)},
@@ -60,11 +61,17 @@ func readerChecks() []check {
 		{Name: "article-out-of-range", RFC: "RFC 3977 §6.2 (423)", Needs: "READER", Run: checkOutOfRange},
 		{Name: "article-unknown-id", RFC: "RFC 3977 §6.2 (430)", Needs: "READER", Run: checkUnknownID},
 		{Name: "list-active", RFC: "RFC 3977 §7.6.3", Needs: "LIST", Run: checkListActive},
+		{Name: "list-active-times", RFC: "RFC 3977 §7.6.4", Needs: "LIST", Run: checkListActiveTimes},
 		{Name: "list-newsgroups", RFC: "RFC 3977 §7.6.6", Needs: "LIST", Run: checkListNewsgroups},
 		{Name: "list-overview-fmt", RFC: "RFC 3977 §8.4", Needs: "LIST", Run: checkListOverviewFmt},
+		{Name: "list-headers", RFC: "RFC 3977 §8.6", Needs: "HDR", Run: checkListHeaders},
 		{Name: "list-unknown-keyword", RFC: "RFC 3977 §7.6.1", Needs: "LIST", Run: checkListUnknown},
 		{Name: "over", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOver},
 		{Name: "over-errors", RFC: "RFC 3977 §8.3", Needs: "OVER", Run: checkOverErrors},
+		{Name: "hdr", RFC: "RFC 3977 §8.5", Needs: "HDR", Run: checkHdr},
+		{Name: "newgroups", RFC: "RFC 3977 §7.3", Needs: "READER", Run: checkNewgroups},
+		{Name: "newnews", RFC: "RFC 3977 §7.4", Needs: "NEWNEWS", Run: checkNewnews},
+		{Name: "post", RFC: "RFC 3977 §6.3.1", Needs: "POST", Posts: true, Run: checkPost},
 		{Name: "date", RFC: "RFC 3977 §7.1", Needs: "READER", Run: checkDate},
 		{Name: "help", RFC: "RFC 3977 §7.2", Run: checkHelp},
 		{Name: "unknown-command", RFC: "RFC 3977 §3.2.1", Run: checkUnknownCommand},
@@ -554,17 +561,57 @@ func checkCapabilities(s *session, c check) Result {
 	return r
 }
 
+// checkModeReader: MODE READER answers 200 or 201 and the capability list then lists READER
+// (not MODE-READER), or 502 on a server that lists neither. A 480 (RFC 3977 §3.2.1: the
+// command needs authentication first; RFC 4643 §2.2) is accepted from a server that lists
+// AUTHINFO: without Options.User the check passes with a Detail saying so; with it the check
+// logs in and sends MODE READER again, which must then answer 200, 201 or 502 as above. A 480
+// from a server that does not list AUTHINFO yet (it may offer it only later, e.g. after
+// STARTTLS), or that refuses AUTHINFO USER (it may offer only SASL), passes with a Detail.
 func checkModeReader(s *session, c check) Result {
 	reader, modeReader := s.has("READER"), s.has("MODE-READER")
-	code, line, err := s.single([]int{200, 201, 502}, "MODE READER")
+	code, line, err := s.single([]int{200, 201, 480, 502}, "MODE READER")
 	if err != nil {
 		return c.fail(err.Error())
+	}
+	detail := ""
+	if code == 480 {
+		if capArgs(s.caps, "AUTHINFO") == nil {
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER: %q, and CAPABILITIES does not list AUTHINFO yet (it may be offered later, e.g. after STARTTLS); not retried", line)
+			return r
+		}
+		if s.o.User == "" {
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER needs authentication first (%q, AUTHINFO listed); not retried without Options.User", line)
+			return r
+		}
+		done, err := s.login()
+		if err != nil {
+			return c.failf("login after %q to MODE READER: %v", line, err)
+		}
+		if !done {
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER: %q, and AUTHINFO USER is refused (500, 501 or 502; the server may offer only SASL); not retried", line)
+			return r
+		}
+		caps, err := s.capabilities()
+		if err != nil {
+			return c.failf("CAPABILITIES after AUTHINFO: %s", describe(err))
+		}
+		reader, modeReader = capArgs(caps, "READER") != nil, capArgs(caps, "MODE-READER") != nil
+		detail = fmt.Sprintf("MODE READER answered %q before AUTHINFO; checked again after the login", line)
+		if code, line, err = s.single([]int{200, 201, 502}, "MODE READER"); err != nil {
+			return c.failf("after the login: %v", err)
+		}
 	}
 	if code == 502 {
 		if reader || modeReader {
 			return c.failf("MODE READER: %q although CAPABILITIES lists READER or MODE-READER", line)
 		}
-		return c.pass()
+		r := c.pass()
+		r.Detail = detail
+		return r
 	}
 	caps, err := s.capabilities()
 	if err != nil {
@@ -579,7 +626,9 @@ func checkModeReader(s *session, c check) Result {
 	if capArgs(caps, "MODE-READER") != nil {
 		return c.failf("CAPABILITIES after %q still lists MODE-READER", line)
 	}
-	return c.pass()
+	r := c.pass()
+	r.Detail = detail
+	return r
 }
 
 func checkGroup(s *session, c check) Result {
@@ -785,8 +834,15 @@ func checkNoCurrent(s *session, c check) Result {
 	if s.has("OVER") {
 		cmds = append(cmds, "OVER")
 	}
+	if s.has("HDR") {
+		cmds = append(cmds, "HDR Subject")
+	}
 	for _, cmd := range cmds {
-		if _, _, err := s.single([]int{420}, "%s", cmd); err != nil {
+		want := []int{420}
+		if cmd == "HDR Subject" {
+			want = []int{420, 503} // a server may restrict HDR to some headers (§8.5.2)
+		}
+		if _, _, err := s.single(want, "%s", cmd); err != nil {
 			return c.failf("in the empty group %s: %v", g.name, err)
 		}
 	}
