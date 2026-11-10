@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"crypto/tls"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -122,10 +123,13 @@ type stPeer struct {
 	twice382   bool     // a second STARTTLS over TLS gets 382 again
 	greetAfter bool     // a new greeting after the handshake
 	execPipe   bool     // reads the command behind STARTTLS as a plaintext command (no handshake)
-	execAfter  bool     // keeps the command behind STARTTLS and runs it after the handshake (CVE-2011-0411)
-	splitInj   bool     // with inject: the plaintext in a write of its own, a moment after the 382
-	garbage    bool     // text that is no NNTP reply behind the 382, then close
-	noHandshk  bool     // 382, then closes the connection without a handshake
+	after      string   // keeps the DATE behind STARTTLS in the buffer, does the handshake, then: "exec" runs it
+	// (CVE-2011-0411), "exec-split" runs it with the reply in two writes, "hello" sends a greeting,
+	// "discard" does nothing (the compliant ideal), "reset" resets the connection
+	splitPlain bool // with execPipe: the plaintext reply in two writes
+	splitInj   bool // with inject: the plaintext in a write of its own, a moment after the 382
+	garbage    bool // text that is no NNTP reply behind the 382, then close
+	noHandshk  bool // 382, then closes the connection without a handshake
 }
 
 func (p stPeer) server(t *testing.T) *fakeserver.Server {
@@ -166,9 +170,7 @@ func (p stPeer) server(t *testing.T) *fakeserver.Server {
 				return nil, true
 			case p.noHandshk:
 				return nil, true
-			case p.execAfter:
-				// the flaw of CVE-2011-0411: the DATE stays in the input buffer, the handshake
-				// runs, then the buffered command is executed over TLS
+			case p.after != "":
 				if _, err := c.ReadLine(); err != nil {
 					return nil, true
 				}
@@ -176,8 +178,34 @@ func (p stPeer) server(t *testing.T) *fakeserver.Server {
 				if tc.Handshake() != nil {
 					return nil, true
 				}
-				_, _ = tc.Write([]byte("111 20250101000000\r\n"))
+				switch p.after {
+				case "exec":
+					_, _ = tc.Write([]byte("111 20250101000000\r\n"))
+				case "exec-split":
+					_, _ = tc.Write([]byte("1"))
+					time.Sleep(80 * time.Millisecond)
+					_, _ = tc.Write([]byte("11 20250101000000\r\n"))
+				case "hello":
+					_, _ = tc.Write([]byte("200 hello again\r\n"))
+				case "reset":
+					if tcp, ok := c.Raw().(*net.TCPConn); ok {
+						_ = tcp.SetLinger(0)
+						_ = tcp.Close()
+					}
+					return nil, true
+				case "discard":
+					_, _ = tc.Read(make([]byte, 1)) // until the client closes
+					return nil, true
+				}
 				time.Sleep(200 * time.Millisecond)
+				return nil, true
+			case p.execPipe && p.splitPlain:
+				if _, err := c.ReadLine(); err != nil {
+					return nil, true
+				}
+				_, _ = c.Raw().Write([]byte("1"))
+				time.Sleep(80 * time.Millisecond)
+				_, _ = c.Raw().Write([]byte("11 20250101000000\r\n"))
 				return nil, true
 			case p.execPipe:
 				return nil, false // the next line is read and answered in plaintext
@@ -205,6 +233,17 @@ func TestStartTLSHandPeerPasses(t *testing.T) {
 	}
 }
 
+// A greeting after the handshake is the mistake of check starttls; starttls-pipelined must not
+// blame it on the command behind STARTTLS.
+func TestStartTLSPipelinedGreetingNotBlamedOnCVE(t *testing.T) {
+	o := Options{Addr: stPeer{after: "hello"}.server(t).Addr(), Deadline: time.Second}
+	r := ctCheck(t, o, "starttls-pipelined")
+	ctWant(t, r, Fail, `"200 hello again`)
+	if strings.Contains(r.Detail, "was executed") || strings.Contains(r.Detail, "CVE") {
+		t.Errorf("Detail %q blames the DATE for a greeting", r.Detail)
+	}
+}
+
 func TestStartTLSMistakes(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -221,7 +260,9 @@ func TestStartTLSMistakes(t *testing.T) {
 		{"greeting after handshake", stPeer{greetAfter: true}, "starttls", "no greeting is sent after the handshake"},
 		{"second STARTTLS 382", stPeer{twice382: true}, "starttls-twice", `got "382 again", want [502]`},
 		{"pipelined executed before the handshake", stPeer{execPipe: true}, "starttls-pipelined", `answered in plaintext right after the 382: "111 `},
-		{"pipelined executed after the handshake", stPeer{execAfter: true}, "starttls-pipelined", `executed after the TLS handshake: the server sent "111 `},
+		{"pipelined executed after the handshake", stPeer{after: "exec"}, "starttls-pipelined", `executed after the TLS handshake: the server sent "111 `},
+		{"pipelined executed after the handshake, split reply", stPeer{after: "exec-split"}, "starttls-pipelined", `executed after the TLS handshake: the server sent "111 `},
+		{"pipelined executed before the handshake, split reply", stPeer{execPipe: true, splitPlain: true}, "starttls-pipelined", `answered in plaintext right after the 382: "111 `},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,6 +282,10 @@ func TestStartTLSPipelinedPasses(t *testing.T) {
 	}{
 		{"not NNTP text", stPeer{garbage: true}, "not an NNTP reply"},
 		{"closed", stPeer{noHandshk: true}, "did not complete the TLS handshake"},
+		{"discarded", stPeer{after: "discard"}, "DATE sent behind STARTTLS was discarded"},
+		// a reset after the handshake (a TLS 1.3 client is done before the server has checked
+		// the Finished message) is the server dropping the connection, not a verdict
+		{"reset after the handshake", stPeer{after: "reset"}, "dropped the connection"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

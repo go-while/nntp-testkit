@@ -254,6 +254,7 @@ func TestRunAllow(t *testing.T) {
 		{"repeated", []string{"-allow", "date=x", "-allow", "help=500 nope"}, 0, "allowed:", ""},
 		{"substring-with-equals", []string{"-allow", "help=a=b"}, 1, "FAIL help", ""},
 		{"not-matching", []string{"-allow", "help=501"}, 1, "FAIL help", ""},
+		{"twice-same-check", []string{"-allow", "help=500", "-allow", "help=nope"}, 2, "", "already has an -allow substring"},
 		{"no-equals", []string{"-allow", "help"}, 2, "", "name=substring"},
 		{"empty-substring", []string{"-allow", "help="}, 2, "", "non-empty substring"},
 		{"unknown-check", []string{"-allow", "nosuch=x"}, 2, "", `unknown check "nosuch"`},
