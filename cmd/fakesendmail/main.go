@@ -2,8 +2,10 @@
 // instead of sending it, and exits with a status the test chooses. See package mailrec for the
 // directory layout; mailrec.New builds this command for one test.
 //
-// The record directory is $NNTP_TEST_MAIL_DIR, else the one built in with
-// -ldflags "-X main.recordDir=DIR"; without either the message is read and dropped.
+// The record directory is the one built in with -ldflags "-X main.recordDir=DIR" (mailrec.New),
+// else the one named by the file fakesendmail.dir next to the executable
+// (mailrec.NewFromBinary), else $NNTP_TEST_MAIL_DIR; without any the message is read and
+// dropped.
 package main
 
 import (
@@ -16,5 +18,11 @@ import (
 var recordDir string
 
 func main() {
-	os.Exit(mailrec.Main(os.Args, os.Stdin, os.Getenv, recordDir))
+	dir := recordDir
+	if dir == "" {
+		if exe, err := os.Executable(); err == nil {
+			dir = mailrec.DirFromMarker(exe)
+		}
+	}
+	os.Exit(mailrec.Main(os.Args, os.Stdin, os.Getenv, dir))
 }

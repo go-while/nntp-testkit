@@ -10,11 +10,20 @@
 // in the file "exit" of the record directory, else EnvExit, else 0; the mail is recorded either
 // way, as a real MTA may have queued it before failing. Diablo's e2e tests use the same layout
 // (tests/e2e/ci/fake-sendmail).
+//
+// The message is recorded exactly as read until end of input: no -oi emulation (a line with a
+// lone "." does not end it) and no dot-unstuffing. A test that cares whether the server passed
+// -oi checks Argv.
+//
+// The record directory may be written by a server that runs as another user than the test (INN
+// or Diablo started as news): New and NewFromBinary make it world-writable under a directory
+// others can traverse, and Record leaves each mail readable and removable by the test.
 package mailrec
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,10 +39,15 @@ import (
 	testkit "github.com/go-while/nntp-testkit"
 )
 
-// EnvDir names the record directory for cmd/fakesendmail. It wins over the directory New
-// builds in, so one installed binary can serve several tests where the server passes its
-// environment on to the mailer.
+// EnvDir names the record directory for a cmd/fakesendmail that has none built in (one
+// installed binary serving several tests, where the server passes its environment on to the
+// mailer). A directory built in by New, or named by MarkerFile, wins over it, so a stale value
+// in the server's environment cannot redirect a Recorder's mail.
 const EnvDir = "NNTP_TEST_MAIL_DIR"
+
+// MarkerFile is the file next to the cmd/fakesendmail executable that names its record
+// directory (the path, one line). NewFromBinary writes it beside its copy of the binary.
+const MarkerFile = "fakesendmail.dir"
 
 // EnvExit is the exit status of cmd/fakesendmail when the record directory has no "exit" file.
 const EnvExit = "NNTP_TEST_MAIL_EXIT"
@@ -132,18 +146,30 @@ func (m Mail) Header(name string) string {
 	return strings.Join(val, " ")
 }
 
-// Body returns the message after the first empty line, or "" when there is none.
+// Body returns the message after the first empty line (CRLF or LF line ends), or "" when there
+// is none. A message that starts with an empty line is all body.
 func (m Mail) Body() string {
 	s := string(m.Msg)
-	for _, sep := range []string{"\r\n\r\n", "\n\n"} {
-		if i := strings.Index(s, sep); i >= 0 {
-			return s[i+len(sep):]
+	for _, lead := range []string{"\r\n", "\n"} {
+		if strings.HasPrefix(s, lead) {
+			return s[len(lead):]
 		}
 	}
-	return ""
+	best, end := -1, 0
+	for _, sep := range []string{"\r\n\r\n", "\n\n", "\n\r\n"} {
+		if i := strings.Index(s, sep); i >= 0 && (best < 0 || i < best) {
+			best, end = i, i+len(sep)
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	return s[end:]
 }
 
-// Record writes one mail into dir as the next number, done last. It creates dir if needed.
+// Record writes one mail into dir as the next number, done last. It creates dir if needed. The
+// mail's directory and files are made writable for all (whatever the umask), so a test running
+// as another user than the mailing server can read and remove them.
 func Record(dir string, argv []string, msg io.Reader) (int, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, err
@@ -160,26 +186,36 @@ func Record(dir string, argv []string, msg io.Reader) (int, error) {
 		n++
 	}
 	d := filepath.Join(dir, strconv.Itoa(n))
+	if err := os.Chmod(d, 0o777); err != nil {
+		return n, err
+	}
+	write := func(name string, r io.Reader) error {
+		p := filepath.Join(d, name)
+		f, err := os.Create(p)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(f, r); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return os.Chmod(p, 0o666)
+	}
 	var a strings.Builder
 	for _, s := range argv {
 		a.WriteString(s)
 		a.WriteByte('\n')
 	}
-	if err := os.WriteFile(filepath.Join(d, "argv"), []byte(a.String()), 0o644); err != nil {
+	if err := write("argv", strings.NewReader(a.String())); err != nil {
 		return n, err
 	}
-	f, err := os.Create(filepath.Join(d, "msg"))
-	if err != nil {
+	if err := write("msg", msg); err != nil {
 		return n, err
 	}
-	if _, err := io.Copy(f, msg); err != nil {
-		_ = f.Close()
-		return n, err
-	}
-	if err := f.Close(); err != nil {
-		return n, err
-	}
-	return n, os.WriteFile(filepath.Join(d, "done"), nil, 0o644)
+	return n, write("done", strings.NewReader(""))
 }
 
 // Read returns the finished mails in dir, in number order. A missing dir is no mail.
@@ -215,12 +251,12 @@ func Read(dir string) ([]Mail, error) {
 	return mails, nil
 }
 
-// Main is cmd/fakesendmail: record stdin as a mail into getenv(EnvDir), else into dir (the
-// directory built in), and return the exit status. Without either directory the message is read
-// and dropped (status 0). A failure to record is status 75 (EX_TEMPFAIL).
+// Main is cmd/fakesendmail: record stdin as a mail into dir (the directory built in or named by
+// MarkerFile), else into getenv(EnvDir), and return the exit status. Without either directory
+// the message is read and dropped (status 0). A failure to record is status 75 (EX_TEMPFAIL).
 func Main(argv []string, stdin io.Reader, getenv func(string) string, dir string) int {
-	if d := getenv(EnvDir); d != "" {
-		dir = d
+	if dir == "" {
+		dir = getenv(EnvDir)
 	}
 	if dir == "" {
 		_, _ = io.Copy(io.Discard, stdin)
@@ -247,16 +283,40 @@ type Recorder struct {
 	Dir  string // the record directory built into it
 }
 
-// New builds cmd/fakesendmail into tb.TempDir() with a fresh record directory built in, so it
-// records even when the server clears the environment of the programs it runs. It needs the go
-// command (on PATH or in $GOROOT/bin) and fails tb without it.
-func New(tb testing.TB) *Recorder {
+// buildTimeout bounds the go build in New; a cold build cache takes several seconds.
+const buildTimeout = 5 * time.Minute
+
+// newRecorder makes a fresh directory for one test: traversable by all (0711, so a server
+// running as another user can exec the binary in it) and removed when the test ends, with the
+// record directory "mail" in it writable by all.
+func newRecorder(tb testing.TB) *Recorder {
 	tb.Helper()
-	tmp := tb.TempDir()
-	r := &Recorder{Path: filepath.Join(tmp, "sendmail"), Dir: filepath.Join(tmp, "mail")}
-	if err := os.Mkdir(r.Dir, 0o755); err != nil {
+	tmp, err := os.MkdirTemp("", "mailrec-")
+	if err != nil {
 		tb.Fatalf("mailrec: %v", err)
 	}
+	tb.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	r := &Recorder{Path: filepath.Join(tmp, "sendmail"), Dir: filepath.Join(tmp, "mail")}
+	if err := os.Chmod(tmp, 0o711); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	if err := os.Mkdir(r.Dir, 0o777); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	if err := os.Chmod(r.Dir, 0o777); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	return r
+}
+
+// New builds cmd/fakesendmail for one test, with a fresh record directory built in, so it
+// records even when the server clears the environment of the programs it runs. It needs the go
+// command (on PATH or in $GOROOT/bin) and the kit's module source (a consumer that vendors its
+// dependencies has no cmd/fakesendmail; use NewFromBinary there), and fails tb without them.
+// The build takes about a second with a warm build cache.
+func New(tb testing.TB) *Recorder {
+	tb.Helper()
+	r := newRecorder(tb)
 	gocmd, err := exec.LookPath("go")
 	if err != nil {
 		if root := os.Getenv("GOROOT"); root != "" {
@@ -278,21 +338,82 @@ func New(tb testing.TB) *Recorder {
 		tb.Fatalf("mailrec: cannot pass the directory %q to go build", r.Dir)
 	}
 	x := "-X " + v
-	cmd := exec.Command(gocmd, "build", "-o", r.Path, "-ldflags", x, Package)
+	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, gocmd, "build", "-o", r.Path, "-ldflags", x, Package)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		tb.Fatalf("mailrec: go build %s: %v\n%s", Package, err, out)
 	}
 	return r
 }
 
-// Env returns "NNTP_TEST_MAIL_DIR=<Dir>", for a server's environment.
+// NewFromBinary is New with a cmd/fakesendmail built beforehand (go build -o bin
+// github.com/go-while/nntp-testkit/cmd/fakesendmail, once per CI run or host): it copies bin
+// into a fresh directory with MarkerFile beside it, so no go command is needed at test time.
+func NewFromBinary(tb testing.TB, bin string) *Recorder {
+	tb.Helper()
+	r := newRecorder(tb)
+	src, err := os.Open(bin)
+	if err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(r.Path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		tb.Fatalf("mailrec: copy %s: %v", bin, err)
+	}
+	if err := dst.Close(); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	if err := os.Chmod(r.Path, 0o755); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(r.Path), MarkerFile), []byte(r.Dir+"\n"), 0o644); err != nil {
+		tb.Fatalf("mailrec: %v", err)
+	}
+	return r
+}
+
+// DirFromMarker returns the record directory named by MarkerFile next to the executable exe,
+// or "" when there is no such file.
+func DirFromMarker(exe string) string {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(exe), MarkerFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+}
+
+// Env returns "NNTP_TEST_MAIL_DIR=<Dir>", for a server's environment (only needed for a
+// fakesendmail that has no directory of its own).
 func (r *Recorder) Env() string { return EnvDir + "=" + r.Dir }
 
-// SetExit makes the stand-in exit with code from now on (0 again for success).
+// SetExit makes the stand-in exit with code from now on (0 again for success). The file is
+// replaced atomically, so a mailer running at that moment sees the old or the new code.
 func (r *Recorder) SetExit(tb testing.TB, code int) {
 	tb.Helper()
-	if err := os.WriteFile(filepath.Join(r.Dir, "exit"), []byte(strconv.Itoa(code)+"\n"), 0o644); err != nil {
+	f, err := os.CreateTemp(r.Dir, ".exit-")
+	if err != nil {
 		tb.Fatalf("mailrec: %v", err)
+	}
+	_, werr := f.WriteString(strconv.Itoa(code) + "\n")
+	cerr := f.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(f.Name(), 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(f.Name(), filepath.Join(r.Dir, "exit"))
+	}
+	if werr != nil {
+		_ = os.Remove(f.Name())
+		tb.Fatalf("mailrec: %v", werr)
 	}
 }
 
@@ -306,27 +427,45 @@ func (r *Recorder) Mails(tb testing.TB) []Mail {
 	return m
 }
 
-// Wait waits until at least n mails are recorded (bounded by testkit.Deadline()) and returns
-// them all.
+// Wait waits until at least n mails are finished (bounded by testkit.Deadline()) and returns
+// all finished ones. Numbers follow the order in which the mailers started, so with mailers
+// running at the same time the n returned need not be numbers 1 to n.
 func (r *Recorder) Wait(tb testing.TB, n int) []Mail {
 	tb.Helper()
 	var m []Mail
 	testkit.WaitFor(tb, 0, fmt.Sprintf("%d recorded mail(s) in %s", n, r.Dir), func() bool {
-		m, _ = Read(r.Dir)
-		return len(m) >= n
+		var err error
+		m, err = Read(r.Dir)
+		return err == nil && len(m) >= n
 	})
 	return m
+}
+
+// started counts the mails begun in dir, finished or not.
+func started(dir string) int {
+	ents, _ := os.ReadDir(dir)
+	n := 0
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err == nil && e.IsDir() {
+			n++
+		}
+	}
+	return n
 }
 
 // settle is how long ExpectNone watches for a late mail.
 const settle = 200 * time.Millisecond
 
-// ExpectNone fails tb if a mail is recorded now or within a short while: for checking that a
-// server did not send one.
+// ExpectNone fails tb if a mail is begun now or within a short while (settle, 200ms): for
+// checking that a server did not send one. A mail still being written counts.
 func (r *Recorder) ExpectNone(tb testing.TB) {
 	tb.Helper()
 	time.Sleep(settle)
-	if m := r.Mails(tb); len(m) > 0 {
-		tb.Errorf("mailrec: %d mail(s) recorded, want none; first argv %q", len(m), m[0].Argv)
+	if n := started(r.Dir); n > 0 {
+		var first []string
+		if m := r.Mails(tb); len(m) > 0 {
+			first = m[0].Argv
+		}
+		tb.Errorf("mailrec: %d mail(s) recorded, want none; first finished argv %q", n, first)
 	}
 }

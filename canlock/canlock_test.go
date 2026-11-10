@@ -22,6 +22,9 @@ func TestVectors(t *testing.T) {
 		{"sha256 admin lock", Lock(SHA256, Key(SHA256, admin, "", mid)), "sha256:s/pmK/3grrz++29ce2/mQydzJuc7iqHn1nqcJiQTPMc="},
 		{"sha1 user lock", Lock(SHA1, KeyValue(SHA1, usec, user, mid)), "sha1:zdoRY4lJw5jLLtJTfpEqu1epqzc="},
 		{"sha256 user lock", Lock(SHA256, KeyValue(SHA256, usec, user, mid)), "sha256:NSBTz7BfcQFTCen+U4lQ0VS8VIlZao2b8mxD/xJaaeE="},
+		// sha512: computed with openssl dgst -sha512 (-hmac for the key), not from INN
+		{"sha512 admin key", Key(SHA512, admin, "", mid), "sha512:ryoikFW3wKefmYr+zDzKn16ngNf1eYbZ0DN+3yqCbkid3HxU5K99G7RcNEx1UxiL3ZQfwg1+TDhH96D+tCcXGQ=="},
+		{"sha512 admin lock", Lock(SHA512, Key(SHA512, admin, "", mid)), "sha512:Hq6MQ2JMzGf56agcqYPEMnoWHbQMSAG0eE0ABHgktP8cKL6/A4bvydjUAa0h7sHUU8vdfWXK7eUYG/pnDxgitg=="},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s: %s, want %s", c.name, c.got, c.want)

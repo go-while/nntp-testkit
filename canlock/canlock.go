@@ -4,14 +4,20 @@
 //
 // Per RFC 8315 section 4, a key is base64(HMAC-H(secret, uid + Message-ID)) and its lock is
 // base64(H(key)), where the key is hashed as its base64 text. Header values are lists of
-// elements "<scheme>:<base64>"; the schemes here are sha1 and sha256. The results match INN's
+// elements "<scheme>:<base64>"; the schemes here are sha1, sha256 and sha512. The sha256 results
+// match the examples of RFC 8315 sections 5.1 and 5.2, and all match INN's
 // tests/lib/canlock-t.c vectors.
+//
+// The Message-ID must include its angle brackets; without them the key is silently a different
+// one. RFC 8315 allows the HMAC hash to differ from the scheme's hash; this package always uses
+// the scheme's hash for both, as INN and libcanlock do.
 package canlock
 
 import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"fmt"
 	"hash"
@@ -25,6 +31,7 @@ type Hash string
 const (
 	SHA1   Hash = "sha1"
 	SHA256 Hash = "sha256"
+	SHA512 Hash = "sha512"
 )
 
 func (h Hash) new() func() hash.Hash {
@@ -33,6 +40,8 @@ func (h Hash) new() func() hash.Hash {
 		return sha1.New
 	case SHA256:
 		return sha256.New
+	case SHA512:
+		return sha512.New
 	}
 	return nil
 }
@@ -40,7 +49,7 @@ func (h Hash) new() func() hash.Hash {
 func (h Hash) mustNew() func() hash.Hash {
 	f := h.new()
 	if f == nil {
-		panic(fmt.Sprintf("canlock: unknown hash %q (want sha1 or sha256)", string(h)))
+		panic(fmt.Sprintf("canlock: unknown hash %q (want sha1, sha256 or sha512)", string(h)))
 	}
 	return f
 }
