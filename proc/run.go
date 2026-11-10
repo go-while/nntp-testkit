@@ -118,6 +118,7 @@ func TryRun(o RunOptions) (out string, code int, err error) {
 		return "", -1, fmt.Errorf("proc: start %s: %w", name, serr)
 	}
 	werr := <-res
+	unregisterGroup(cmd.Process.Pid)
 	out = buf.String()
 	if werr != nil && ctx.Err() != nil {
 		// The group was killed by Cancel (or the exit raced the deadline and failed).

@@ -9,18 +9,26 @@
 // group. Stop signals the whole group (SIGTERM, then SIGKILL), so a server that forks workers,
 // or a daemon that its leader started and left running, leaves no orphan; a timed-out Run kills
 // the group too. A process that calls setsid or setpgid leaves the group and is not reached.
-// On Linux the direct child also gets Pdeathsig SIGKILL, so a test binary that is killed (CI
-// cancel, kill -9, go test timeout) takes its servers with it; the kernel ties that signal to the
-// OS thread that started the child, so the Start functions and Run start and wait for it on a
-// goroutine locked to one thread. A descendant that forked away does not have Pdeathsig, and
-// macOS has none at all: there a killed test binary can leave servers behind (a normal exit,
-// failure or timeout of the test does not). A server that daemonises (the parent exits with
-// status 0 and the daemon keeps running in the group) works: StartTCP keeps dialling until the
-// Deadline instead of failing at the parent's exit, and Stop stops the daemon. Wait is bounded by the Deadline (it
-// stops the process when that passes). In TCP mode the child's stdout is captured with its
-// stderr, and one readiness probe connection (greeting, QUIT) reaches the server before the
-// test's own; a relative Path with a separator is resolved against the caller's directory,
-// a bare name through PATH.
+//
+// When the test binary itself dies the kit's cleanups do not run, so two things cover it. The
+// first start of a server or command installs a handler for SIGINT, SIGTERM and SIGHUP (those the
+// process does not ignore) that SIGKILLs every process group the kit started and has not stopped,
+// removes itself and raises the signal again, so Ctrl-C of "go test" ends the binary as before
+// and leaves no server. And on Linux the direct child gets Pdeathsig SIGKILL, so a binary that is
+// killed with SIGKILL (CI cancel, kill -9) takes the leader with it; the kernel ties that
+// signal to the OS thread that started the child, so the Start functions and Run start and wait
+// for it on a goroutine locked to one thread. Not covered: the children of that leader (a
+// wrapper shell's server, forked workers) are orphaned when the binary is killed with SIGKILL,
+// since only the leader has Pdeathsig; macOS has no Pdeathsig, so a SIGKILLed binary can leave
+// servers behind there; and a panic exit such as the one "go test -timeout" raises runs neither.
+// A normal exit, a failure or a timeout of a test is handled by the cleanup.
+//
+// A server that daemonises (the first process exits with status 0 and the daemon keeps running
+// in the group) needs Options.Daemonizes: StartTCP then keeps dialling until the Deadline after
+// the exit, instead of failing at once, and Stop stops the daemon, unless it called setsid. The
+// daemon should redirect its stdin, stdout and stderr: it inherits the pipes that capture its
+// output, which Go closes StopTimeout after the leader exited, and a daemon that still writes to
+// them gets EPIPE or SIGPIPE.
 //
 // Contract (plan nntp-testkit; implemented in proc.go and stdio.go):
 //
@@ -33,6 +41,7 @@
 //		Deadline    time.Duration // readiness wait and pipe deadlines; 0 = testkit.Deadline()
 //		Logs        []string      // files (relative to Dir unless absolute) to dump on failure
 //		LogBytes    int           // cap of each part of the failure dump; 0 = DefaultLogBytes (64 KiB)
+//		Daemonizes  bool          // the first process exits 0 and a daemon stays: StartTCP keeps dialling after that
 //		Ulimit      []string      // "-n 16", "-f 64", ...: limits set by /bin/sh before it execs Path
 //	}
 //	type Process struct { ... }
@@ -50,7 +59,8 @@
 //	const DefaultStopTimeout = 5 * time.Second
 //
 // Both Start functions register a tb.Cleanup that stops the process and, when tb.Failed(), logs
-// Stderr() and the Logs files with tb.Log. Each part of that dump is capped at LogBytes: a log
+// Stderr() and the Logs files with tb.Log. The captured output is kept up to 16 MiB (head and
+// tail, a "[... N bytes cut ...]" marker between); Stderr() returns that. Each part of that dump is capped at LogBytes: a log
 // file keeps its tail, the captured output its head and tail, with a "[... N bytes cut ...]"
 // marker.
 //
@@ -84,5 +94,6 @@
 //	func CleanBuilds()                                                    // for TestMain
 //
 // GoBuild runs "go build" under TryRun with a timeout of at least GoBuildFloor (5 minutes), and
-// caches the result per process by (out, pkg, ldflags), so many tests share one build.
+// caches the result per process by (out, the package's directory, ldflags, GOOS, GOARCH, GOFLAGS,
+// CGO_ENABLED), so many tests share one build; a compiler failure is cached, a timeout is not.
 package proc

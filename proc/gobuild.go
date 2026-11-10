@@ -21,10 +21,16 @@ import (
 // minutes. The timeout is the larger of this and testkit.Deadline().
 const GoBuildFloor = 5 * time.Minute
 
+// buildEntry is one cached build. mu serialises the builds of a key; bin or compileErr is set
+// once a build has ended for good. A transient failure (timeout, I/O error) sets neither, so the
+// next caller builds again.
+// goBuildTimeout is the time one build may take; a variable for the tests.
+var goBuildTimeout = func() time.Duration { return max(GoBuildFloor, testkit.Deadline()) }
+
 type buildEntry struct {
-	once sync.Once
-	bin  string
-	err  error
+	mu         sync.Mutex
+	bin        string
+	compileErr error
 }
 
 var builds struct {
@@ -44,12 +50,19 @@ var builds struct {
 // name in that directory. ldflags are joined with spaces into one -ldflags argument; quote an
 // element that contains a space the way cmd/go expects ('-X main.v="a b"').
 //
-// Builds are cached per process by (out, pkg, ldflags): tests that ask for the same one share
-// a single build, also when they run in parallel, and a failed build is remembered, so the
-// others fail at once without trying again. The go tool runs in the caller's directory (relative
-// packages resolve against it) with the environment of the test, under TryRun: a timeout
-// (the larger of GoBuildFloor and testkit.Deadline()) kills the build with its children.
-// A failed build fails tb with the compiler output.
+// Builds are cached per process by (out, the package, ldflags, and GOOS, GOARCH, GOFLAGS and
+// CGO_ENABLED of the environment): tests that ask for the same one share a single build, also
+// when they run in parallel. A relative pkg ("./cmd/srv", ".") counts as the directory it names
+// from the working directory, an import path as that path in the module of the working
+// directory, so the same name from another directory is another build. A compiler failure
+// (go build exits non-zero) is remembered, so the others fail at once; a timeout or an I/O
+// error (disk full) is not, the next caller builds again. Two test processes (packages run by
+// "go test ./..." in parallel) that build into the same explicit out race for the file: give
+// each its own directory, or use "" (a directory per process).
+//
+// The go tool runs in the caller's directory with the environment of the test, under TryRun:
+// a timeout (the larger of GoBuildFloor and testkit.Deadline()) kills the build with its
+// children. A failed build fails tb with the compiler output.
 func GoBuild(tb testing.TB, out, pkg string, ldflags ...string) string {
 	tb.Helper()
 	goTool, err := exec.LookPath("go")
@@ -62,7 +75,19 @@ func GoBuild(tb testing.TB, out, pkg string, ldflags ...string) string {
 		tb.Fatalf("proc.GoBuild: %v", err)
 	}
 	flags := strings.Join(ldflags, " ")
-	sum := sha256.Sum256([]byte(out + "\x00" + pkg + "\x00" + flags))
+	wd, err := os.Getwd()
+	if err != nil {
+		tb.Fatalf("proc.GoBuild: %v", err)
+	}
+	where := wd + "\x00" + pkg // an import path resolves in the module of the working directory
+	if pkg == "." || pkg == ".." || strings.HasPrefix(pkg, "./") || strings.HasPrefix(pkg, "../") {
+		where = filepath.Join(wd, filepath.FromSlash(pkg))
+	}
+	parts := []string{out, where, flags}
+	for _, v := range []string{"GOOS", "GOARCH", "GOFLAGS", "CGO_ENABLED"} {
+		parts = append(parts, os.Getenv(v))
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00\x01")))
 	key := hex.EncodeToString(sum[:])
 
 	builds.mu.Lock()
@@ -77,26 +102,41 @@ func GoBuild(tb testing.TB, out, pkg string, ldflags ...string) string {
 	}
 	builds.mu.Unlock()
 
-	e.once.Do(func() { e.bin, e.err = doBuild(goTool, out, pkg, flags, key) })
-	if e.err != nil {
-		tb.Fatalf("%v", e.err)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.compileErr != nil {
+		tb.Fatalf("%v", e.compileErr)
 	}
-	return e.bin
+	if e.bin != "" {
+		return e.bin
+	}
+	bin, compile, err := doBuild(goTool, out, pkg, flags, key)
+	switch {
+	case err == nil:
+		e.bin = bin
+		return bin
+	case compile:
+		e.compileErr = err
+	}
+	tb.Fatalf("%v", err)
+	return ""
 }
 
-func doBuild(goTool, out, pkg, flags, key string) (string, error) {
+// doBuild runs the build; compile is true when the go tool ran and failed (the failure is the
+// code's), false for anything that may pass on a retry.
+func doBuild(goTool, out, pkg, flags, key string) (bin string, compile bool, err error) {
 	if err := os.MkdirAll(out, 0o755); err != nil {
-		return "", fmt.Errorf("proc.GoBuild: %w", err)
+		return "", false, fmt.Errorf("proc.GoBuild: %w", err)
 	}
 	name := path.Base(filepath.ToSlash(pkg))
 	if name == "." || name == ".." || name == "/" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", fmt.Errorf("proc.GoBuild: %w", err)
+			return "", false, fmt.Errorf("proc.GoBuild: %w", err)
 		}
 		name = filepath.Base(wd)
 	}
-	bin := filepath.Join(out, name)
+	bin = filepath.Join(out, name)
 	builds.mu.Lock()
 	if other, ok := builds.taken[bin]; ok && other != key {
 		bin = filepath.Join(out, name+"-"+key[:8])
@@ -109,14 +149,14 @@ func doBuild(goTool, out, pkg, flags, key string) (string, error) {
 		args = append(args, "-ldflags="+flags)
 	}
 	args = append(args, pkg)
-	text, code, err := TryRun(RunOptions{Path: goTool, Args: args, Timeout: max(GoBuildFloor, testkit.Deadline())})
+	text, code, err := TryRun(RunOptions{Path: goTool, Args: args, Timeout: goBuildTimeout()})
 	if err != nil {
-		return "", fmt.Errorf("proc.GoBuild %s: %w", pkg, err)
+		return "", false, fmt.Errorf("proc.GoBuild %s: %w", pkg, err)
 	}
 	if code != 0 {
-		return "", fmt.Errorf("proc.GoBuild: go %s: exit %d\n%s", strings.Join(args, " "), code, text)
+		return "", true, fmt.Errorf("proc.GoBuild: go %s: exit %d\n%s", strings.Join(args, " "), code, text)
 	}
-	return bin, nil
+	return bin, false, nil
 }
 
 // sharedBuildDir returns the process-wide build directory, creating it on first use.

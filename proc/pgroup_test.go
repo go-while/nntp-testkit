@@ -100,7 +100,7 @@ func TestStartTCPDaemonising(t *testing.T) {
 	ftb := &fakeTB{TB: t}
 	t.Cleanup(ftb.runCleanups)
 	addr := freeAddr(t)
-	p, child := forkingServer(t, ftb, "daemon", addr, Options{StopTimeout: 2 * time.Second})
+	p, child := forkingServer(t, ftb, "daemon", addr, Options{StopTimeout: 2 * time.Second, Daemonizes: true})
 	if !testkit.Listening(addr) {
 		t.Fatal("the daemon does not listen")
 	}
@@ -164,5 +164,55 @@ func TestLogDumpCap(t *testing.T) {
 	}
 	if len(logs) > 4000 {
 		t.Errorf("dump has %d bytes, want it capped near 3 x 1000", len(logs))
+	}
+}
+
+func TestStartTCPExit0WithoutDaemonizesFailsAtOnce(t *testing.T) {
+	bin := buildEcho(t)
+	ftb := &fakeTB{TB: t}
+	t.Cleanup(ftb.runCleanups)
+	addr := freeAddr(t)
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// The shell starts the server in the background and exits 0: a daemon without the option.
+		StartTCP(ftb, Options{Path: "/bin/sh", Args: []string{"-c", `(sleep 3; exec "$0" "$@") & exit 0`, bin, "-listen", addr}, StopTimeout: time.Second}, addr)
+	}()
+	<-done
+	if !ftb.Failed() || len(ftb.fatals) != 1 || !strings.Contains(ftb.fatals[0], "exited before") {
+		t.Errorf("fatals %q, want one 'exited before' message", ftb.fatals)
+	}
+	if el := time.Since(start); el > 20*time.Second {
+		t.Errorf("took %v", el)
+	}
+	ftb.runCleanups()
+	testkit.WaitFor(t, 10*time.Second, "the stray daemon to stop", func() bool { return !testkit.Listening(addr) })
+}
+
+func TestStopDoesNotSignalReusedGroup(t *testing.T) {
+	// A process that exited and was reaped with nothing left in its group: Stop and
+	// SignalGroup must not touch the group id, which may belong to someone else by now.
+	p := StartStdio(t, Options{Path: "sh", Args: []string{"-c", "exit 0"}})
+	if err := p.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if !p.groupGone() {
+		t.Fatal("the group of an exited leader without children is not gone")
+	}
+	if err := p.SignalGroup(syscall.SIGKILL); err != nil {
+		t.Errorf("SignalGroup: %v", err)
+	}
+	p.Stop() // must return at once without waiting or signalling
+}
+
+func TestCaptureCap(t *testing.T) {
+	w := newCapWriter(maxCapture)
+	chunk := []byte(strings.Repeat("x", 1<<20))
+	for range 40 {
+		_, _ = w.Write(chunk)
+	}
+	if got := w.String(); len(got) > maxCapture+64 || !strings.Contains(got, "bytes cut ...]") {
+		t.Errorf("capture of 40 MiB holds %d bytes", len(got))
 	}
 }

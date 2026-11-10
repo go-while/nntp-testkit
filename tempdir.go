@@ -29,6 +29,9 @@ func SocketPathFits(path string) bool { return len(path) <= MaxSocketPath }
 // digits of a hash of tb.Name() + "-" + random digits: about 25 bytes in all, whatever the test is
 // called, and still traceable to its test when someone looks at /tmp. That leaves about 75 bytes
 // for the names below it; assert with SocketPathFits.
+//
+// Call it before starting servers that use the directory: cleanups run last-in first-out, and
+// the directory must be removed after the servers have stopped.
 func ShortTempDir(tb testing.TB) string {
 	tb.Helper()
 	base := os.TempDir()

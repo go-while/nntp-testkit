@@ -2,7 +2,6 @@ package proc
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +42,15 @@ type Options struct {
 	Logs        []string      // files (relative to Dir unless absolute) to dump on failure
 	LogBytes    int           // cap per dumped log file and for the captured output; 0 = DefaultLogBytes
 
+	// Daemonizes says the binary is expected to daemonise: its first process exits with status 0
+	// and the daemon keeps running (in the same process group, unless it calls setsid, which also
+	// puts it out of reach of Stop). StartTCP then keeps dialling until Deadline after that exit;
+	// without it, an exit before the address is ready fails tb at once, status 0 included. A
+	// daemon should redirect its stdin, stdout and stderr: it inherits the pipes that capture its
+	// output, and once the leader is gone Go closes them after StopTimeout, so a daemon that
+	// still writes to them gets EPIPE or SIGPIPE.
+	Daemonizes bool
+
 	// Ulimit sets resource limits of the process, each one "-<letter> <value>" as the shell's
 	// ulimit takes it: "-n 16" (open files), "-f 64" (file size, in 512-byte blocks for sh),
 	// "-v 200000" ... The process is started through /bin/sh, which sets them and execs Path
@@ -62,9 +70,10 @@ type Process struct {
 	stopTimeout time.Duration
 	deadline    time.Duration
 	logBytes    int
+	daemonizes  bool
 	conn        *pipeConn // stdio mode only
 
-	out *lockedBuffer // captured stderr (and stdout in TCP mode)
+	out *capWriter // captured stderr (and stdout in TCP mode)
 
 	done    chan struct{} // closed when cmd.Wait returned
 	waitErr error         // valid after done is closed
@@ -72,23 +81,10 @@ type Process struct {
 	stopOnce sync.Once
 }
 
-// lockedBuffer is a bytes.Buffer safe for concurrent Write and String.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
+// maxCapture caps the output captured from the server (Stderr): beyond it the middle is cut,
+// as in the failure dump. A server that logs to stderr all through a long test cannot grow the
+// test binary without bound.
+const maxCapture = 16 << 20
 
 // newProcess fills the defaults of o and prepares the command; it does not start it.
 func newProcess(tb testing.TB, o Options) *Process {
@@ -99,7 +95,8 @@ func newProcess(tb testing.TB, o Options) *Process {
 		stopTimeout: o.StopTimeout,
 		deadline:    o.Deadline,
 		logBytes:    o.LogBytes,
-		out:         &lockedBuffer{},
+		daemonizes:  o.Daemonizes,
+		out:         newCapWriter(maxCapture),
 		done:        make(chan struct{}),
 	}
 	if p.dir == "" {
@@ -185,6 +182,9 @@ func lockedStart(cmd *exec.Cmd, finished func(error)) error {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		err := cmd.Start()
+		if err == nil {
+			registerGroup(cmd.Process.Pid)
+		}
 		started <- err
 		if err != nil {
 			return
@@ -266,12 +266,12 @@ func StartTCP(tb testing.TB, o Options, addr string) *Process {
 		if !exited {
 			select {
 			case <-p.done:
-				if p.waitErr != nil {
+				if p.waitErr != nil || !p.daemonizes {
 					tb.Fatalf("proc: %s exited before %s was ready: %v (last dial: %v)", o.Path, addr, p.waitErr, err)
 					return p
 				}
-				// Exit status 0: a server that daemonises (the parent exits, the daemon
-				// keeps running in the group) looks like this; keep dialling until Deadline.
+				// Options.Daemonizes: the parent exited 0 and the daemon keeps running in
+				// the group; keep dialling until Deadline.
 				exited = true
 			default:
 			}
@@ -353,7 +353,21 @@ func (p *Process) SignalGroup(sig syscall.Signal) error {
 	if p.cmd.Process == nil {
 		return errors.New("proc: process not started")
 	}
+	if p.groupGone() {
+		return nil
+	}
 	return killGroup(p.cmd.Process.Pid, sig)
+}
+
+// groupGone reports whether the leader has been reaped and nothing is left in its group. Its pid
+// may belong to another process by now, so nothing may be signalled to that group.
+func (p *Process) groupGone() bool {
+	select {
+	case <-p.done:
+		return !groupAlive(p.cmd.Process.Pid)
+	default:
+		return false
+	}
 }
 
 // Stop sends SIGTERM to the whole process group of the server, then SIGKILL to the group when
@@ -370,13 +384,16 @@ func (p *Process) Stop() {
 			return
 		}
 		pid := p.cmd.Process.Pid
-		_ = killGroup(pid, syscall.SIGTERM)
-		t := time.NewTimer(min(p.stopTimeout, p.deadline))
-		if !p.waitGone(pid, t.C) {
-			_ = killGroup(pid, syscall.SIGKILL)
-			<-p.done
+		if !p.groupGone() {
+			_ = killGroup(pid, syscall.SIGTERM)
+			t := time.NewTimer(min(p.stopTimeout, p.deadline))
+			if !p.waitGone(pid, t.C) {
+				_ = killGroup(pid, syscall.SIGKILL)
+				<-p.done
+			}
+			t.Stop()
 		}
-		t.Stop()
+		unregisterGroup(pid)
 		if p.conn != nil {
 			_ = p.conn.Close()
 		}
@@ -431,5 +448,6 @@ func (p *Process) Wait() error {
 func (p *Process) Done() <-chan struct{} { return p.done }
 
 // Stderr returns the output captured so far: stderr, plus stdout in TCP mode. After Wait or
-// Stop it holds everything the process wrote.
+// Stop it holds everything the process wrote, up to 16 MiB: a longer output is truncated in the
+// middle (first and last 8 MiB, with a "[... N bytes cut ...]" marker).
 func (p *Process) Stderr() string { return p.out.String() }
