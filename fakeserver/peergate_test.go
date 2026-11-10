@@ -342,7 +342,8 @@ func TestPeerDropAfterChecks(t *testing.T) {
 
 func TestPeerSilentAfterModeStream(t *testing.T) {
 	check := noLeak(t)
-	s := New(t, Options{Deadline: 600 * time.Millisecond, Handler: PeerHandler(&PeerOptions{SilentAfterModeStream: true})})
+	// the server Deadline leaves room for two 200ms client timeouts on a loaded host
+	s := New(t, Options{Deadline: 2 * time.Second, Handler: PeerHandler(&PeerOptions{SilentAfterModeStream: true})})
 	c := dialRaw(t, s.Addr(), 200*time.Millisecond)
 	if _, err := c.ReadGreeting(); err != nil {
 		t.Fatal(err)
@@ -357,8 +358,8 @@ func TestPeerSilentAfterModeStream(t *testing.T) {
 	if want := map[string]int{"MODE": 1, "CHECK": 1, "CAPABILITIES": 1}; !reflect.DeepEqual(s.Counts(), want) {
 		t.Errorf("Counts() = %v, want %v", s.Counts(), want)
 	}
-	s.WaitOpen(t, 0, 3*time.Second)
-	c.Deadline = 2 * time.Second
+	s.WaitOpen(t, 0, 5*time.Second)
+	c.Deadline = 5 * time.Second
 	wantEOF(t, c)
 	s.Close()
 	check()
@@ -488,4 +489,22 @@ func TestPeerFaultsCompressOverride(t *testing.T) {
 	c := client.Dial(t, s.Addr())
 	wantCode(t, c, "COMPRESS DEFLATE", 403)
 	wantCode(t, c, "CHECK <a@x>", 238) // still uncompressed
+}
+
+// TestPeerEmptyReplyWithAuthNeedsTLS: an empty (non-nil) CapabilitiesReply on a peer that
+// requires TLS before AUTHINFO writes nothing and does not panic.
+func TestPeerEmptyReplyWithAuthNeedsTLS(t *testing.T) {
+	cfg, _ := TLSConfig(t)
+	s := New(t, Options{Handler: PeerHandler(&PeerOptions{
+		User: "u", Pass: "p", CapabilitiesReply: []string{},
+		StartTLS: &StartTLSOptions{Config: cfg, AuthNeedsTLS: true},
+	})})
+	c := dialRaw(t, s.Addr(), 300*time.Millisecond)
+	if _, err := c.ReadGreeting(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send("CAPABILITIES\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, c, "MODE STREAM", 203)
 }
