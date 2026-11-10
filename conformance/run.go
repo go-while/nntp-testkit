@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -145,6 +146,17 @@ func unavailable(o Options, checks []check, line string) []Result {
 	return out
 }
 
+// allowed turns a Fail that Options.Allow names into a Skip ("allowed: <Detail>").
+func (o Options) allowed(r Result) Result {
+	if r.Status != Fail {
+		return r
+	}
+	if sub := o.Allow[r.Name]; sub != "" && strings.Contains(r.Detail, sub) {
+		r.Status, r.Detail, r.Missing = Skip, "allowed: "+r.Detail, ""
+	}
+	return r
+}
+
 // runChecks runs checks with at most o.workers() at a time and returns the results in check
 // order. It runs in two phases: first every check that does not post, then the ones that do
 // (Posts), so no article lands in Options.PostGroup while a reader check looks at its numbers
@@ -193,6 +205,7 @@ func runPhase(o Options, checks []check, idx []int, out []Result) {
 // c is skipped when the server does not advertise c.Needs, unless it advertises MODE-READER
 // (the check's ready switches the mode and tests Needs again). A panic in the check is a Fail.
 func runOne(o Options, c check) (r Result) {
+	defer func() { r = o.allowed(r) }()
 	switch {
 	case slices.Contains(o.Skip, c.Name):
 		return c.skip("skipped by option")

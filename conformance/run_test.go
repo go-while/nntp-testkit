@@ -88,11 +88,14 @@ func TestCheckStorePasses(t *testing.T) {
 	}
 	// the Store server offers neither STARTTLS nor COMPRESS unless asked (see TestStartTLS*, TestCompress*)
 	for _, c := range append(startTLSChecks(), compressChecks()...) {
-		kw := "COMPRESS"
-		if strings.HasPrefix(c.Name, "starttls") {
-			kw = "STARTTLS"
+		switch {
+		case c.Name == "tls-capabilities":
+			streamSkip[c.Name] = "no Options.TLS"
+		case strings.HasPrefix(c.Name, "starttls"):
+			streamSkip[c.Name] = "STARTTLS not advertised"
+		default:
+			streamSkip[c.Name] = "COMPRESS not advertised"
 		}
-		streamSkip[c.Name] = kw + " not advertised"
 	}
 	cases := []struct {
 		name string
@@ -223,8 +226,8 @@ func TestCheckPeer(t *testing.T) {
 	for _, res := range r.Results {
 		want := Pass
 		if slices.Contains(noTLS, res.Name) {
-			if res.Status != Skip || !strings.HasSuffix(res.Detail, " not advertised") {
-				t.Errorf("%s: %s %q, want SKIP not advertised", res.Name, res.Status, res.Detail)
+			if res.Status != Skip || !(strings.HasSuffix(res.Detail, " not advertised") || res.Name == "tls-capabilities") {
+				t.Errorf("%s: %s %q, want SKIP not advertised (tls-capabilities: no Options.TLS)", res.Name, res.Status, res.Detail)
 			}
 			continue
 		}

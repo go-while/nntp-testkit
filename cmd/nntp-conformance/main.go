@@ -2,7 +2,7 @@
 // server and prints the report.
 //
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
-//	                 [-ca ca.pem] [-servername name] [-starttls-verify]
+//	                 [-ca ca.pem] [-servername name] [-starttls-verify] [-allow name=substring]...
 //	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
 //
 // The STARTTLS checks (RFC 4642) handshake without verifying the certificate unless
@@ -54,6 +54,22 @@ type jsonReport struct {
 	Skip         int          `json:"skip"`
 }
 
+// allowFlag is the repeatable -allow name=substring flag (conformance.Options.Allow); a second
+// -allow for the same check replaces the first.
+type allowFlag map[string]string
+
+func (a allowFlag) String() string { return fmt.Sprint(map[string]string(a)) }
+
+// Set parses "name=substring": the substring may itself contain "=" and must not be empty.
+func (a allowFlag) Set(v string) error {
+	name, sub, ok := strings.Cut(v, "=")
+	if !ok || strings.TrimSpace(name) == "" || sub == "" {
+		return fmt.Errorf("%q: want name=substring with a non-empty substring", v)
+	}
+	a[strings.TrimSpace(name)] = sub
+	return nil
+}
+
 // run is main without os.Exit: it parses args, runs the checks, writes the report to stdout
 // and errors to stderr, and returns the exit status.
 func run(args []string, stdout, stderr io.Writer) int {
@@ -72,6 +88,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
+	allow := allowFlag{}
+	fs.Var(allow, "allow", "tolerate a known server bug: a Fail of check `name=substring` whose detail contains the substring becomes a Skip \"allowed: ...\"; repeatable")
 	strictOverview := fs.Bool("strict-overview-fmt", false, "require preferred :bytes/:lines metadata names (legacy Bytes:/Lines: aliases allowed by default)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: nntp-conformance -addr host:port [flags]\n\nflags:\n")
@@ -111,6 +129,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline, Workers: *workers}
 	o.StrictOverviewFmt = *strictOverview
 	names := conformance.Names()
+	for n := range allow {
+		if !slices.Contains(names, n) {
+			return usage("-allow: unknown check %q", n)
+		}
+	}
+	if len(allow) > 0 {
+		o.Allow = allow
+	}
 	for _, n := range strings.Split(*skip, ",") {
 		if n = strings.TrimSpace(n); n == "" {
 			continue
@@ -147,7 +173,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		o.StartTLS = &tls.Config{ServerName: *serverName, RootCAs: roots} // ServerName "": the host of -addr
 	case *serverName != "":
 		// the name is sent (SNI), the certificate is still not verified
-		o.StartTLS = &tls.Config{ServerName: *serverName, InsecureSkipVerify: true} //nolint:gosec // as -tls-insecure: the operator did not ask for verification
+		o.StartTLS = &tls.Config{ServerName: *serverName, MinVersion: tls.VersionTLS10, InsecureSkipVerify: true} //nolint:gosec // as -tls-insecure: the operator did not ask for verification
 	}
 
 	r, err := conformance.Check(o)

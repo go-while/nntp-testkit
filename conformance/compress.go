@@ -305,9 +305,8 @@ func checkCompressUnknown(s *session, c check) Result {
 	return c.pass()
 }
 
-// checkCompressTwice: with compression active, a second COMPRESS (DEFLATE, or any other
-// name: it is syntactically valid) is a 502, as are STARTTLS and AUTHINFO when the server
-// advertised them before (RFC 8054 §2.2.2: the credentials must not travel through a
+// checkCompressTwice: with compression active, a second COMPRESS DEFLATE is a 502, as are
+// STARTTLS and AUTHINFO when the server advertised them before (RFC 8054 §2.2.2: the credentials must not travel through a
 // compressed stream, and TLS may not be started on top of it). A server that lists neither
 // does not owe a 502 for them (500 is a legal answer to an unknown command) and they are not
 // probed.
@@ -320,21 +319,27 @@ func checkCompressTwice(s *session, c check) Result {
 	if r, ok := s.compressOn(c); !ok {
 		return r
 	}
-	probes := []string{"COMPRESS DEFLATE", "COMPRESS " + unknownAlgorithm}
+	// an unknown algorithm is both "syntactically valid while compression is active" (502) and
+	// "invalid" (503) in RFC 8054 §2.2.2: either answer is accepted
+	type probe struct {
+		cmd  string
+		want []int
+	}
+	probes := []probe{{"COMPRESS DEFLATE", []int{502}}, {"COMPRESS " + unknownAlgorithm, []int{502, 503}}}
 	var notProbed []string
 	if starttls {
-		probes = append(probes, "STARTTLS")
+		probes = append(probes, probe{"STARTTLS", []int{502}})
 	} else {
 		notProbed = append(notProbed, "STARTTLS")
 	}
 	if authinfo {
-		probes = append(probes, "AUTHINFO USER conformance-probe")
+		probes = append(probes, probe{"AUTHINFO USER conformance-probe", []int{502}})
 	} else {
 		notProbed = append(notProbed, "AUTHINFO")
 	}
-	for _, cmd := range probes {
-		if _, _, err := s.single([]int{502}, "%s", cmd); err != nil {
-			return c.failf("compression active: %s (RFC 8054 §2.2.2: 502)", s.cerr(err))
+	for _, p := range probes {
+		if _, _, err := s.single(p.want, "%s", p.cmd); err != nil {
+			return c.failf("compression active: %s (RFC 8054 §2.2.2: %v)", s.cerr(err), p.want)
 		}
 	}
 	r := c.pass()
@@ -433,7 +438,7 @@ func compressUpload(lineByLine bool) func(*session, check) Result {
 		case err != nil:
 			return c.failf("POST over COMPRESS: after the article (sent %s): %s", sent, s.cerr(err))
 		case code == 441:
-			return c.skipf("server refused the article (%d lines, %d bytes): %s", len(body), len(wire), line)
+			return c.skipf("server refused the article (%d lines, %d bytes) with %q: this may be a size or policy limit, or the server's inflate may have corrupted the article (not told apart: see check compress for the compression itself)", len(body), len(wire), line)
 		case code != 240:
 			return c.failf("POST over COMPRESS: article sent %s: got %q, want 240", sent, line)
 		}

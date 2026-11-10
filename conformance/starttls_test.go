@@ -11,7 +11,8 @@ import (
 	"github.com/go-while/nntp-testkit/tlscert"
 )
 
-var startTLSNames = names(startTLSChecks())
+// startTLSNames are the checks that need STARTTLS (tls-capabilities is for implicit TLS).
+var startTLSNames = slices.DeleteFunc(names(startTLSChecks()), func(n string) bool { return n == "tls-capabilities" })
 
 // stServer is a Store server that offers STARTTLS with a certificate of ca (a new CA when nil).
 func stServer(t *testing.T, ca *tlscert.CA, mod func(*fakeserver.StartTLSOptions)) (*fakeserver.Server, *tlscert.CA) {
@@ -106,9 +107,11 @@ func TestStartTLSRefused(t *testing.T) {
 	for _, refuse := range []string{"502 STARTTLS not available", "483 encryption required"} {
 		srv, _ := stServer(t, nil, func(o *fakeserver.StartTLSOptions) { o.Refuse = refuse })
 		o := Options{Addr: srv.Addr(), Deadline: 2 * time.Second}
-		for _, n := range startTLSNames {
+		for _, n := range startTLSNames[:2] {
 			ctWant(t, ctCheck(t, o, n), Fail, `got "`+refuse+`", want 382`)
 		}
+		// the pipelining is the client's violation: nothing to judge
+		ctWant(t, ctCheck(t, o, "starttls-pipelined"), Skip, `answered "`+refuse+`", not 382`)
 	}
 }
 
@@ -119,6 +122,10 @@ type stPeer struct {
 	twice382   bool     // a second STARTTLS over TLS gets 382 again
 	greetAfter bool     // a new greeting after the handshake
 	execPipe   bool     // reads the command behind STARTTLS as a plaintext command (no handshake)
+	execAfter  bool     // keeps the command behind STARTTLS and runs it after the handshake (CVE-2011-0411)
+	splitInj   bool     // with inject: the plaintext in a write of its own, a moment after the 382
+	garbage    bool     // text that is no NNTP reply behind the 382, then close
+	noHandshk  bool     // 382, then closes the connection without a handshake
 }
 
 func (p stPeer) server(t *testing.T) *fakeserver.Server {
@@ -144,10 +151,33 @@ func (p stPeer) server(t *testing.T) *fakeserver.Server {
 				}
 				return []string{"502 TLS active"}, false
 			}
+			if p.inject && !p.splitInj {
+				_, _ = c.Raw().Write([]byte("382 go\r\n200 injected\r\n")) // one segment: the client reads both at once
+				return nil, true
+			}
 			_ = c.WriteLines("382 go")
 			switch {
 			case p.inject:
+				time.Sleep(100 * time.Millisecond) // a read of its own on the client
 				_ = c.WriteLines("200 injected")
+				return nil, true
+			case p.garbage:
+				_ = c.WriteLines("hello, this is not NNTP")
+				return nil, true
+			case p.noHandshk:
+				return nil, true
+			case p.execAfter:
+				// the flaw of CVE-2011-0411: the DATE stays in the input buffer, the handshake
+				// runs, then the buffered command is executed over TLS
+				if _, err := c.ReadLine(); err != nil {
+					return nil, true
+				}
+				tc := tls.Server(c.Raw(), cfg)
+				if tc.Handshake() != nil {
+					return nil, true
+				}
+				_, _ = tc.Write([]byte("111 20250101000000\r\n"))
+				time.Sleep(200 * time.Millisecond)
 				return nil, true
 			case p.execPipe:
 				return nil, false // the next line is read and answered in plaintext
@@ -184,10 +214,14 @@ func TestStartTLSMistakes(t *testing.T) {
 	}{
 		{"still advertised", stPeer{capsAfter: []string{"101 caps", "VERSION 2", "READER", "STARTTLS", "."}}, "starttls", `lists "STARTTLS" while TLS is active`},
 		{"mode-reader advertised", stPeer{capsAfter: []string{"101 caps", "VERSION 2", "MODE-READER", "."}}, "starttls", `lists "MODE-READER" while TLS is active`},
-		{"plaintext after 382", stPeer{inject: true}, "starttls", "plaintext after the 382 line"},
-		{"greeting after handshake", stPeer{greetAfter: true}, "starttls", "no greeting is sent"},
+		// the plaintext is in the client's buffer at the 382, or arrives in a read of its own and
+		// reaches the handshake: both are the same mistake
+		{"plaintext after 382", stPeer{inject: true}, "starttls", "plaintext after the 382"},
+		{"plaintext after 382, later read", stPeer{inject: true, splitInj: true}, "starttls", "plaintext after the 382"},
+		{"greeting after handshake", stPeer{greetAfter: true}, "starttls", "no greeting is sent after the handshake"},
 		{"second STARTTLS 382", stPeer{twice382: true}, "starttls-twice", `got "382 again", want [502]`},
-		{"pipelined executed", stPeer{execPipe: true}, "starttls-pipelined", `answered in plaintext after the 382: "111 `},
+		{"pipelined executed before the handshake", stPeer{execPipe: true}, "starttls-pipelined", `answered in plaintext right after the 382: "111 `},
+		{"pipelined executed after the handshake", stPeer{execAfter: true}, "starttls-pipelined", `executed after the TLS handshake: the server sent "111 `},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,12 +231,31 @@ func TestStartTLSMistakes(t *testing.T) {
 	}
 }
 
+// A server that does not run the command behind STARTTLS passes starttls-pipelined, whichever
+// way it refuses it, and the Detail says which.
+func TestStartTLSPipelinedPasses(t *testing.T) {
+	cases := []struct {
+		name string
+		peer stPeer
+		want string
+	}{
+		{"not NNTP text", stPeer{garbage: true}, "not an NNTP reply"},
+		{"closed", stPeer{noHandshk: true}, "did not complete the TLS handshake"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := Options{Addr: tc.peer.server(t).Addr(), Deadline: time.Second}
+			ctWant(t, ctCheck(t, o, "starttls-pipelined"), Pass, tc.want)
+		})
+	}
+}
+
 // the Store server drops plaintext sent behind STARTTLS: starttls-pipelined passes, and says
 // what it saw.
 func TestStartTLSPipelinedStore(t *testing.T) {
 	srv, _ := stServer(t, nil, nil)
 	r := ctCheck(t, Options{Addr: srv.Addr(), Deadline: 2 * time.Second}, "starttls-pipelined")
-	ctWant(t, r, Pass, "DATE sent behind STARTTLS was not answered")
+	ctWant(t, r, Pass, "DATE sent behind STARTTLS was not executed")
 	if srv.Count("DATE") != 0 {
 		t.Error("the server executed the DATE")
 	}
@@ -279,4 +332,108 @@ func TestCheckStoreCompressStartTLS(t *testing.T) {
 	}
 	r.Require(t, slices.Concat(startTLSNames, compressNames)...)
 	r.RequireNoFail(t)
+}
+
+// The default handshake does not judge the certificate and so not the TLS version either: a
+// server that speaks only TLS 1.0 passes; a config that verifies keeps Go's default minimum and
+// fails on it.
+func TestStartTLSDefaultMinVersionTLS10(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	cfg := ca.Issue(t, tlscert.Options{}).ServerConfig()
+	cfg.MinVersion, cfg.MaxVersion = tls.VersionTLS10, tls.VersionTLS10
+	srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), StoreOpts: fakeserver.StoreOptions{StartTLS: &fakeserver.StartTLSOptions{Config: cfg}}})
+	o := Options{Addr: srv.Addr(), Deadline: 2 * time.Second}
+	for _, n := range startTLSNames {
+		if r := ctCheck(t, o, n); r.Status != Pass {
+			t.Errorf("%s with a TLS 1.0 server: %s %q", n, r.Status, r.Detail)
+		}
+	}
+	o.StartTLS = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+	ctWant(t, ctCheck(t, o, "starttls"), Pass, "skips verification")
+	o.StartTLS = &tls.Config{RootCAs: ca.Pool}
+	ctWant(t, ctCheck(t, o, "starttls"), Fail, "handshake")
+}
+
+func tlsCapsServer(t *testing.T, caps []string) (*fakeserver.Server, *tlscert.CA) {
+	t.Helper()
+	ca := tlscert.NewCA(t)
+	srv := fakeserver.New(t, fakeserver.Options{TLS: ca.Issue(t, tlscert.Options{}).ServerConfig(), Handler: fakeserver.LineHandler(
+		func(c *fakeserver.Conn, line string) ([]string, bool) {
+			if strings.HasPrefix(line, "CAPABILITIES") {
+				return caps, false
+			}
+			return []string{"500 what"}, false
+		})})
+	return srv, ca
+}
+
+func TestTLSCapabilities(t *testing.T) {
+	// the Store lists no STARTTLS over implicit TLS
+	ca := tlscert.NewCA(t)
+	cfg := ca.Issue(t, tlscert.Options{}).ServerConfig()
+	store := fakeserver.New(t, fakeserver.Options{Store: testStore(), TLS: cfg,
+		StoreOpts: fakeserver.StoreOptions{StartTLS: &fakeserver.StartTLSOptions{Config: cfg}}})
+	r := ctCheck(t, Options{Addr: store.Addr(), TLS: ca.ClientConfig("localhost")}, "tls-capabilities")
+	if r.Status != Pass || r.Detail != "" {
+		t.Errorf("Store: %s %q", r.Status, r.Detail)
+	}
+	// without Options.TLS: skipped, without a Missing
+	plain := fakeserver.New(t, fakeserver.Options{Store: testStore()})
+	r = ctCheck(t, Options{Addr: plain.Addr()}, "tls-capabilities")
+	ctWant(t, r, Skip, "no Options.TLS")
+	if r.Missing != "" {
+		t.Errorf("Missing %q", r.Missing)
+	}
+
+	bad, bca := tlsCapsServer(t, []string{"101 caps", "VERSION 2", "READER", "STARTTLS", "."})
+	ctWant(t, ctCheck(t, Options{Addr: bad.Addr(), TLS: bca.ClientConfig("localhost")}, "tls-capabilities"), Fail, "lists STARTTLS")
+
+	// SASL EXTERNAL without a client certificate is noted, with one it is not
+	sasl, sca := tlsCapsServer(t, []string{"101 caps", "VERSION 2", "READER", "SASL PLAIN EXTERNAL", "."})
+	o := Options{Addr: sasl.Addr(), TLS: sca.ClientConfig("localhost")}
+	ctWant(t, ctCheck(t, o, "tls-capabilities"), Pass, "SASL EXTERNAL is listed although no client certificate")
+	o.TLS = o.TLS.Clone()
+	o.TLS.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &tls.Certificate{}, nil }
+	if r := ctCheck(t, o, "tls-capabilities"); r.Status != Pass || r.Detail != "" {
+		t.Errorf("with a client certificate: %s %q", r.Status, r.Detail)
+	}
+}
+
+// Options.Allow turns a Fail whose Detail contains the substring into a Skip and leaves every
+// other result alone.
+func TestAllow(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: testStore(),
+		Faults: fakeserver.Faults{Override: map[string][]string{"HELP": {"500 nope"}}}})
+	help := asFind(t, readerChecks(), "help")
+	run := func(allow map[string]string) Result {
+		r := runOne(Options{Addr: srv.Addr(), Allow: allow}, help)
+		t.Logf("%s %s", r.Status, r.Detail)
+		return r
+	}
+	if r := run(nil); r.Status != Fail {
+		t.Fatalf("without Allow: %s %q, want FAIL", r.Status, r.Detail)
+	}
+	orig := run(nil).Detail
+	r := run(map[string]string{"help": `got "500 nope"`})
+	if r.Status != Skip || r.Detail != "allowed: "+orig || r.Missing != "" || r.RFC == "" {
+		t.Errorf("allowed: %+v, want SKIP \"allowed: %s\"", r, orig)
+	}
+	for name, allow := range map[string]map[string]string{
+		"other substring": {"help": "501"},
+		"other check":     {"date": `got "500 nope"`},
+		"empty substring": {"help": ""},
+	} {
+		if r := run(allow); r.Status != Fail || r.Detail != orig {
+			t.Errorf("%s: %+v, want the Fail unchanged", name, r)
+		}
+	}
+	// a passing check is left alone, an allowed panic is a Skip too
+	date := asFind(t, readerChecks(), "date")
+	if r := runOne(Options{Addr: srv.Addr(), Allow: map[string]string{"date": "x"}}, date); r.Status != Pass {
+		t.Errorf("date: %+v", r)
+	}
+	boom := check{Name: "boom", RFC: "x", Run: func(*session, check) Result { panic("kaboom") }}
+	if r := runOne(Options{Addr: srv.Addr(), Allow: map[string]string{"boom": "kaboom"}}, boom); r.Status != Skip || !strings.HasPrefix(r.Detail, "allowed: panic") {
+		t.Errorf("panic: %+v", r)
+	}
 }

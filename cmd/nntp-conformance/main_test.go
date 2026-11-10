@@ -234,3 +234,37 @@ func TestRunJSONMissing(t *testing.T) {
 		}
 	}
 }
+
+// TestRunAllow: -allow name=substring turns a matching Fail into a Skip (exit 0), is
+// repeatable, and a bad value or an unknown check is a usage error.
+func TestRunAllow(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: store(),
+		Faults: fakeserver.Faults{Override: map[string][]string{"HELP": {"500 nope"}}}})
+	base := []string{"-addr", srv.Addr(), "-deadline", "5s", "-skip", skipAllBut("help")}
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stdout string
+		stderr string
+	}{
+		{"fails", nil, 1, "FAIL help", ""},
+		{"allowed", []string{"-allow", `help=got "500 nope"`}, 0, `SKIP help`, ""},
+		{"allowed-detail", []string{"-allow", `help=got "500 nope"`}, 0, `allowed: HELP: got`, ""},
+		{"repeated", []string{"-allow", "date=x", "-allow", "help=500 nope"}, 0, "allowed:", ""},
+		{"substring-with-equals", []string{"-allow", "help=a=b"}, 1, "FAIL help", ""},
+		{"not-matching", []string{"-allow", "help=501"}, 1, "FAIL help", ""},
+		{"no-equals", []string{"-allow", "help"}, 2, "", "name=substring"},
+		{"empty-substring", []string{"-allow", "help="}, 2, "", "non-empty substring"},
+		{"unknown-check", []string{"-allow", "nosuch=x"}, 2, "", `unknown check "nosuch"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			code := run(append(append([]string{}, base...), tc.args...), &out, &errb)
+			if code != tc.code || !strings.Contains(out.String(), tc.stdout) || !strings.Contains(errb.String(), tc.stderr) {
+				t.Errorf("exit %d (want %d)\nstdout:\n%s\nstderr:\n%s", code, tc.code, out.String(), errb.String())
+			}
+		})
+	}
+}

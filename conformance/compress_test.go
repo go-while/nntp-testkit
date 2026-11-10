@@ -359,3 +359,16 @@ func TestUploadBody(t *testing.T) {
 		t.Errorf("dotted %d, empty %d, lone dot %d", dots, empty, lone)
 	}
 }
+
+// the unknown algorithm while compression is active: 502 or 503 (two MUSTs of RFC 8054 §2.2.2
+// overlap), anything else fails
+func TestCompressTwiceUnknownAlgorithm(t *testing.T) {
+	for reply, want := range map[string]Status{"503 no such algorithm": Pass, "200 ok": Fail} {
+		srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), StoreOpts: fakeserver.StoreOptions{Compress: true},
+			Faults: fakeserver.Faults{OverrideLine: map[string][]string{"COMPRESS " + unknownAlgorithm: {reply}}}})
+		r := ctCheck(t, Options{Addr: srv.Addr(), Deadline: time.Second}, "compress-twice")
+		if r.Status != want {
+			t.Errorf("%q: %s %q, want %s", reply, r.Status, r.Detail, want)
+		}
+	}
+}
