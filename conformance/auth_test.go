@@ -27,7 +27,7 @@ func asRunCheck(t *testing.T, o Options, c check) Result {
 		t.Fatalf("%s: capabilities: %v", c.Name, err)
 	}
 	if c.Needs != "" && !s.has(c.Needs) {
-		return c.skip(c.Needs + " not advertised")
+		return c.notAdvertised(c.Needs)
 	}
 	return c.Run(s, c)
 }

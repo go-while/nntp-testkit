@@ -178,7 +178,7 @@ func (s *session) ready(c check) (Result, bool) {
 		}
 	}
 	if c.Needs != "" && !s.has(c.Needs) {
-		return c.skip("server does not advertise " + c.Needs), false
+		return c.notAdvertised(c.Needs), false
 	}
 	return Result{}, true
 }
@@ -888,7 +888,7 @@ func (s *session) listKeyword(c check, kw, mandatory string) (r Result, ok bool)
 	if s.has(mandatory) {
 		return c.failf("LIST capability does not name %s, which is mandatory with %s", kw, mandatory), false
 	}
-	return c.skip("LIST capability does not name " + kw), false
+	return c.notAdvertised("LIST " + kw), false
 }
 
 func checkListActive(s *session, c check) Result {

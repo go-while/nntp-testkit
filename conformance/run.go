@@ -214,7 +214,7 @@ func runOne(o Options, c check) (r Result) {
 	}
 	_, _ = s.capabilities() // a failure stays in s.capsErr; the capabilities check reports it
 	if c.Needs != "" && !s.has(c.Needs) && !s.has("MODE-READER") {
-		return c.skip("server does not advertise " + c.Needs)
+		return c.notAdvertised(c.Needs)
 	}
 	return c.Run(s, c)
 }

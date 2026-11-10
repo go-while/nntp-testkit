@@ -66,6 +66,11 @@ type Result struct {
 	Status Status
 	Detail string // why it failed or was skipped; on Pass a note worth reading (e.g. "not restricted"), usually empty
 	RFC    string // the section the check is about, e.g. "RFC 3977 §5.1.1"
+	// Missing names the capability whose absence skipped the check ("NEWNEWS", "STREAMING",
+	// "AUTHINFO", "LIST ACTIVE.TIMES" for a LIST keyword); empty for any other result. Detail
+	// then reads "<Missing> not advertised", plus what the server answered where it was asked.
+	// Match skips on Missing rather than on Detail.
+	Missing string
 }
 
 // Report is the outcome of a Run or Check.
@@ -128,6 +133,13 @@ func (r Report) String() string {
 func (c check) pass() Result { return Result{Name: c.Name, Status: Pass, RFC: c.RFC} }
 func (c check) skip(why string) Result {
 	return Result{Name: c.Name, Status: Skip, Detail: why, RFC: c.RFC}
+}
+
+// notAdvertised skips c because the server does not advertise capability what.
+func (c check) notAdvertised(what string) Result {
+	r := c.skip(what + " not advertised")
+	r.Missing = what
+	return r
 }
 func (c check) fail(why string) Result {
 	return Result{Name: c.Name, Status: Fail, Detail: why, RFC: c.RFC}

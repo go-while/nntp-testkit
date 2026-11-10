@@ -115,6 +115,7 @@ func asAuthCmd(s *session, c check, advertised bool, want []int, format string, 
 		r = c.failf("%s: got %q: RFC 4643 §2.3.1 forbids a 480 in reply to AUTHINFO", shown, line)
 	case !advertised && (code == 500 || code == 501 || code == 502):
 		r = c.skip(fmt.Sprintf("%s; %s got %q", asNotAdvertised, shown, line))
+		r.Missing = "AUTHINFO"
 	default:
 		r = c.failf("%s: got %q, want %s", shown, line, asCodes(want))
 	}

@@ -57,7 +57,7 @@ func asRun(kw string, run func(*session, check) Result) func(*session, check) Re
 			return *r
 		}
 		if kw != "" && !s.has(kw) {
-			return c.skip(kw + " not advertised")
+			return c.notAdvertised(kw)
 		}
 		return run(s, c)
 	}
