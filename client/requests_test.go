@@ -528,7 +528,7 @@ func TestDialUntilServerNotYetListening(t *testing.T) {
 		}
 		done <- s
 	}()
-	c, err := TryDialUntil(addr, "200", 0)
+	c, err := TryDialUntil(addr, "200", 5*time.Second)
 	s := <-done
 	if s == nil {
 		t.Skip("the port was taken")
@@ -773,5 +773,81 @@ func TestMultiLine(t *testing.T) {
 		if got := MultiLine(tc.cmd, tc.code); got != tc.want {
 			t.Errorf("MultiLine(%q, %d) = %v", tc.cmd, tc.code, got)
 		}
+	}
+}
+
+func TestPipelineBlockBound(t *testing.T) {
+	// a block that trickles lines forever: the sliding guard never fires, the absolute bound does
+	s := fakeserver.New(t, fakeserver.Options{Handler: func(c *fakeserver.Conn) {
+		_, _ = c.ReadLine()
+		_ = c.WriteLines("215 list follows")
+		for {
+			if c.WriteLines("line") != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}})
+	c := Dial(t, s.Addr())
+	c.Deadline = 100 * time.Millisecond // block bound: 1s
+	start := time.Now()
+	r, err := c.TryPipeline([]string{"LIST"}, nil)
+	var se *StrictError
+	if !errors.As(err, &se) || se.Kind != NoTerminator || len(r) != 0 {
+		t.Errorf("TryPipeline: %v (%d replies)", err, len(r))
+	}
+	if el := time.Since(start); el < 900*time.Millisecond || el > 5*time.Second {
+		t.Errorf("took %v", el)
+	}
+}
+
+func TestPipelineCmdFirstLine(t *testing.T) {
+	ps := peerServer(t, &fakeserver.PeerOptions{})
+	pc := Dial(t, ps.Addr())
+	var seen []string
+	r := pc.Pipeline([]string{"TAKETHIS <a@t>\r\n" + string(StuffBytes([]byte(art)))}, func(cmd string, code int) bool {
+		seen = append(seen, cmd)
+		return false
+	})
+	if r[0].Cmd != "TAKETHIS <a@t>" || !slices.Equal(seen, []string{"TAKETHIS <a@t>"}) {
+		t.Errorf("Cmd %q, multi saw %q", r[0].Cmd, seen)
+	}
+	if !MultiLine("ListGroup a", 211) || MultiLine("LISTGROUPS", 211) {
+		t.Errorf("MultiLine case handling")
+	}
+}
+
+func TestExpectClosedEndlessLine(t *testing.T) {
+	// bytes without any LF: the call fails at the cap, holding no more than that
+	s := fakeserver.New(t, fakeserver.Options{Handler: func(c *fakeserver.Conn) {
+		chunk := bytes.Repeat([]byte("x"), 8192)
+		for {
+			if _, err := c.Raw().Write(chunk); err != nil {
+				return
+			}
+		}
+	}})
+	c := Dial(t, s.Addr())
+	start := time.Now()
+	lines, err := c.ExpectClosed(5 * time.Second)
+	if err == nil || !strings.Contains(err.Error(), "has not closed") {
+		t.Errorf("err %v, lines %d", err, len(lines))
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Errorf("took %v", time.Since(start))
+	}
+}
+
+func TestReadUntilQuietLongQuiet(t *testing.T) {
+	// quiet longer than the hang guard: a silent server ends the call at the guard, not at quiet
+	s := fakeserver.New(t, fakeserver.Options{Handler: func(c *fakeserver.Conn) {
+		_, _ = c.ReadLine()
+	}})
+	c := Dial(t, s.Addr())
+	c.Deadline = 200 * time.Millisecond
+	start := time.Now()
+	_, err := c.TryReadUntilQuiet(time.Minute, 0)
+	if err == nil || !timedOut(err) || time.Since(start) > 3*time.Second {
+		t.Errorf("err %v after %v", err, time.Since(start))
 	}
 }
