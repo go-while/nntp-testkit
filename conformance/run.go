@@ -21,9 +21,9 @@ func (o Options) workers() int {
 	return defaultWorkers
 }
 
-// allChecks is every check in report order: reader, auth, stream.
+// allChecks is every check in report order: reader, auth, stream, starttls, compress.
 func allChecks() []check {
-	return slices.Concat(readerChecks(), authChecks(), streamChecks())
+	return slices.Concat(readerChecks(), authChecks(), streamChecks(), startTLSChecks(), compressChecks())
 }
 
 // Names returns the check names (Result.Name) in report order: the values Options.Skip takes.

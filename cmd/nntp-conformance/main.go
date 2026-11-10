@@ -2,7 +2,12 @@
 // server and prints the report.
 //
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
+//	                 [-ca ca.pem] [-servername name] [-starttls-verify]
 //	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
+//
+// The STARTTLS checks (RFC 4642) handshake without verifying the certificate unless
+// -starttls-verify or -ca is given (then against -ca, else the system roots, with -servername or
+// the host of -addr as the name); the report says "certificate not verified" in that case.
 //
 // Exit status: 0 when no check failed, 1 on any Fail, 2 on a usage error or when the server
 // cannot be reached.
@@ -10,6 +15,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -34,6 +40,8 @@ type jsonResult struct {
 	Status string `json:"status"`
 	RFC    string `json:"rfc"`
 	Detail string `json:"detail,omitempty"`
+	// Missing is the capability whose absence skipped the check ("COMPRESS", "STARTTLS", ...)
+	Missing string `json:"missing,omitempty"`
 }
 
 // jsonReport is the -json output.
@@ -57,6 +65,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	group := fs.String("group", "", "a group the checks may post into (POST, IHAVE, TAKETHIS); empty: no check modifies the server")
 	useTLS := fs.Bool("tls", false, "TLS from the first byte (no STARTTLS), ServerName = the host of -addr")
 	insecure := fs.Bool("tls-insecure", false, "TLS without certificate verification (implies -tls)")
+	caFile := fs.String("ca", "", "PEM file of the CA certificates that verify the server certificate of -tls and of STARTTLS (default: the system roots); implies -starttls-verify")
+	serverName := fs.String("servername", "", "TLS server name (SNI and the name the certificate must carry) for -tls and STARTTLS (default: the host of -addr)")
+	starttlsVerify := fs.Bool("starttls-verify", false, "verify the certificate in the STARTTLS checks (against -ca, else the system roots); off: handshake without verification, noted in the report")
 	deadline := fs.Duration("deadline", 10*time.Second, "hang guard per read and write")
 	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
@@ -109,9 +120,34 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		o.Skip = append(o.Skip, n)
 	}
+	var roots *x509.CertPool
+	if *caFile != "" {
+		if *insecure {
+			return usage("-ca and -tls-insecure exclude each other (-ca verifies, -tls-insecure does not)")
+		}
+		pem, err := os.ReadFile(*caFile)
+		if err != nil {
+			return usage("-ca: %v", err)
+		}
+		roots = x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			return usage("-ca %s: no PEM certificate found", *caFile)
+		}
+	}
 	if *useTLS || *insecure {
 		// -tls-insecure is the operator's explicit choice (self-signed test servers)
-		o.TLS = &tls.Config{ServerName: host, InsecureSkipVerify: *insecure} //nolint:gosec
+		name := host
+		if *serverName != "" {
+			name = *serverName
+		}
+		o.TLS = &tls.Config{ServerName: name, RootCAs: roots, InsecureSkipVerify: *insecure} //nolint:gosec
+	}
+	switch {
+	case *starttlsVerify || roots != nil:
+		o.StartTLS = &tls.Config{ServerName: *serverName, RootCAs: roots} // ServerName "": the host of -addr
+	case *serverName != "":
+		// the name is sent (SNI), the certificate is still not verified
+		o.StartTLS = &tls.Config{ServerName: *serverName, InsecureSkipVerify: true} //nolint:gosec // as -tls-insecure: the operator did not ask for verification
 	}
 
 	r, err := conformance.Check(o)
@@ -126,7 +162,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			out.Capabilities = []string{}
 		}
 		for _, res := range r.Results {
-			out.Results = append(out.Results, jsonResult{Name: res.Name, Status: res.Status.String(), RFC: res.RFC, Detail: res.Detail})
+			out.Results = append(out.Results, jsonResult{Name: res.Name, Status: res.Status.String(), RFC: res.RFC, Detail: res.Detail, Missing: res.Missing})
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")

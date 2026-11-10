@@ -339,7 +339,9 @@ Log dump: the cleanup of both Start functions stops the process and, when the te
 | `RunVerbose(tb, Options) Report` | `Run` that first logs every result that is not a Skip (`tb.Logf`, one line each), so a passing run shows what passed |
 | `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
+| `(Report) Require(tb, names ...string)` | fails `tb` once per named check that did not Pass: a Fail, a Skip (not a pass) and a name not in `Names()`; each line has status, RFC and Detail |
+| `(Report) RequireNoFail(tb)` | fails `tb` once per Fail (what `Run` does, for a `ReportOnly` or `Check` report); an empty report fails too |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
 | `type Result struct { Name string; Status Status; Detail, RFC, Missing string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note); on a Skip for a capability the server does not advertise, `Missing` names it ("NEWNEWS", "STREAMING", "LIST ACTIVE.TIMES") and `Detail` reads "<Missing> not advertised": match skips on `Missing` |
 | `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
 
@@ -363,6 +365,26 @@ overview extensions are still handled as before.
 | RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `listgroup-range` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-active-times` `list-newsgroups` `list-overview-fmt` `list-headers` `list-unknown-keyword` `over` `over-errors` `hdr` `newgroups` `newnews` `post` (with `PostGroup`) `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
 | RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
 | RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
+| RFC 4642 (STARTTLS advertised) | `starttls` `starttls-twice` `starttls-pipelined` |
+| RFC 8054 (COMPRESS DEFLATE advertised; uploads with `PostGroup`) | `compress` `compress-unknown` `compress-twice` `compress-upload` `compress-upload-lines` |
+
+The STARTTLS and COMPRESS checks run only when CAPABILITIES lists the capability (a Skip with
+`Missing` "STARTTLS" or "COMPRESS" otherwise; "COMPRESS DEFLATE" when COMPRESS is listed without
+DEFLATE, which `compress` itself fails). Decisions worth knowing: the STARTTLS checks never log
+in (STARTTLS is invalid after AUTHINFO) and are skipped when `Options.TLS` is set; the
+handshake is not verified unless `Options.StartTLS` (flags `-ca`, `-starttls-verify`) says so,
+and `starttls` then passes with the Detail "certificate not verified"; a 580 passes `starttls`
+with a Detail (the server may have no certificate) and skips the other two; a 502 or 483 from a
+plain, unauthenticated connection that lists STARTTLS fails. `starttls-pipelined` sends a DATE
+in the same write as STARTTLS and fails only when it is answered in plaintext (RFC 4642 forbids
+pipelining STARTTLS; a server may drop the connection or send a TLS alert). The COMPRESS checks
+log in only when COMPRESS is not listed before (or is answered 480); a 403 answer to COMPRESS
+(unable to activate) skips the check. `compress-unknown` expects 503 for an unknown algorithm
+and 501 for none; `compress-twice` expects 502 for a second COMPRESS with any algorithm, and
+for STARTTLS and AUTHINFO when they were advertised before (RFC 8054 §2.2.2). The upload checks
+post 3000 lines of 100 bytes (some dot-stuffed, some empty, one a lone dot) and fail when the
+reply is not there within `Deadline` (INN issue #269: nnrpd waited for socket data while
+compressed input was pending).
 
 ```bash
 go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:1119 [-user u -pass p] [-group g]
@@ -374,17 +396,20 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-user`, `-pass` | AUTHINFO USER/PASS; without `-user` the RFC 4643 checks are skipped |
 | `-group` | a group the checks may post into (POST, TAKETHIS, IHAVE); without it nothing is posted |
 | `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
+| `-ca file` | PEM file of CA certificates that verify the server certificate of `-tls` and of the STARTTLS checks (instead of the system roots); implies `-starttls-verify`; not with `-tls-insecure` |
+| `-servername name` | TLS server name (SNI, and the name the certificate must carry) for `-tls` and STARTTLS; default the host of `-addr` |
+| `-starttls-verify` | verify the certificate in the STARTTLS checks (against `-ca`, else the system roots); without it (and without `-ca`) the handshake is not verified and the report says so |
 | `-deadline` | hang guard per read and write, default `10s` |
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
-| `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
+| `-json` | the report as JSON (`results` with `name`, `status`, `rfc`, `detail` and, for a skip for a missing capability, `missing`; `capabilities`; `pass`/`fail`/`skip` counts) instead of text |
 | `-strict-overview-fmt` | require preferred `:bytes`/`:lines` instead of the RFC-permitted legacy aliases; off by default |
 
 Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
 cannot be reached.
 
 Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
-given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer
+given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE; the STARTTLS and COMPRESS checks skip unless `StoreOptions.StartTLS` and `Compress` are set, and then pass), the transit peer
 (`PeerHandler`) passes the stream checks, and fakes with one deliberate mistake (a bare-LF
 greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields, a
 LISTGROUP that ignores its range, a bad LIST ACTIVE.TIMES time, a LIST HEADERS name with its
