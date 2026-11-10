@@ -17,7 +17,7 @@
 //		Store      *Store        // stateful mode: StoreHandler(Store, StoreOptions) when Handler is nil
 //		StoreOpts  StoreOptions
 //		Faults     Faults        // apply in Script and Store mode and to a LineHandler (copied at start); another Handler cannot use them
-//		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline; 0 = testkit.Deadline()
+//		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline (a TLS handshake, implicit or STARTTLS, is bounded by it); 0 = testkit.Deadline()
 //		MaxConns         int    // >0: one more simultaneous connection gets MaxConnsGreeting and is closed (counts in Accepted, never in Open)
 //		MaxConnsGreeting string // default "502 Too many connections"
 //	}
@@ -66,7 +66,7 @@
 //		Config              *tls.Config // server config of the upgraded connection; required
 //		Refuse              string      // reply instead of 382 ("502 ...", "580 ..."): a refusal / stripping attacker; the connection stays plain
 //		HideCapability      bool        // STARTTLS not listed in CAPABILITIES
-//		AuthNeedsTLS        bool        // AUTHINFO before TLS 483, commands needing auth 483 (not 480), "AUTHINFO" without USER in CAPABILITIES
+//		AuthNeedsTLS        bool        // with User/Pass set: AUTHINFO before TLS 483, commands needing auth 483 (not 480), Store lists "AUTHINFO" without USER
 //		CloseAfterHandshake int         // >0: the first N upgrades of the server are closed right after the handshake
 //	}
 //	func (c *Conn) StartTLS(cfg *tls.Config) error  // TLS server side from now on; call it after writing the 382; error when TLS/compression is on, the handshake fails or plaintext was pipelined after STARTTLS

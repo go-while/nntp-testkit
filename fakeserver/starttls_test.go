@@ -12,7 +12,8 @@ import (
 )
 
 // A client that pipelines bytes after STARTTLS gets the 382 and a closed connection: the
-// server does not read plaintext that was sent before the handshake.
+// server does not read plaintext that was sent before the handshake. (It relies on the server
+// reading both commands in one read, which holds for one small write on loopback.)
 func TestStartTLSPipelinedPlaintext(t *testing.T) {
 	ca := tlscert.NewCA(t)
 	s := New(t, Options{Store: testStore(), StoreOpts: StoreOptions{StartTLS: &StartTLSOptions{Config: ca.Issue(t, tlscert.Options{}).ServerConfig()}}})
@@ -24,6 +25,15 @@ func TestStartTLSPipelinedPlaintext(t *testing.T) {
 	}
 	if s.TLSHandshakes()+s.TLSFailed() != 0 {
 		t.Error("handshake started")
+	}
+}
+
+func TestConnStartTLSNilConfig(t *testing.T) {
+	done := make(chan error, 1)
+	s := New(t, Options{Handler: func(c *Conn) { done <- c.StartTLS(nil) }})
+	client.Dial(t, s.Addr())
+	if err := <-done; err == nil {
+		t.Error("StartTLS(nil) returned no error")
 	}
 }
 

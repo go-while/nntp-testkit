@@ -35,10 +35,12 @@ type StartTLSOptions struct {
 	// the command itself still works as configured.
 	HideCapability bool
 
-	// AuthNeedsTLS makes AUTHINFO before TLS a 483 (RFC 4643 2.2: encryption required), the
-	// commands that need authentication a 483 instead of 480 until TLS is on, and lists
-	// "AUTHINFO" without "USER" in CAPABILITIES while the connection is plain. Over implicit
-	// TLS (Options.TLS) the connection is TLS from the start.
+	// AuthNeedsTLS, with authentication configured (User or Pass), makes AUTHINFO before TLS a
+	// 483 (RFC 4643 2.2: encryption required) and the commands that need authentication a 483
+	// instead of 480 until TLS is on. The Store handler also lists "AUTHINFO" without "USER"
+	// in CAPABILITIES while the connection is plain (PeerHandler lists no AUTHINFO at all).
+	// Over implicit TLS (Options.TLS) the connection is TLS from the start. Without
+	// authentication configured it changes nothing.
 	AuthNeedsTLS bool
 
 	// CloseAfterHandshake > 0: the first N upgrades of the server (counted over all its
@@ -49,8 +51,11 @@ type StartTLSOptions struct {
 
 func (o *StartTLSOptions) on() bool { return o != nil && o.Config != nil }
 
-// needsTLS reports whether AuthNeedsTLS is set and the connection is still plain.
-func (o *StartTLSOptions) needsTLS(c *Conn) bool { return o.on() && o.AuthNeedsTLS && !c.TLS() }
+// needsTLS reports whether AuthNeedsTLS is set, authentication is required (User or Pass is
+// configured) and the connection is still plain.
+func (o *StartTLSOptions) needsTLS(c *Conn, authRequired bool) bool {
+	return o.on() && o.AuthNeedsTLS && authRequired && !c.TLS()
+}
 
 // advertised reports whether CAPABILITIES lists STARTTLS (also when Refuse will refuse it);
 // loggedIn is whether AUTHINFO has succeeded on the connection.
@@ -111,6 +116,8 @@ func (c *Conn) startTLSAfter(o *StartTLSOptions, cmd, status string) (upgraded, 
 // (TLSHandshakes, TLSFailed).
 func (c *Conn) StartTLS(cfg *tls.Config) error {
 	switch {
+	case cfg == nil:
+		return errors.New("fakeserver: StartTLS without a config")
 	case c.TLS():
 		return errors.New("fakeserver: TLS is already active")
 	case c.Compressed():
@@ -142,18 +149,7 @@ func (c *Conn) TLSState() (tls.ConnectionState, bool) {
 // tlsHandshake runs the server side of a handshake on raw with cfg and records it: the server
 // name of every ClientHello, and the success or failure.
 func (s *Server) tlsHandshake(raw net.Conn, cfg *tls.Config) (*tls.Conn, error) {
-	hooked := cfg.Clone()
-	orig := cfg.GetConfigForClient
-	hooked.GetConfigForClient = func(hi *tls.ClientHelloInfo) (*tls.Config, error) {
-		s.mu.Lock()
-		s.tlsNames = append(s.tlsNames, hi.ServerName)
-		s.mu.Unlock()
-		if orig != nil {
-			return orig(hi)
-		}
-		return nil, nil
-	}
-	tc := tls.Server(raw, hooked)
+	tc := tls.Server(raw, s.hookedTLS(cfg))
 	_ = raw.SetDeadline(time.Now().Add(s.deadline))
 	err := tc.Handshake()
 	_ = raw.SetDeadline(time.Time{})
@@ -165,6 +161,33 @@ func (s *Server) tlsHandshake(raw net.Conn, cfg *tls.Config) (*tls.Conn, error) 
 	}
 	s.mu.Unlock()
 	return tc, err
+}
+
+// hookedTLS returns the config the server uses for cfg: a clone that records the server name of
+// every ClientHello. It is made once per cfg, so that its session ticket keys (generated per
+// config) stay the same and clients can resume sessions across connections.
+func (s *Server) hookedTLS(cfg *tls.Config) *tls.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h, ok := s.tlsHooked[cfg]; ok {
+		return h
+	}
+	h := cfg.Clone()
+	orig := cfg.GetConfigForClient
+	h.GetConfigForClient = func(hi *tls.ClientHelloInfo) (*tls.Config, error) {
+		s.mu.Lock()
+		s.tlsNames = append(s.tlsNames, hi.ServerName)
+		s.mu.Unlock()
+		if orig != nil {
+			return orig(hi)
+		}
+		return nil, nil
+	}
+	if s.tlsHooked == nil {
+		s.tlsHooked = make(map[*tls.Config]*tls.Config)
+	}
+	s.tlsHooked[cfg] = h
+	return h
 }
 
 // takeTLSClose reports whether this upgrade is among the first n to be closed at once.

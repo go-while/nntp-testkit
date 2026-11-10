@@ -7,7 +7,7 @@
 //
 // Contract (plan nntp-testkit; implemented in tlscert.go):
 //
-//	type KeyType int // ECDSA (default, P-256), RSA (2048), Ed25519
+//	type KeyType int // ECDSA (default, P-256), RSA (2048), Ed25519 (the server software needs OpenSSL 1.1.1+ / GnuTLS 3.6+)
 //	type CA struct {
 //		Cert    *x509.Certificate
 //		Key     crypto.Signer
@@ -18,8 +18,8 @@
 //		CommonName  string        // default "nntp-testkit"
 //		DNSNames    []string      // SANs; with no IPs too: default {"localhost"}
 //		IPs         []net.IP      // SANs; with no DNSNames too: default 127.0.0.1 and ::1
-//		NotBefore   time.Time     // default now-1h
-//		NotAfter    time.Time     // default now+24h
+//		NotBefore   time.Time     // default now-24h (a remote host's clock may be skewed)
+//		NotAfter    time.Time     // default now+48h
 //		Expired     bool          // NotBefore now-48h, NotAfter now-1h (when the times are not set)
 //		NotYetValid bool          // NotBefore now+1h, NotAfter now+48h (when the times are not set)
 //		KeyType     KeyType
@@ -43,7 +43,8 @@
 //	func (l *Leaf) TLSCertificate() tls.Certificate            // Leaf set: for tls.Config.Certificates
 //	func (l *Leaf) ServerConfig() *tls.Config                  // Certificates = {TLSCertificate()}, TLS 1.2+
 //	func (l *Leaf) ClientConfig(serverName string) *tls.Config // as CA.ClientConfig, trusting the issuer
-//	func (l *Leaf) Write(tb testing.TB, dir string) Files      // dir/cert.pem, key.pem (0600), ca.pem; dir "" = tb.TempDir()
+//	func (l *Leaf) Write(tb testing.TB, dir string) Files      // dir/cert.pem, key.pem (0600), ca.pem, replaced atomically; dir "" = tb.TempDir()
+//	func (l *Leaf) WriteKeyMode(tb testing.TB, dir string, keyMode os.FileMode) Files // Write with another key mode (0640 + chgrp, or 0644, for a server running as another user)
 //
 // A leaf that a test expects to fail verification still carries the issuer's Pool and
 // ClientConfig, so a failure comes from the certificate alone: x509.CertificateInvalidError

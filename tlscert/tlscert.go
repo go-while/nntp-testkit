@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -27,7 +28,7 @@ type KeyType int
 const (
 	ECDSA   KeyType = iota // ECDSA P-256
 	RSA                    // RSA 2048
-	Ed25519                // Ed25519
+	Ed25519                // Ed25519 (the server software needs OpenSSL 1.1.1+ / GnuTLS 3.6+)
 )
 
 // CA is a test certificate authority.
@@ -40,13 +41,14 @@ type CA struct {
 }
 
 // Options are the settings of a leaf certificate; the zero value is a valid ECDSA server
-// certificate for localhost, 127.0.0.1 and ::1, valid from an hour ago for a day.
+// certificate for localhost, 127.0.0.1 and ::1, valid from a day ago for two days (so a remote
+// test host with a skewed clock still accepts it).
 type Options struct {
 	CommonName  string    // default "nntp-testkit"
 	DNSNames    []string  // subject alternative names; with no IPs too: default {"localhost"}
 	IPs         []net.IP  // subject alternative names; with no DNSNames too: default 127.0.0.1 and ::1
-	NotBefore   time.Time // default now-1h
-	NotAfter    time.Time // default now+24h
+	NotBefore   time.Time // default now-24h
+	NotAfter    time.Time // default now+48h
 	Expired     bool      // NotBefore now-48h, NotAfter now-1h, for a time that is not set
 	NotYetValid bool      // NotBefore now+1h, NotAfter now+48h, for a time that is not set
 	KeyType     KeyType
@@ -135,7 +137,7 @@ func (o Options) template() (*x509.Certificate, error) {
 	case o.NotYetValid:
 		nb, na = defTime(nb, now.Add(time.Hour)), defTime(na, now.Add(48*time.Hour))
 	default:
-		nb, na = defTime(nb, now.Add(-time.Hour)), defTime(na, now.Add(24*time.Hour))
+		nb, na = defTime(nb, now.Add(-24*time.Hour)), defTime(na, now.Add(48*time.Hour))
 	}
 	cn := o.CommonName
 	if cn == "" {
@@ -149,12 +151,16 @@ func (o Options) template() (*x509.Certificate, error) {
 	if o.ClientAuth {
 		eku = append(eku, x509.ExtKeyUsageClientAuth)
 	}
+	ku := x509.KeyUsageDigitalSignature
+	if o.KeyType == RSA {
+		ku |= x509.KeyUsageKeyEncipherment // RSA key exchange; EC and Ed25519 keys only sign
+	}
 	return &x509.Certificate{
 		SerialNumber:          sn,
 		Subject:               pkix.Name{CommonName: cn},
 		NotBefore:             nb,
 		NotAfter:              na,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              ku,
 		ExtKeyUsage:           eku,
 		BasicConstraintsValid: true,
 		DNSNames:              dns,
@@ -268,27 +274,43 @@ func (ca *CA) WriteCA(tb testing.TB, dir string) string {
 
 // Write writes dir/cert.pem, dir/key.pem (mode 0600) and dir/ca.pem (the issuer, for servers
 // and clients that read a CA file) and returns the paths; dir "" is tb.TempDir(), a missing dir
-// is created. Errors fail tb.
+// is created. Errors fail tb. Files are replaced atomically (temp file, then rename), so a key
+// is never visible with a wider mode than requested. A server that runs as another user
+// (INN as news) cannot read a 0600 key of the test user: use WriteKeyMode with 0640 and chgrp
+// the file, or 0644 for a throw-away test directory.
 func (l *Leaf) Write(tb testing.TB, dir string) Files {
+	tb.Helper()
+	return l.WriteKeyMode(tb, dir, 0o600)
+}
+
+// WriteKeyMode is Write with another mode for key.pem (cert.pem and ca.pem stay 0644).
+func (l *Leaf) WriteKeyMode(tb testing.TB, dir string, keyMode os.FileMode) Files {
 	tb.Helper()
 	dir = dirOr(tb, dir)
 	f := Files{Cert: filepath.Join(dir, "cert.pem"), Key: filepath.Join(dir, "key.pem"), CA: filepath.Join(dir, "ca.pem")}
 	write(tb, f.Cert, l.CertPEM, 0o644)
-	write(tb, f.Key, l.KeyPEM, 0o600)
+	write(tb, f.Key, l.KeyPEM, keyMode)
 	write(tb, f.CA, l.CAPEM, 0o644)
 	return f
 }
 
-// write creates or truncates path with mode perm (also when the file existed with another mode).
+// write replaces path with a file of mode perm: it writes a 0600 temp file in the same
+// directory, sets the mode and renames it over path, so a rewrite never exposes the new content
+// with the old, wider mode (or the umask's).
 func write(tb testing.TB, path string, data []byte, perm os.FileMode) {
 	tb.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		tb.Fatalf("tlscert: %v", err)
 	}
-	if err := os.WriteFile(path, data, perm); err != nil {
+	f, err := os.CreateTemp(dir, ".tlscert-*")
+	if err != nil {
 		tb.Fatalf("tlscert: %v", err)
 	}
-	if err := os.Chmod(path, perm); err != nil { // WriteFile keeps the mode of an existing file; umask
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if err := errors.Join(werr, cerr, os.Chmod(f.Name(), perm), os.Rename(f.Name(), path)); err != nil {
+		_ = os.Remove(f.Name())
 		tb.Fatalf("tlscert: %v", err)
 	}
 }
