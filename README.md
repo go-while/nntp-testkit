@@ -127,6 +127,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
 | `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
+| `(*Conn) Wait(ch <-chan struct{}) bool`, `Sleep(d) bool` | for a Handler or `PeerOptions.BeforeReply`: block until `ch` fires (true) or the Deadline passes / the server closes (false); `Sleep` is bounded the same way |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
 | `Article`, `ByMessageID`, `Group`, `Groups`, `Numbers`, `Overview`, `Next`, `Last` | lookups |
@@ -137,6 +138,23 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model; `Article.Arrived` is the arrival time NEWNEWS uses (`AddArticle` sets a zero one to now) |
 | `StoreHandler(*Store, StoreOptions) func(*Conn)`; `type StoreOptions` | RFC 3977 reader over a Store; options below |
 | `DefaultGreeting`, `DefaultGreetingNoPost`, `DateLayout` | constants |
+
+`PeerOptions` knobs for peers that hold, slow, cut or answer oddly (all keep `Counts`, `Accepted`,
+`MaxOpen`, `Have` and `OnArticle`, are bounded by `Options.Deadline` and end on `Close`):
+
+| field | effect |
+|---|---|
+| `HoldGreeting <-chan struct{}` | the greeting waits until the channel is closed (or delivers a value, releasing one connection); the connection counts as open meanwhile, so a test can assert `MaxOpen <= K`. Needs `Options.NoGreeting: true` (the peer writes `Options.Greeting` itself); a hold past the Deadline or `Close` drops the connection |
+| `GreetingDelay time.Duration` | wait before the greeting (after `HoldGreeting`), capped at the Deadline; needs `NoGreeting` |
+| `BeforeReply func(c *Conn, cmd, line, status string)` | runs before every reply is written (IHAVE: before the 335 and before the final one) and may block, e.g. `c.Wait(release)`: hold a reply at a known point. A reply held when the server closes is not sent |
+| `CapabilitiesReply []string` | the whole answer to CAPABILITIES, e.g. `{"500 What?"}` |
+| `ModeStreamReply []string` | the answer to MODE STREAM, e.g. `{"203 StreamOK."}` (Diablo's feeder, with `CapabilitiesReply`) or `{"501 ..."}`; CHECK and TAKETHIS keep working (unlike `NoStream`) |
+| `DropAfterChecks int`, `DropReply string` | per connection, the CHECK after the first N gets `DropReply` (default `400 Service temporarily unavailable`) and the connection closes |
+| `SilentAfterModeStream bool` | answer MODE STREAM, then read and record lines but never answer, until the client closes, `Close` or the Deadline |
+
+`Options.Faults` apply to `PeerHandler` as to a `LineHandler` (Delay, Override, OverrideLine,
+CloseAfter, Drip, ...): `OverrideLine: {"MODE STREAM": {"203 StreamOK."}}` is the same as
+`ModeStreamReply`. For IHAVE they apply to the 335 only, as to POST's 340.
 
 Three modes, chosen per server:
 

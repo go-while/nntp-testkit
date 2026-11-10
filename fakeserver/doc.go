@@ -16,8 +16,8 @@
 //		Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 //		Store      *Store        // stateful mode: StoreHandler(Store, StoreOptions) when Handler is nil
 //		StoreOpts  StoreOptions
-//		Faults     Faults        // apply in Script and Store mode and to a LineHandler (copied at start); another Handler cannot use them
-//		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream; server-side reads have no deadline; 0 = testkit.Deadline()
+//		Faults     Faults        // apply in Script and Store mode, to a LineHandler and to PeerHandler (copied at start); another Handler cannot use them
+//		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream, GreetingDelay, HoldGreeting; server-side reads have no deadline; 0 = testkit.Deadline()
 //		MaxConns         int    // >0: one more simultaneous connection gets MaxConnsGreeting and is closed (counts in Accepted, never in Open)
 //		MaxConnsGreeting string // default "502 Too many connections"
 //	}
@@ -73,9 +73,24 @@
 //		OnArticle       func(msgID string, wire []string) // before the 239/235 reply
 //		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
 //		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
+//		HoldGreeting       <-chan struct{} // greeting waits for close/receive; needs Options.NoGreeting; bounded by Deadline, dropped on Close; the conn counts as open
+//		GreetingDelay      time.Duration   // sleep before the greeting (after HoldGreeting), capped at Deadline; needs Options.NoGreeting
+//		BeforeReply        func(c *Conn, cmd, line, status string) // before every reply (IHAVE: 335 and the final one); may block, e.g. c.Wait(ch)
+//		CapabilitiesReply  []string        // non-nil: the whole answer to CAPABILITIES, e.g. {"500 What?"} (Diablo's feeder)
+//		ModeStreamReply    []string        // non-nil: the answer to MODE STREAM, e.g. {"203 StreamOK."} or {"501 ..."}; wins over NoStream's 501
+//		DropAfterChecks    int             // >0: per connection, the CHECK after this many gets DropReply and the connection closes
+//		DropReply          string          // default "400 Service temporarily unavailable"
+//		SilentAfterModeStream bool         // answer MODE STREAM, then read and record but never answer, until client close, Close or Deadline
 //	}
+//	func (c *Conn) Wait(ch <-chan struct{}) bool // true: ch fired; false: Deadline passed or server closed
+//	func (c *Conn) Sleep(d time.Duration) bool   // false: server closed; d capped at Deadline
 //	func LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn) // f answers each client line, in any order; Faults apply as in Script mode
 //	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING, COMPRESS DEFLATE), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, COMPRESS, QUIT; else 500
+//	// Faults apply to PeerHandler as to a LineHandler (also CloseAfter); for IHAVE they apply
+//	// to the 335 only (as to POST's 340): an overridden first reply that is not a 335 is
+//	// final and no article is read; the final 235/437 is written as it is (BeforeReply can
+//	// hold it). BeforeReply runs before the Faults. HoldGreeting/GreetingDelay: the handler
+//	// writes Options.Greeting itself, so Options.NoGreeting must be set.
 //	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
 //	// Defer436Once; else 335, the article (dot block), then 437 (Reject, or held meanwhile) or
 //	// 235 (added to Have, OnArticle).
