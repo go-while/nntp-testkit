@@ -71,34 +71,36 @@ func TestTransferReplies(t *testing.T) {
 	})
 	c := Dial(t, s.Addr())
 	a := []byte(art)
-	type result struct {
-		code int
-		line string
-	}
+	// wrap3 adds the sent result (false) to the single-step commands
+	wrap3 := func(code int, line string, err error) (int, string, bool, error) { return code, line, false, err }
 	for _, tc := range []struct {
 		name string
-		do   func() (int, string, error)
+		do   func() (int, string, bool, error)
 		want int
+		sent bool // the article went out (final reply) or not (first reply)
 	}{
-		{"ihave new", func() (int, string, error) { return c.TryIhave("<new@t>", a) }, 235},
-		{"ihave have", func() (int, string, error) { return c.TryIhave("<have@t>", a) }, 435},
-		{"ihave again (now held)", func() (int, string, error) { return c.TryIhave("<new@t>", a) }, 435},
-		{"ihave reject", func() (int, string, error) { return c.TryIhave("<rej@t>", a) }, 437},
-		{"ihave defer", func() (int, string, error) { return c.TryIhave("<d436@t>", a) }, 436},
-		{"ihave defer then ok", func() (int, string, error) { return c.TryIhave("<d436@t>", a) }, 235},
-		{"ihave bad id", func() (int, string, error) { return c.TryIhave("nonsense", a) }, 435},
-		{"check wanted", func() (int, string, error) { return c.TryCheck("<c@t>") }, 238},
-		{"check have", func() (int, string, error) { return c.TryCheck("<have@t>") }, 438},
-		{"check defer", func() (int, string, error) { return c.TryCheck("<d431@t>") }, 431},
-		{"takethis ok", func() (int, string, error) { return c.TryTakethis("<tk@t>", a) }, 239},
-		{"takethis dup", func() (int, string, error) { return c.TryTakethis("<tk@t>", a) }, 439},
-		{"takethis reject", func() (int, string, error) { return c.TryTakethis("<rej@t>", a) }, 439},
-		{"mode stream", func() (int, string, error) { return c.TryModeStream() }, 203},
-		{"post unknown", func() (int, string, error) { return c.TryPost(a) }, 500},
+		{"ihave new", func() (int, string, bool, error) { return c.TryIhave("<new@t>", a) }, 235, true},
+		{"ihave have", func() (int, string, bool, error) { return c.TryIhave("<have@t>", a) }, 435, false},
+		{"ihave again (now held)", func() (int, string, bool, error) { return c.TryIhave("<new@t>", a) }, 435, false},
+		{"ihave reject", func() (int, string, bool, error) { return c.TryIhave("<rej@t>", a) }, 437, true},
+		{"ihave defer", func() (int, string, bool, error) { return c.TryIhave("<d436@t>", a) }, 436, false},
+		{"ihave defer then ok", func() (int, string, bool, error) { return c.TryIhave("<d436@t>", a) }, 235, true},
+		{"ihave bad id", func() (int, string, bool, error) { return c.TryIhave("nonsense", a) }, 435, false},
+		{"check wanted", func() (int, string, bool, error) { return wrap3(c.TryCheck("<c@t>")) }, 238, false},
+		{"check have", func() (int, string, bool, error) { return wrap3(c.TryCheck("<have@t>")) }, 438, false},
+		{"check defer", func() (int, string, bool, error) { return wrap3(c.TryCheck("<d431@t>")) }, 431, false},
+		{"takethis ok", func() (int, string, bool, error) { return c.TryTakethis("<tk@t>", a) }, 239, true},
+		{"takethis dup", func() (int, string, bool, error) { return c.TryTakethis("<tk@t>", a) }, 439, true},
+		{"takethis reject", func() (int, string, bool, error) { return c.TryTakethis("<rej@t>", a) }, 439, true},
+		{"mode stream", func() (int, string, bool, error) { return wrap3(c.TryModeStream()) }, 203, false},
+		{"post unknown", func() (int, string, bool, error) { return c.TryPost(a) }, 500, false},
 	} {
-		code, line, err := tc.do()
+		code, line, sent, err := tc.do()
 		if err != nil || code != tc.want {
 			t.Errorf("%s: %d %q err %v, want %d", tc.name, code, line, err, tc.want)
+		}
+		if sent != tc.sent {
+			t.Errorf("%s: sent = %v, want %v", tc.name, sent, tc.sent)
 		}
 	}
 	// the connection is still in sync after all of that
@@ -116,10 +118,10 @@ func TestTransferReplies(t *testing.T) {
 func TestLogin(t *testing.T) {
 	s := peerServer(t, &fakeserver.PeerOptions{User: "u", Pass: "p"})
 	c := Dial(t, s.Addr())
-	if code, line, err := c.TryIhave("<a@t>", []byte(art)); err != nil || code != 480 {
+	if code, line, _, err := c.TryIhave("<a@t>", []byte(art)); err != nil || code != 480 {
 		t.Errorf("IHAVE before login: %d %q %v, want 480", code, line, err)
 	}
-	if code, line, err := c.TryTakethis("<a@t>", []byte(art)); err != nil || code != 480 {
+	if code, line, _, err := c.TryTakethis("<a@t>", []byte(art)); err != nil || code != 480 {
 		t.Errorf("TAKETHIS before login: %d %q %v, want 480", code, line, err)
 	}
 	if code, _, err := c.TryLogin("u", "wrong"); err != nil || code != 481 {
@@ -134,7 +136,7 @@ func TestLogin(t *testing.T) {
 	if code, _, err := c.TryLogin("u", "p"); err != nil || code != 502 {
 		t.Errorf("second login: %d %v, want 502", code, err)
 	}
-	if code, _ := c.Ihave("<a@t>", []byte(art)); code != 235 {
+	if code, _, _ := c.Ihave("<a@t>", []byte(art)); code != 235 {
 		t.Errorf("IHAVE after login: %d, want 235", code)
 	}
 }
@@ -144,12 +146,12 @@ func TestPostStore(t *testing.T) {
 	st.AddGroup("test.group", "t")
 	s := fakeserver.New(t, fakeserver.Options{Store: st})
 	c := Dial(t, s.Addr())
-	code, line := c.Post([]byte(art + ".dotted\r\n"))
+	code, line, _ := c.Post([]byte(art + ".dotted\r\n"))
 	if code != 240 {
 		t.Fatalf("POST: %d %q", code, line)
 	}
 	// a refusal (441: no Newsgroups) is a result, not a failure
-	code, line, err := c.TryPost([]byte("Subject: s\r\n\r\nx\r\n"))
+	code, line, _, err := c.TryPost([]byte("Subject: s\r\n\r\nx\r\n"))
 	if err != nil || code != 441 {
 		t.Errorf("POST without Newsgroups: %d %q %v, want 441", code, line, err)
 	}
@@ -161,7 +163,7 @@ func TestPostStore(t *testing.T) {
 	// posting not allowed: the first reply is the result
 	ro := fakeserver.New(t, fakeserver.Options{Store: st, StoreOpts: fakeserver.StoreOptions{ReaderOnly: true}})
 	c2 := Dial(t, ro.Addr())
-	if code, line := c2.Post([]byte(art)); code != 440 {
+	if code, line, _ := c2.Post([]byte(art)); code != 440 {
 		t.Errorf("POST on a read-only server: %d %q, want 440", code, line)
 	}
 	if code, line := c2.Cmd("DATE"); code != 111 {
@@ -187,11 +189,143 @@ func TestTransferLineHandlerOdd(t *testing.T) {
 		return nil, false // article lines
 	})})
 	c := Dial(t, s.Addr())
-	if code, _, err := c.TryPost([]byte(art)); err != nil || code != 480 {
+	if code, _, _, err := c.TryPost([]byte(art)); err != nil || code != 480 {
 		t.Errorf("POST: %d %v, want 480", code, err)
 	}
-	if code, line, err := c.TryPost([]byte(art)); err != nil || code != 436 {
+	if code, line, _, err := c.TryPost([]byte(art)); err != nil || code != 436 {
 		t.Errorf("POST: %d %q %v, want 436", code, line, err)
+	}
+}
+
+// stagedServer answers IHAVE and POST as a server that refuses with 436 at the stage the test
+// picks: the first stage (before any article) or the second (after the article).
+func stagedServer(t *testing.T, late bool) *fakeserver.Server {
+	t.Helper()
+	return fakeserver.New(t, fakeserver.Options{Handler: fakeserver.LineHandler(func(c *fakeserver.Conn, line string) ([]string, bool) {
+		switch {
+		case line == "POST" || strings.HasPrefix(line, "IHAVE "):
+			if late {
+				return []string{"335 go"}, false
+			}
+			return []string{"436 try later"}, false
+		case line == ".":
+			return []string{"436 try later"}, false
+		case strings.HasPrefix(line, "TAKETHIS "):
+			return nil, false
+		}
+		return nil, false // article lines
+	})})
+}
+
+func TestTransferSent(t *testing.T) {
+	a := []byte(art)
+	for _, late := range []bool{false, true} {
+		s := stagedServer(t, late)
+		c := Dial(t, s.Addr())
+		code, line, sent, err := c.TryIhave("<a@t>", a)
+		if err != nil || code != 436 || sent != late {
+			t.Errorf("late=%v IHAVE: %d %q sent=%v err=%v, want 436 sent=%v", late, code, line, sent, err, late)
+		}
+		// the plain form says the same
+		if code, _, sent := c.Ihave("<a@t>", a); code != 436 || sent != late {
+			t.Errorf("late=%v Ihave: %d sent=%v", late, code, sent)
+		}
+	}
+	// POST: 340 then the final reply says sent; a first-stage refusal does not
+	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.LineHandler(func(c *fakeserver.Conn, line string) ([]string, bool) {
+		switch line {
+		case "POST":
+			return []string{"340 go"}, false
+		case ".":
+			return []string{"441 no"}, false
+		}
+		return nil, false
+	})})
+	c := Dial(t, s.Addr())
+	if code, _, sent, err := c.TryPost(a); err != nil || code != 441 || !sent {
+		t.Errorf("POST: %d sent=%v err=%v, want 441 sent", code, sent, err)
+	}
+	ro := fakeserver.New(t, fakeserver.Options{Store: fakeserver.NewStore(), StoreOpts: fakeserver.StoreOptions{ReaderOnly: true}})
+	c2 := Dial(t, ro.Addr())
+	if code, _, sent, err := c2.TryPost(a); err != nil || code != 440 || sent {
+		t.Errorf("POST read-only: %d sent=%v err=%v, want 440 not sent", code, sent, err)
+	}
+	// TAKETHIS always sends
+	ps := peerServer(t, &fakeserver.PeerOptions{})
+	c3 := Dial(t, ps.Addr())
+	if code, _, sent, err := c3.TryTakethis("<t@t>", a); err != nil || code != 239 || !sent {
+		t.Errorf("TAKETHIS: %d sent=%v err=%v", code, sent, err)
+	}
+	if code, _, sent := c3.Takethis("<t@t>", a); code != 439 || !sent {
+		t.Errorf("Takethis dup: %d sent=%v", code, sent)
+	}
+}
+
+func TestExpectTransfer(t *testing.T) {
+	a := []byte(art)
+	fails := func(t *testing.T, name string, c *Conn, fn func(c *Conn), frag string) {
+		t.Helper()
+		rec := &recordTB{TB: t}
+		rec.run(func(tb testing.TB) { fn(c.For(tb)) })
+		if !rec.failed || !strings.Contains(rec.msg, frag) {
+			t.Errorf("%s: failed=%v msg %q, want a failure with %q", name, rec.failed, rec.msg, frag)
+		}
+	}
+	// IHAVE 436 after the transfer: passes; the same 436 before it: fails
+	late := Dial(t, stagedServer(t, true).Addr())
+	if line := late.ExpectIhave(436, "<a@t>", a); line != "436 try later" {
+		t.Errorf("ExpectIhave line %q", line)
+	}
+	fails(t, "wrong code", late, func(c *Conn) { c.ExpectIhave(437, "<a@t>", a) }, "want 437")
+	early := Dial(t, stagedServer(t, false).Addr())
+	fails(t, "436 before the transfer", early, func(c *Conn) { c.ExpectIhave(436, "<a@t>", a) }, "refused before the article was sent")
+	// the early refusal is still expected with ExpectCmd
+	early.ExpectCmd(436, "IHAVE <a@t>")
+
+	// POST: 240 on a store, 440 on a read-only one fails
+	st := fakeserver.NewStore()
+	st.AddGroup("test.group", "t")
+	c := Dial(t, fakeserver.New(t, fakeserver.Options{Store: st}).Addr())
+	if line := c.ExpectPost(240, a); !strings.HasPrefix(line, "240") {
+		t.Errorf("ExpectPost line %q", line)
+	}
+	if line := c.ExpectPost(441, []byte("Subject: s\r\n\r\nx\r\n")); !strings.HasPrefix(line, "441") {
+		t.Errorf("ExpectPost 441 line %q", line)
+	}
+	ro := Dial(t, fakeserver.New(t, fakeserver.Options{Store: st, StoreOpts: fakeserver.StoreOptions{ReaderOnly: true}}).Addr())
+	fails(t, "POST 440", ro, func(c *Conn) { c.ExpectPost(441, a) }, "refused before the article was sent")
+
+	// TAKETHIS
+	pc := Dial(t, peerServer(t, &fakeserver.PeerOptions{Reject: map[string]bool{"<r@t>": true}}).Addr())
+	if line := pc.ExpectTakethis(239, "<ok@t>", a); line != "239 <ok@t>" {
+		t.Errorf("ExpectTakethis line %q", line)
+	}
+	pc.ExpectTakethis(439, "<r@t>", a)
+	fails(t, "takethis code", pc, func(c *Conn) { c.ExpectTakethis(239, "<r@t>", a) }, "want 239")
+
+	// an I/O error fails tb too
+	dead := Dial(t, peerServer(t, &fakeserver.PeerOptions{}).Addr())
+	dead.Close()
+	fails(t, "closed", dead, func(c *Conn) { c.ExpectPost(240, a) }, "POST")
+}
+
+func TestSendBytes(t *testing.T) {
+	rs := newRawServer(t)
+	c := Dial(t, rs.addr())
+	if err := c.SendBytes([]byte("DATE\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	c.ExpectStatus(500, "DATE")
+	c.MustSendBytes([]byte("POST\r\n"))
+	c.ExpectStatus(340, "POST")
+	c.MustSendBytes(StuffBytes([]byte("a\r\n.b\r\n")))
+	c.ExpectStatus(240, "article")
+	closed := Dial(t, peerServer(t, &fakeserver.PeerOptions{}).Addr())
+	closed.Close()
+	rec := &recordTB{TB: t}
+	rec.run(func(tb testing.TB) { closed.For(tb).MustSendBytes([]byte("x")) })
+	if !rec.failed {
+		t.Errorf("MustSendBytes on a closed conn did not fail tb")
 	}
 }
 
@@ -254,13 +388,13 @@ func TestArticleBytesSurvive(t *testing.T) {
 	rs := newRawServer(t)
 	c := Dial(t, rs.addr())
 	a := []byte(article)
-	if code, _, err := c.TryPost(a); err != nil || code != 240 {
+	if code, _, _, err := c.TryPost(a); err != nil || code != 240 {
 		t.Fatalf("POST: %d %v", code, err)
 	}
-	if code, _, err := c.TryIhave("<i@t>", a); err != nil || code != 235 {
+	if code, _, _, err := c.TryIhave("<i@t>", a); err != nil || code != 235 {
 		t.Fatalf("IHAVE: %d %v", code, err)
 	}
-	if code, line, err := c.TryTakethis("<t@t>", a); err != nil || code != 239 || line != "239 <t@t>" {
+	if code, line, _, err := c.TryTakethis("<t@t>", a); err != nil || code != 239 || line != "239 <t@t>" {
 		t.Fatalf("TAKETHIS: %d %q %v", code, line, err)
 	}
 	if string(a) != article {
@@ -285,7 +419,7 @@ func TestTakethisSendsWithoutWaiting(t *testing.T) {
 	// for a reply between them (a 335-like step does not exist).
 	rs := newRawServer(t)
 	c := Dial(t, rs.addr())
-	code, line := c.Takethis("<w@t>", []byte("a\r\n"))
+	code, line, _ := c.Takethis("<w@t>", []byte("a\r\n"))
 	if code != 239 || line != "239 <w@t>" {
 		t.Errorf("%d %q", code, line)
 	}
@@ -317,7 +451,7 @@ func TestPlainVariantsFailOnIOError(t *testing.T) {
 		return []string{"what is this"}, false
 	})})
 	c2 := Dial(t, bad.Addr())
-	if _, _, err := c2.TryPost([]byte(art)); err == nil {
+	if _, _, _, err := c2.TryPost([]byte(art)); err == nil {
 		t.Errorf("TryPost: no error for a garbage reply")
 	}
 	rec := &recordTB{TB: t}

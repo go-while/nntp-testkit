@@ -287,21 +287,22 @@ type Server struct {
 	wg        sync.WaitGroup
 	closeOnce sync.Once
 
-	mu         sync.Mutex
-	closed     bool
-	conns      map[net.Conn]struct{}
-	lines      []string
-	articles   [][]string
-	mismatches []string
-	counts     map[string]int
-	accepted   int
-	open       int
-	maxOpen    int                         // the most connections open at once (Open's peak)
-	tlsNames   []string                    // SNI of every ClientHello (TLSServerNames)
-	tlsOK      int                         // completed TLS handshakes
-	tlsFailed  int                         // failed TLS handshakes
-	tlsHooked  map[*tls.Config]*tls.Config // hookedTLS cache
-	tlsClosed  int                         // STARTTLS upgrades closed at once (StartTLSOptions.CloseAfterHandshake)
+	mu          sync.Mutex
+	closed      bool
+	conns       map[net.Conn]struct{}
+	lines       []string
+	articles    [][]string
+	articlesRaw [][]byte
+	mismatches  []string
+	counts      map[string]int
+	accepted    int
+	open        int
+	maxOpen     int                         // the most connections open at once (Open's peak)
+	tlsNames    []string                    // SNI of every ClientHello (TLSServerNames)
+	tlsOK       int                         // completed TLS handshakes
+	tlsFailed   int                         // failed TLS handshakes
+	tlsHooked   map[*tls.Config]*tls.Config // hookedTLS cache
+	tlsClosed   int                         // STARTTLS upgrades closed at once (StartTLSOptions.CloseAfterHandshake)
 }
 
 // New listens on o.Addr, serves every connection in its own goroutine and registers
@@ -319,6 +320,47 @@ func New(tb testing.TB, o Options) *Server {
 // Start is New without a testing dependency (for a CLI): the caller calls Close.
 func Start(o Options) (*Server, error) {
 	return start(nil, o)
+}
+
+// peerOptions returns o as a peer server needs it: Handler = PeerHandler(po), and NoGreeting
+// set when po holds or delays the greeting (HoldGreeting, GreetingDelay), because the handler
+// then writes Options.Greeting itself. po nil means &PeerOptions{}. A Handler already in o is
+// an error: the peer is the handler.
+func peerOptions(o Options, po *PeerOptions) (Options, error) {
+	if o.Handler != nil {
+		return o, fmt.Errorf("NewPeer/StartPeer: Options.Handler is set, the peer is the handler")
+	}
+	if po == nil {
+		po = &PeerOptions{}
+	}
+	o.Handler = PeerHandler(po)
+	if po.HoldGreeting != nil || po.GreetingDelay > 0 {
+		o.NoGreeting = true
+	}
+	return o, nil
+}
+
+// NewPeer is New for a transit peer: it sets Options.Handler to PeerHandler(po) and, when po
+// has HoldGreeting or GreetingDelay, Options.NoGreeting too (the handler writes the greeting
+// itself then), so the two cannot be set apart by mistake. po nil means &PeerOptions{}. An
+// o.Handler already set fails tb. Everything else of o (Greeting, TLS, Faults, Deadline,
+// MaxConns ...) applies as for New.
+func NewPeer(tb testing.TB, o Options, po *PeerOptions) *Server {
+	tb.Helper()
+	o, err := peerOptions(o, po)
+	if err != nil {
+		tb.Fatalf("fakeserver: %v", err)
+	}
+	return New(tb, o)
+}
+
+// StartPeer is NewPeer without a testing dependency (for a CLI): the caller calls Close.
+func StartPeer(o Options, po *PeerOptions) (*Server, error) {
+	o, err := peerOptions(o, po)
+	if err != nil {
+		return nil, err
+	}
+	return Start(o)
 }
 
 // start listens and starts the accept loop; tb (nil for Start) is kept for Close's report.
@@ -550,6 +592,21 @@ func (s *Server) Articles() [][]string {
 	out := make([][]string, len(s.articles))
 	for i, a := range s.articles {
 		out[i] = append([]string{}, a...)
+	}
+	return out
+}
+
+// ArticlesRaw returns every dot block as the client wrote it, in the order of Articles(): the
+// exact bytes between the command and the "." terminator line, still dot-stuffed, CRLF (or
+// whatever line end the client sent) and every other byte intact, so a test can check the feed
+// byte for byte; article.ParseDotBlock takes an element as it is (it un-stuffs, nothing else).
+// An empty block gives an empty, non-nil slice.
+func (s *Server) ArticlesRaw() [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][]byte, len(s.articlesRaw))
+	for i, a := range s.articlesRaw {
+		out[i] = append([]byte{}, a...)
 	}
 	return out
 }

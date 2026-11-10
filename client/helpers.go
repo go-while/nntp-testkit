@@ -47,6 +47,70 @@ func (c *Conn) MustSend(raw string) {
 	}
 }
 
+// MustSendBytes is SendBytes that fails tb on a write error: raw bytes, nothing appended (e.g.
+// StuffBytes(article) after a 340 or 335).
+func (c *Conn) MustSendBytes(raw []byte) {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	if err := c.SendBytes(raw); err != nil {
+		c.fatalf("send %d bytes: %v", len(raw), err)
+	}
+}
+
+// expectTransfer is the end of ExpectPost, ExpectIhave and ExpectTakethis: fail tb unless the
+// article was sent and the final reply is want.
+func (c *Conn) expectTransfer(cmd string, want int, code int, line string, sent bool, err error) string {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	if err != nil {
+		c.fatalf("%s: %v (last reply %d %q)", cmd, err, code, line)
+	}
+	if !sent {
+		c.fatalf("%s: refused before the article was sent: %q, want %d after the transfer", cmd, line, want)
+	}
+	if code != want {
+		c.fatalf("%s: got %q after the transfer, want %d", cmd, line, want)
+	}
+	return line
+}
+
+// ExpectPost is TryPost that fails tb unless the server took the article (340) and the final
+// reply is want (240, 441 ...); it returns that final line. A server that refuses POST itself
+// (440, 480 ...) fails the test, also when want would match that code (436): use ExpectCmd
+// for "POST" to expect a refusal before the transfer. An I/O, parse or strict error fails tb.
+func (c *Conn) ExpectPost(want int, article []byte) string {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	code, line, sent, err := c.TryPost(article)
+	return c.expectTransfer("POST", want, code, line, sent, err)
+}
+
+// ExpectIhave is TryIhave that fails tb unless the server took the article (335) and the final
+// reply is want (235, 436, 437); it returns that final line. A refusal before the transfer
+// (435, 436, 480 ...) fails the test, so a 436 that comes after the article is told from one
+// that comes before it. Use ExpectCmd for "IHAVE <id>" to expect the early refusal.
+func (c *Conn) ExpectIhave(want int, id string, article []byte) string {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	code, line, sent, err := c.TryIhave(id, article)
+	return c.expectTransfer("IHAVE "+id, want, code, line, sent, err)
+}
+
+// ExpectTakethis is TryTakethis that fails tb unless the reply is want (239, 439 ...); it
+// returns the line. The article is always sent; the form exists so that the three transfer
+// commands have the same Expect shape.
+func (c *Conn) ExpectTakethis(want int, id string, article []byte) string {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	code, line, sent, err := c.TryTakethis(id, article)
+	return c.expectTransfer("TAKETHIS "+id, want, code, line, sent, err)
+}
+
 // Capabilities sends CAPABILITIES, fails tb unless the reply is 101 with a dot block that
 // ParseCapabilities accepts, and returns the capabilities by keyword and the lines in order.
 func (c *Conn) Capabilities() (caps map[string][]string, lines []string) {

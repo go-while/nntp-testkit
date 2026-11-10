@@ -87,24 +87,37 @@ func (c *Conn) WriteLines(lines ...string) error {
 }
 
 // ReadDotBlock reads lines until "." and records them (still dot-stuffed, without the
-// terminator) in Articles(). The lines are neither recorded in Lines() nor counted. A cut-off
-// block is not recorded.
+// terminator) in Articles(), and the exact bytes in ArticlesRaw(). The lines are neither
+// recorded in Lines() nor counted. A cut-off block is not recorded.
 func (c *Conn) ReadDotBlock() ([]string, error) {
+	block, _, err := c.ReadDotBlockRaw()
+	return block, err
+}
+
+// ReadDotBlockRaw is ReadDotBlock that also returns the block as the client wrote it: the
+// exact bytes after the command up to, not including, the "." terminator line, still
+// dot-stuffed, every line end (CRLF, or a bare LF) and every other byte as sent; empty (not
+// nil) for an empty block. article.ParseDotBlock takes it. The same bytes are recorded in
+// ArticlesRaw().
+func (c *Conn) ReadDotBlockRaw() ([]string, []byte, error) {
 	block := []string{}
+	raw := []byte{}
 	for {
-		line, err := c.readRaw()
+		line, wire, err := c.readRawLine()
 		if err != nil {
-			return block, err
+			return block, raw, err
 		}
 		if line == "." {
 			break
 		}
 		block = append(block, line)
+		raw = append(raw, wire...)
 	}
 	c.s.mu.Lock()
 	c.s.articles = append(c.s.articles, append([]string{}, block...))
+	c.s.articlesRaw = append(c.s.articlesRaw, append([]byte{}, raw...))
 	c.s.mu.Unlock()
-	return block, nil
+	return block, raw, nil
 }
 
 // Raw returns the connection the server reads and writes (the TLS conn when TLS is set;
@@ -117,13 +130,19 @@ func (c *Conn) Server() *Server { return c.s }
 // readRaw reads one line without recording it; a read error counts the conn out of Open().
 // There is no read deadline: Close unblocks it (a TLS handshake is bounded by the server's Deadline).
 func (c *Conn) readRaw() (string, error) {
-	line, err := c.r.ReadString('\n')
+	line, _, err := c.readRawLine()
+	return line, err
+}
+
+// readRawLine is readRaw that also returns the line with its line end as it arrived.
+func (c *Conn) readRawLine() (line, wire string, err error) {
+	wire, err = c.r.ReadString('\n')
 	if err != nil {
 		c.markGone()
-		return "", err
+		return "", "", err
 	}
-	line = strings.TrimSuffix(line, "\n")
-	return strings.TrimSuffix(line, "\r"), nil
+	line = strings.TrimSuffix(wire, "\n")
+	return strings.TrimSuffix(line, "\r"), wire, nil
 }
 
 // drain reads and records lines until EOF/error.
