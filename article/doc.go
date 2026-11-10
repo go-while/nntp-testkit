@@ -18,7 +18,8 @@
 //		Raw string // the field as written, without its final line end; folds (line break + space/tab) inside it are part of it
 //		EOL string // written after Raw: "" = CRLF, "\n" = bare LF, NoEOL = nothing, anything else as is
 //	}
-//	func (f Field) Name() string      // text before the first colon, as written; "" when there is no colon
+//	func (f Field) Name() string      // the naive text before the first colon, as written; "" when there is no colon
+//	func (f Field) ValidName() bool   // Name is an RFC 5322 field name: not empty, only printable US-ASCII (33..126)
 //	func (f Field) HasColon() bool
 //	func (f Field) Value() string     // unfolded, spaces and tabs trimmed; the whole Raw when there is no colon
 //	const NoEOL = "\x00none\x00"      // sentinel: write no line end
@@ -55,7 +56,9 @@
 //		Body []string
 //		Approved string   // an Approved header after Date when set
 //		Extra    []string // more header lines after Date, each written raw
+//		Omit     []string // generated headers to leave out (case-insensitive names)
 //	}
+//	func NewArticle(o Options) (*Article, error)           // New without testing; error when Subject or MessageID is empty and not in Omit
 //	func New(tb testing.TB, o Options) *Article            // minimal valid article
 //	func Minimal(tb testing.TB, group string) *Article     // New with the group set
 //	const DefaultGroup, DefaultPathHost, DefaultFrom, DateLayout
@@ -64,7 +67,15 @@
 // (RFC 5536 section 3, UTC, to the second) in that order, CRLF line ends, the empty line and a
 // short body (Options.Body lines, each plus CRLF); Approved and Extra fields follow Date. Every zero Options field takes its default
 // (group "test", subject "test article <sanitized test name>", a generated Message-ID, now).
-// tb is used for its name only.
+// tb is used for its name only (the default Subject and Message-ID). Omit leaves generated
+// headers out: a newsreader's POST has no Path, Date or Message-ID (the server adds them), so
+// New(t, Options{Omit: []string{"Path", "Date", "Message-ID"}}) is one; an omitted Message-ID is
+// not generated. Omit is one list instead of a NewPost because the same mechanism also builds
+// the "missing header" cases a test needs (no From, no Subject). NewArticle exists for code
+// without a testing.TB: it derives nothing from a test name, so it wants Subject and MessageID
+// (or their Omit) and returns an error otherwise. Name() and ValidName() of a Field: Name is the
+// naive text before the first colon, so an mbox line "From nobody Thu Dec  8 12:55:04 2016" has
+// the name "From nobody Thu Dec  8 12"; ValidName is false for it.
 //
 // Editing and reading (all lookups compare names case-insensitively, ASCII only, against the
 // name exactly as written before the colon, without trimming):
@@ -74,6 +85,8 @@
 //	func (a *Article) Set(name, value string) *Article    // replace the first field of that name in place (keeping its spelling of the name), drop the others, append if none
 //	func (a *Article) SetRaw(name, raw string) *Article   // the same with the exact field text: an empty "Path:" that stays in place
 //	func (a *Article) Insert(i int, raw string) *Article  // raw as a field before index i (clamped)
+//	func (a *Article) PrependPath(host string) *Article   // "host!" at the front of the Path value; the field, folds and spacing kept
+//	func (a *Article) PathEntries() []string              // entries of the first Path in order, folds and spaces around '!' removed
 //	func (a *Article) Canon() *Article                    // Parse(a.Bytes()): the article as it is once on the wire
 //	func (a *Article) Del(name string) *Article           // drop every field of that name
 //	func (a *Article) SetBody(b []byte) *Article          // copy of b, as is
@@ -143,6 +156,7 @@
 //		Allow               []string // more names a server may add, lose or change
 //		Strict              bool     // do not allow DefaultAllowed
 //		CaseSensitiveNames  bool     // a name spelled differently (From, FROM) is a change
+//		IgnoreOrder         bool     // do not report Reordered
 //		IgnoreTrailingSpace bool     // compare bodies without trailing space, tab and CR per line and without empty lines at the end
 //	}
 //	type Change struct {
@@ -165,13 +179,17 @@
 //	func ExpectSame(tb testing.TB, sent, got *Article, o DiffOptions) // tb.Errorf with the Diff
 //
 // The default allow-list is Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host,
-// NNTP-Posting-Date, Lines, X-Trace and X-Complaints-To: servers add, trim or rewrite those, so
+// NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To and Organization (INN and others add their configured one to a
+// posted article that has none): servers add, trim or rewrite those, so
 // they are ignored (also when they differ, are missing or appear only in got). Everything else
 // is canonicalised (Canon) on both sides, matched by lower-cased name (exactly with
 // CaseSensitiveNames) and compared by value with every fold (a line break and the spaces and
 // tabs after it) read as one space and spaces and tabs trimmed at both ends: re-folding, also
 // with a tab, is no change, but a different word, inner spacing or case is. PathExtends checks
-// what Compare lets pass: that the server kept the sent Path as the tail of its own. Added: names only in got; Lost: only in sent;
+// what Compare lets pass: that the server kept the sent Path as the tail of its own, entry for
+// entry (PathEntries: a fold around a '!' is nothing, but a Path that gained a space-separated
+// token does not extend). Build a relayed Path with PrependPath, not Set("Path", host+"!"+Get("Path")):
+// Get unfolds a folded Path to "a !b", and the new value then holds a space. Added: names only in got; Lost: only in sent;
 // Changed: in both with other values or another number of fields (duplicates lost or
 // invented); Reordered: the fields both articles hold equally often come in another order. A
 // header that is missing in sent and got is nothing. The bodies are equal byte for byte unless

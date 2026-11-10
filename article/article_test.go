@@ -572,7 +572,7 @@ func TestCompare(t *testing.T) {
 			changed: []string{"Path"}},
 		{name: "extra allow", opt: article.DiffOptions{Allow: []string{"x-dup"}}, got: func() *article.Article { return base().Del("X-Dup").Add("X-New", "1") },
 			added: []string{"X-New"}},
-		{name: "added", got: func() *article.Article { return base().Add("Organization", "o") }, added: []string{"Organization"}},
+		{name: "added", got: func() *article.Article { return base().Add("Organisation", "o") }, added: []string{"Organisation"}},
 		{name: "lost", got: func() *article.Article { return base().Del("From") }, lost: []string{"From"}},
 		{name: "changed", got: func() *article.Article { return base().Set("Subject", "Hello") }, changed: []string{"Subject"}},
 		{name: "case of name is not a change", got: func() *article.Article {
@@ -660,7 +660,7 @@ func TestCompare(t *testing.T) {
 
 func TestDefaultAllowed(t *testing.T) {
 	got := article.DefaultAllowed()
-	want := []string{"Path", "Xref", "Injection-Info", "Injection-Date", "NNTP-Posting-Host", "NNTP-Posting-Date", "Lines", "X-Trace", "X-Complaints-To"}
+	want := []string{"Path", "Xref", "Injection-Info", "Injection-Date", "NNTP-Posting-Host", "NNTP-Posting-Date", "Lines", "X-Trace", "X-Complaints-To", "Organization"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DefaultAllowed %q", got)
 	}
@@ -933,5 +933,145 @@ func TestCompareRefoldAndNameCase(t *testing.T) {
 	d := article.Compare(sent, re, article.DiffOptions{CaseSensitiveNames: true})
 	if len(d.Changed) != 1 || !reflect.DeepEqual(d.Changed[0].SentNames, []string{"From"}) || !reflect.DeepEqual(d.Changed[0].GotNames, []string{"FROM"}) {
 		t.Errorf("CaseSensitiveNames: %+v", d)
+	}
+}
+
+func TestPathEntriesAndPrepend(t *testing.T) {
+	a := article.Parse([]byte("Path: a\r\n !b!\r\n\tc\r\n\r\n"))
+	if got := a.PathEntries(); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Errorf("entries %q", got)
+	}
+	if got := article.Parse([]byte("Path: a b!c\r\n\r\n")).PathEntries(); !reflect.DeepEqual(got, []string{"a b", "c"}) {
+		t.Errorf("inner space %q", got)
+	}
+	for _, in := range []string{"", "Path:\r\n", "Path: \r\n", "X: y\r\n"} {
+		if got := article.Parse([]byte(in)).PathEntries(); got != nil {
+			t.Errorf("entries of %q: %q", in, got)
+		}
+	}
+	// PrependPath keeps the fold
+	a.PrependPath("host")
+	if string(a.Bytes()) != "Path: host!a\r\n !b!\r\n\tc\r\n\r\n" {
+		t.Errorf("PrependPath: %q", a.Bytes())
+	}
+	if got := a.PathEntries(); !reflect.DeepEqual(got, []string{"host", "a", "b", "c"}) {
+		t.Errorf("entries after %q", got)
+	}
+	for _, tt := range []struct{ in, want string }{
+		{"path:x!y\r\n", "path:host!x!y\r\n"},
+		{"PATH:  \t x\r\n", "PATH:  \t host!x\r\n"},
+		{"Path:\r\n", "Path: host\r\n"},
+		{"Path: \r\n", "Path: host\r\n"},
+		{"From: x\r\n", "From: x\r\nPath: host\r\n"},
+	} {
+		if got := article.Parse([]byte(tt.in)).PrependPath("host").Bytes(); string(got) != tt.want {
+			t.Errorf("PrependPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestPathExtendsEntries(t *testing.T) {
+	mk := func(p string) *article.Article { return (&article.Article{}).AddRaw("Path: " + p) }
+	for _, tt := range []struct {
+		sent, got string
+		want      bool
+	}{
+		{"peer!not-for-mail", "relay!peer!not-for-mail", true},
+		{"peer!not-for-mail", "relay!peer junk!not-for-mail", false},
+		{"peer!not-for-mail", "junk peer!not-for-mail", false},
+		{"peer!not-for-mail", "relay peer!not-for-mail", false},
+		{"a\r\n !b", "x!a\r\n !b", true},
+		{"a\r\n !b", "x!a !b", true},
+		{"a!b", "b", false},
+		{"a!b", "a!b!c", false},
+	} {
+		if got := article.PathExtends(mk(tt.sent), mk(tt.got)); got != tt.want {
+			t.Errorf("PathExtends(%q, %q) = %v", tt.sent, tt.got, got)
+		}
+	}
+}
+
+func TestValidName(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"Subject: x":                           true,
+		"X-Y_z.1: v":                           true,
+		"Subject:x":                            true,
+		"From nobody Thu Dec  8 12:55:04 2016": false,
+		"Subject : x":                          false,
+		" Subject: x":                          false,
+		": x":                                  false,
+		"no colon":                             false,
+		"Sub\tject: x":                         false,
+		"S\xe9: x":                             false,
+		"S\x00: x":                             false,
+		"S\x7f: x":                             false,
+	} {
+		f := article.Field{Raw: raw}
+		if f.ValidName() != want {
+			t.Errorf("ValidName(%q) = %v", raw, f.ValidName())
+		}
+	}
+	f := article.Field{Raw: "From nobody Thu Dec  8 12:55:04 2016"}
+	if !f.HasColon() || f.Name() != "From nobody Thu Dec  8 12" {
+		t.Errorf("naive name %q", f.Name())
+	}
+}
+
+func TestOmitAndNewArticle(t *testing.T) {
+	post := article.New(t, article.Options{Omit: []string{"path", "DATE", "Message-ID"}})
+	var names []string
+	for _, f := range post.Fields {
+		names = append(names, f.Name())
+	}
+	if !reflect.DeepEqual(names, []string{"From", "Newsgroups", "Subject"}) {
+		t.Errorf("post fields %q", names)
+	}
+	if !strings.HasPrefix(post.Get("Subject"), "test article ") || len(post.Body) == 0 {
+		t.Errorf("post: %q", post)
+	}
+	// omitted ids are not generated
+	if _, err := article.NewArticle(article.Options{Omit: []string{"Message-ID", "Subject"}}); err != nil {
+		t.Errorf("all omitted: %v", err)
+	}
+	a, err := article.NewArticle(article.Options{Subject: "s", MessageID: "<m@x.invalid>", Newsgroups: "alt.x",
+		Body: []string{"b"}, Date: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Omit: []string{"Path"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "From: Test User <test@testkit.invalid>\r\nNewsgroups: alt.x\r\nSubject: s\r\nMessage-ID: <m@x.invalid>\r\n" +
+		"Date: Fri, 02 Jan 2026 03:04:05 +0000\r\n\r\nb\r\n"
+	if a.String() != want {
+		t.Errorf("NewArticle: %q", a)
+	}
+	if _, err := article.NewArticle(article.Options{MessageID: "<m@x>"}); err == nil || !strings.Contains(err.Error(), "Subject") {
+		t.Errorf("no subject: %v", err)
+	}
+	if _, err := article.NewArticle(article.Options{Subject: "s"}); err == nil || !strings.Contains(err.Error(), "MessageID") {
+		t.Errorf("no id: %v", err)
+	}
+	// Omit also works for control messages and Approved
+	c := article.Cancel(t, article.Options{Omit: []string{"Subject", "Path"}, Approved: "me"}, "<x@y>")
+	if c.Count("Control") != 1 || c.Has("Subject") || c.Has("Path") || c.Get("Approved") != "me" {
+		t.Errorf("cancel omit: %q", c)
+	}
+	if article.New(t, article.Options{Approved: "me", Omit: []string{"approved"}}).Has("Approved") {
+		t.Error("Approved not omitted")
+	}
+	if !article.New(t, article.Options{Omit: []string{"X"}, Extra: []string{"X: 1"}}).Has("X") {
+		t.Error("Extra affected by Omit")
+	}
+}
+
+func TestCompareIgnoreOrderAndOrganization(t *testing.T) {
+	sent := article.Parse([]byte("From: x\r\nSubject: s\r\n\r\nb\r\n"))
+	got := article.Parse([]byte("Organization: o\r\nSubject: s\r\nFrom: x\r\n\r\nb\r\n"))
+	if d := article.Compare(sent, got, article.DiffOptions{}); !d.Reordered || len(d.Added) != 0 {
+		t.Errorf("default: %s", d)
+	}
+	if d := article.Compare(sent, got, article.DiffOptions{IgnoreOrder: true}); !d.Empty() || d.OrderSent != nil {
+		t.Errorf("IgnoreOrder: %s", d)
+	}
+	if d := article.Compare(sent, got, article.DiffOptions{Strict: true, IgnoreOrder: true}); len(d.Added) != 1 || d.Added[0] != "Organization" {
+		t.Errorf("Strict: %s", d)
 	}
 }
