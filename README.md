@@ -36,6 +36,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
 | `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 | `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
+| `article` | news articles as raw bytes: unique Message-IDs, minimal valid articles, deliberately broken ones, header edit and lookup, parse, header diff of a sent and a served article, a corpus of tricky articles, control messages |
 | `canlock` | Cancel-Lock and Cancel-Key values (RFC 8315): compute them, check a key against a lock |
 | `mailrec`, `cmd/fakesendmail` | a stand-in sendmail that records each mail, for servers that mail moderators or report by mail |
 
@@ -343,6 +344,41 @@ into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (th
 `RawDots` and `RawSpaces` model posting tools that leave those characters to the server's
 dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
 cuts a post off mid-body instead.
+
+### article
+
+Articles as raw bytes, for suites that post and fetch. Nothing is normalised: an `Article` keeps the
+order of its header fields, the exact case of their names, duplicates, empty values, folds, lines
+without a colon, bare CR or LF, NUL and 8-bit bytes, so a test can send what a normal library would
+refuse to write. `Bytes()` is the wire form: CRLF line ends, **not** dot-stuffed, without the
+terminating `.`; `client.Stuff` (or the client's send) adds both.
+
+| API | what |
+|---|---|
+| `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
+| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body` |
+| `type Article struct { Fields []Field; Sep string; Body []byte }`, `type Field struct { Raw, EOL string }` | the raw form: a field is its exact text (folds included) and its line end (`""` = CRLF, `"\n"`, `NoEOL`); `Sep` is what separates head and body (`NoEOL`: no empty line) |
+| `Add(name, value)`, `AddRaw(raw)`, `Set(name, value)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path, `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place and drops duplicates |
+| `SetBody([]byte)`, `SetBodyLines(lines...)` | the body as bytes, or lines each plus CRLF (a leading `.` is not doubled) |
+| `Get(name)`, `Lookup(name)`, `Values(name)`, `Has`, `Count`, `Duplicates()`, `MessageID()` | read, case-insensitive; values are unfolded |
+| `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()` | the wire form, and CRLF-split lines (what `client.Stuff` takes) |
+| `Parse(raw) *Article` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b` |
+| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, plus `Allow`; `Strict` drops the defaults), and the body byte for byte (`IgnoreTrailingSpace` to relax) |
+| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `folded-subject`, `folded-path`, `no-colon`, `dup-header`, `empty-path`, ... (`Case.Invalid` marks the RFC-breaking ones) |
+| `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature |
+
+```go
+for _, c := range article.Corpus() {
+	t.Run(c.Name, func(t *testing.T) {
+		sent := c.Article(t, "test")
+		cl.ExpectCmd(340, "POST")
+		cl.MustSend(client.Stuff(sent.Lines())) // stuffing and the final "." are the client's
+		// ... later fetch it back with ARTICLE
+		got := article.ParseLines(cl.ReadDotLines())
+		article.ExpectSame(t, sent, got, article.DiffOptions{Allow: []string{"Content-Length"}})
+	})
+}
+```
 
 ### canlock
 
