@@ -22,6 +22,8 @@
 // to leave out.
 // Options.Allow tolerates a known server bug: a Fail of a check whose Detail contains the
 // given substring becomes a Skip "allowed: <Detail>", the passing part of the check is kept.
+// Use a specific substring: a check stops at its first mistake, so everything after an allowed
+// Fail goes unseen.
 // Options.StartTLS configures the STARTTLS handshake (nil: not verified, said in the Detail).
 // Options.StrictOverviewFmt additionally requires the RFC-preferred :bytes/:lines
 // metadata names; by default the RFC-permitted Bytes:/Lines: aliases remain accepted.

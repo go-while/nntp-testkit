@@ -2,11 +2,11 @@ package conformance
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -190,6 +190,24 @@ func checkStartTLSTwice(s *session, c check) Result {
 // once, but a slow one may take a moment, so the window is longer than the usual quiet window.
 const pipelinedWait = 500 * time.Millisecond
 
+// postHandshakeWait is how long the same check listens after the handshake: a server that kept
+// the DATE in its buffer may run it only after it has finished the handshake and its own
+// bookkeeping, so the window is longer than the one before the handshake (and bounded by
+// Options.Deadline like every wait).
+const postHandshakeWait = 1500 * time.Millisecond
+
+// settle is how long peekSettled waits for the rest of a reply that arrived in pieces.
+const settle = 200 * time.Millisecond
+
+// peekSettled returns the bytes that are pending on c (ExpectNoPending saw some) once up to 7
+// of them, enough for "111 " and a digit, have arrived or settle has passed; nothing is consumed.
+func peekSettled(c *client.Conn) []byte {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(settle))
+	_, _ = c.R.Peek(7) // waits for 7 bytes, a read error or the deadline
+	b, _ := c.R.Peek(c.R.Buffered())
+	return append([]byte(nil), b...)
+}
+
 // checkStartTLSPipelined sends DATE in the same write as STARTTLS and judges what the server
 // does with it. RFC 4642 §2.2.1 forbids pipelining STARTTLS, so what a server does with the
 // command is its own business, except that RFC 8143 §4 says it MUST discard any NNTP command
@@ -223,15 +241,14 @@ func checkStartTLSPipelined(s *session, c check) Result {
 	case code != 382:
 		return c.skipf("STARTTLS pipelined with DATE was answered %q, not 382: nothing to test (the plain STARTTLS is judged by check starttls)", line)
 	}
-	wait := min(pipelinedWait, s.o.deadline())
+	wait, waitTLS := min(pipelinedWait, s.o.deadline()), min(postHandshakeWait, s.o.deadline())
 
 	// before the handshake
 	err = s.c.ExpectNoPending(wait)
 	var se *client.StrictError
 	switch {
 	case errors.As(err, &se) && se.Kind == client.Pending:
-		time.Sleep(50 * time.Millisecond) // the rest of a reply that arrived in pieces
-		b, _ := s.c.R.Peek(s.c.R.Buffered())
+		b := peekSettled(s.c)
 		if plaintextNNTP(b) {
 			return c.failf("the DATE sent in the same write as STARTTLS was answered in plaintext right after the 382: %q (RFC 8143 §4: a server MUST discard any NNTP command received between STARTTLS and the end of the TLS negotiation; CVE-2011-0411)", b)
 		}
@@ -258,17 +275,23 @@ func checkStartTLSPipelined(s *session, c check) Result {
 		return r
 	}
 	s.c = &client.Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Greeting: s.c.Greeting, Deadline: s.c.Deadline, Strict: true}
-	err = s.c.ExpectNoPending(wait)
+	err = s.c.ExpectNoPending(waitTLS)
 	switch {
 	case errors.As(err, &se) && se.Kind == client.Pending:
-		time.Sleep(50 * time.Millisecond)
-		b, _ := s.c.R.Peek(s.c.R.Buffered())
-		return c.failf("the DATE sent in the same write as STARTTLS was executed after the TLS handshake: the server sent %q before the client sent a command (RFC 8143 §4: a server MUST discard any NNTP command received between STARTTLS and the end of the TLS negotiation; CVE-2011-0411)", b)
-	case err != nil && !errors.Is(err, os.ErrDeadlineExceeded):
-		return c.failf("after the TLS handshake: %s", describe(err))
+		b := peekSettled(s.c)
+		if plaintextNNTP(b) && bytes.HasPrefix(b, []byte("111")) {
+			return c.failf("the DATE sent in the same write as STARTTLS was executed after the TLS handshake: the server sent %q before the client sent a command (RFC 8143 §4: a server MUST discard any NNTP command received between STARTTLS and the end of the TLS negotiation; CVE-2011-0411)", b)
+		}
+		return c.failf("the server sent %q after the TLS handshake before the client sent a command: not a reply to the DATE sent behind STARTTLS (RFC 4642 §2.2.2: no greeting is sent after the handshake; see check starttls)", b)
+	case err != nil:
+		// a reset, an alert or the end of the stream: the server dropped the connection (a TLS 1.3
+		// client finishes its handshake before the server has checked the Finished message)
+		r := c.pass()
+		r.Detail = fmt.Sprintf("the DATE sent behind STARTTLS was not executed: after the handshake the server dropped the connection (%v)", err)
+		return r
 	}
 	r := c.pass()
-	r.Detail = fmt.Sprintf("the DATE sent behind STARTTLS was discarded: nothing came before or after the handshake within %v each", wait)
+	r.Detail = fmt.Sprintf("the DATE sent behind STARTTLS was discarded: nothing came within %v before or %v after the handshake", wait, waitTLS)
 	if note != "" {
 		r.Detail += "; " + note
 	}

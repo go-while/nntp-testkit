@@ -54,8 +54,9 @@ type jsonReport struct {
 	Skip         int          `json:"skip"`
 }
 
-// allowFlag is the repeatable -allow name=substring flag (conformance.Options.Allow); a second
-// -allow for the same check replaces the first.
+// allowFlag is the repeatable -allow name=substring flag (conformance.Options.Allow): one
+// substring per check, a second -allow for the same check is an error (it would silently
+// replace the first).
 type allowFlag map[string]string
 
 func (a allowFlag) String() string { return fmt.Sprint(map[string]string(a)) }
@@ -66,7 +67,11 @@ func (a allowFlag) Set(v string) error {
 	if !ok || strings.TrimSpace(name) == "" || sub == "" {
 		return fmt.Errorf("%q: want name=substring with a non-empty substring", v)
 	}
-	a[strings.TrimSpace(name)] = sub
+	name = strings.TrimSpace(name)
+	if _, dup := a[name]; dup {
+		return fmt.Errorf("%q: check %q already has an -allow substring (one per check)", v, name)
+	}
+	a[name] = sub
 	return nil
 }
 

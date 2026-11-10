@@ -38,9 +38,9 @@ type Options struct {
 	// the whole check): the key is a check name, the value a substring of the Detail of a Fail
 	// of that check. A Fail whose Detail contains it is reported as a Skip with Detail
 	// "allowed: <the original Detail>" (Missing stays empty); a Fail with another Detail, and
-	// a check that passes, are untouched. An empty substring allows nothing. A check is
-	// judged by its first mistake, so a check that fails with an allowed Detail did not get
-	// to run what follows it.
+	// a check that passes, are untouched. An empty substring allows nothing. Use a specific
+	// substring: a check stops at its first mistake, so everything after an allowed Fail goes
+	// unseen (a broad substring hides every later mistake of the check as well).
 	Allow map[string]string
 
 	// ReportOnly makes Run return the report without failing tb on a Fail.
