@@ -30,8 +30,9 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | package | what |
 |---|---|
 | `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening` |
-| `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
-| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
+| `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054); STARTTLS (RFC 4642) |
+| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS and STARTTLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
+| `tlscert` | test CA and leaf certificates (expired, not yet valid, wrong name), as `tls.Certificate`, PEM or files with a 0600 key |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
 | `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
@@ -66,6 +67,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `ExpectNoPending(d) error` | nothing may arrive within `d` |
 | `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
 | `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
+| `TryStartTLS(cfg) (*Conn, error)` / `StartTLS(cfg) *Conn` | send `STARTTLS` (RFC 4642), expect 382, fail when any byte is already buffered after the 382 (plaintext injection, CVE-2011-0411), handshake within the deadline; a new strict `Conn` over the `*tls.Conn` (no greeting read; `cfg` is cloned, `ServerName` defaults to the remote host). A reply other than 382 is a `*StartTLSError{Code, Line}` and `c` stays plain; the injection is a `*StrictError` of Kind `Pending`; verification errors are crypto/tls's (`x509.HostnameError`, `x509.CertificateInvalidError` with `Reason` `Expired`, `x509.UnknownAuthorityError`). `StartTLS` fails tb and registers the cleanup |
+| `TLS() (tls.ConnectionState, bool)`, `IsTLS() bool` | peer certificates, version, server name of a TLS `Conn` |
 | `Close()` | idempotent, nil-safe |
 | `ExpectCmd(want, format, args...) string` | `Cmd`, and fail tb unless the code is `want`; returns the status line |
 | `ExpectStatus(want, what) string` | read the next status line (the 240 after a POSTed article, a pipelined reply); fail tb on error or unless the code is `want` |
@@ -124,7 +127,10 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
 | `(*Conn) StartCompress() error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
-| `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
+| `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it (package `tlscert` makes CA-issued ones) |
+| `StoreOptions.StartTLS`, `PeerOptions.StartTLS *StartTLSOptions{Config *tls.Config; Refuse string; HideCapability, AuthNeedsTLS bool; CloseAfterHandshake int}` | STARTTLS (RFC 4642), see below; nil: unknown command |
+| `(*Conn) StartTLS(cfg) error`, `TLS() bool`, `TLSState()` | for a Handler: TLS server side from now on (call it after writing the 382) |
+| `(*Server) TLSHandshakes()`, `TLSFailed()`, `TLSServerNames()` | completed and failed handshakes (implicit TLS and STARTTLS), SNI of every ClientHello |
 | `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
@@ -251,7 +257,37 @@ handler starts compression when the status it wrote for COMPRESS, after the faul
 `Faults.Override` `"COMPRESS"` `{"403 Unable to activate compression"}` is a server that cannot,
 `{}` one that never answers. Corrupt compressed input closes the connection. Bytes a client
 pipelines after `COMPRESS DEFLATE` are inflated too (INN's nnrpd reads them as plain commands).
-There is no STARTTLS (TLS is `Options.TLS`), and crypto/tls has no TLS-level compression.
+crypto/tls has no TLS-level compression.
+
+**STARTTLS** (RFC 4642): the Store handler and `PeerHandler` offer it with `StartTLS`
+(`StartTLSOptions`; `Options.TLS` stays implicit TLS from the first byte). It is listed in
+CAPABILITIES while the connection is plain, not compressed and not authenticated; it answers 382
+and the handshake follows the CRLF of that line. Afterwards it is not listed and a second STARTTLS
+is 502, as on an implicit TLS connection, after COMPRESS (compress after TLS works) and after a
+successful AUTHINFO. The upgrade forgets the session (selected group and article), and plaintext
+the client pipelined behind STARTTLS closes the connection. Test knobs: `Refuse` (a reply such as
+`502 ...` or `580 ...` instead of 382: a refusing server or a stripping attacker; in Store mode
+`Faults.Override` `"STARTTLS"` does the same), `HideCapability`, `AuthNeedsTLS` (AUTHINFO before
+TLS is 483 as RFC 4643 describes, and CAPABILITIES lists `AUTHINFO` without `USER`) and
+`CloseAfterHandshake` (the first N upgrades are closed right after the handshake). The Server
+counts handshakes and records the SNI of every ClientHello. Make the certificates with `tlscert`.
+
+### tlscert
+
+| API | what |
+|---|---|
+| `NewCA(tb) *CA`; `CA{Cert *x509.Certificate; Key crypto.Signer; CertPEM []byte; Pool *x509.CertPool}` | a test CA (ECDSA P-256) |
+| `(*CA) Issue(tb, Options) *Leaf` | a leaf signed by the CA |
+| `SelfSigned(tb, Options) *Leaf` | a self-signed leaf that is its own trust anchor |
+| `type Options struct { CommonName string; DNSNames []string; IPs []net.IP; NotBefore, NotAfter time.Time; Expired, NotYetValid bool; KeyType KeyType; ClientAuth bool }` | the zero value: localhost, 127.0.0.1 and ::1, valid from an hour ago for a day, ECDSA. `Expired`/`NotYetValid` set a window in the past/future, `DNSNames`/`IPs` another name give a hostname mismatch; `KeyType` is `ECDSA`, `RSA` (2048) or `Ed25519` |
+| `type Leaf struct { Cert; Key; CertPEM, KeyPEM, CAPEM []byte; Pool *x509.CertPool }` | `KeyPEM` is PKCS#8; `CAPEM` the issuer |
+| `(*Leaf) TLSCertificate() tls.Certificate`, `ServerConfig() *tls.Config`, `ClientConfig(serverName) *tls.Config` | for Go servers and fakes (`fakeserver.StartTLSOptions.Config`, `Options.TLS`) and clients (`client.Conn.TryStartTLS`); `CA.ClientConfig` too |
+| `(*Leaf) Write(tb, dir) Files{Cert, Key, CA string}` | `cert.pem`, `key.pem` (mode 0600) and `ca.pem` in `dir` (`""` = `tb.TempDir()`), for servers that read paths from their config (INN, diablo, NewsCache) |
+| `(*CA) WriteCA(tb, dir) string` | `ca.pem` alone; its path |
+
+A leaf made to fail (`Expired`, `NotYetValid`, another name) still carries the issuer's trust, so
+the failure is the certificate's alone: `*tls.CertificateVerificationError` wrapping
+`x509.CertificateInvalidError` (`Reason` `x509.Expired` for both time windows) or `x509.HostnameError`.
 
 ### proc
 

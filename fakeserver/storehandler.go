@@ -31,7 +31,7 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT (+ HEADERS, not NoHdr), NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT (+ HEADERS, not NoHdr), NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done; plain AUTHINFO before TLS with StartTLS.AuthNeedsTLS), STARTTLS (StartTLS set, plain, not compressed, no AUTHINFO yet), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
@@ -49,6 +49,7 @@ func init() { storeHandler = StoreHandler }
 //	DATE                111 yyyymmddhhmmss (UTC)
 //	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
 //	COMPRESS alg        only with Compress or CompressOutputOnly (else 500): 206, then both directions compressed (RFC 8054); 501 for a missing or invalid algorithm name; 502 when active; 503 for an algorithm other than DEFLATE
+//	STARTTLS            only with StartTLS (else 500): 382 then the TLS handshake (RFC 4642); 502 when TLS or COMPRESS is active or AUTHINFO succeeded; 501 with arguments; StartTLSOptions.Refuse replaces the 382
 //	QUIT                205, then the connection is closed
 //
 // With StoreOptions.User or Pass set, every command but CAPABILITIES, MODE, HELP, AUTHINFO, DATE
@@ -60,9 +61,9 @@ func init() { storeHandler = StoreHandler }
 // {"403 Unable to activate compression"} is a server that cannot compress, and {} one that
 // never answers. Once active, every reply and the Faults go through the compressor (each
 // write is sync-flushed) and Lines, Counts and Articles record the inflated client stream.
-// The handler has no STARTTLS (TLS is Options.TLS, from the first byte; crypto/tls has no
-// TLS-level compression), so the RFC's STARTTLS rules do not arise; MODE READER is still
-// answered after COMPRESS.
+// STARTTLS (RFC 4642) is offered with StoreOptions.StartTLS (see StartTLSOptions); without it
+// the command is unknown (500). COMPRESS then STARTTLS is a 502, STARTTLS then COMPRESS works
+// (crypto/tls has no TLS-level compression); MODE READER is still answered after COMPRESS.
 //
 // A served article has the stored Headers plus the defaults of Article.WithDefaults (Message-ID,
 // Date, and Newsgroups = every group it is filed in) when missing; head and body lines are
@@ -107,6 +108,7 @@ type storeConn struct {
 	authed   bool
 	user     string // AUTHINFO USER argument
 	userSeen bool
+	loggedIn bool // an AUTHINFO succeeded (STARTTLS is then 502)
 }
 
 // action tells serve what to do after dispatch.
@@ -142,6 +144,13 @@ func (h *storeConn) serve() {
 			if !h.c.compressAfter(cmd, h.c.last, h.o.CompressOutputOnly) {
 				return
 			}
+			upgraded, ok := h.c.startTLSAfter(h.o.StartTLS, cmd, h.c.last)
+			if !ok {
+				return
+			}
+			if upgraded { // RFC 4642 2.2.2.1: forget what the client did before TLS
+				h.group, h.cur, h.user, h.userSeen = "", 0, "", false
+			}
 		}
 		h.after480()
 		if h.c.closeDue() {
@@ -161,14 +170,14 @@ func (h *storeConn) after480() {
 }
 
 // authFree are the commands allowed before authentication.
-var authFree = map[string]bool{"CAPABILITIES": true, "MODE": true, "HELP": true, "AUTHINFO": true, "DATE": true, "QUIT": true}
+var authFree = map[string]bool{"CAPABILITIES": true, "MODE": true, "HELP": true, "AUTHINFO": true, "DATE": true, "QUIT": true, "STARTTLS": true}
 
 // argCount is the allowed argument count [min, max] of every known command.
 var argCount = map[string][2]int{
 	"CAPABILITIES": {0, 1}, "MODE": {1, 1}, "HELP": {0, 0}, "AUTHINFO": {2, -1}, "LIST": {0, 2},
 	"GROUP": {1, 1}, "LISTGROUP": {0, 2}, "ARTICLE": {0, 1}, "HEAD": {0, 1}, "BODY": {0, 1}, "STAT": {0, 1},
 	"NEXT": {0, 0}, "LAST": {0, 0}, "OVER": {0, 1}, "XOVER": {0, 1}, "NEWGROUPS": {2, 3}, "NEWNEWS": {3, 4}, "DATE": {0, 0},
-	"POST": {0, 0}, "QUIT": {0, 0}, "COMPRESS": {1, 1}, "HDR": {1, 2}, "XHDR": {1, 2},
+	"POST": {0, 0}, "QUIT": {0, 0}, "COMPRESS": {1, 1}, "STARTTLS": {0, 0}, "HDR": {1, 2}, "XHDR": {1, 2},
 }
 
 // dispatch answers one command; POST and QUIT are flagged for serve.
@@ -178,6 +187,9 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 		return []string{"500 Unknown command"}, actReply
 	}
 	if !h.authed && !authFree[cmd] {
+		if h.o.StartTLS.needsTLS(h.c) {
+			return []string{"483 Encryption required"}, actReply
+		}
 		return []string{"480 Authentication required"}, actReply
 	}
 	if len(args) < n[0] || (n[1] >= 0 && len(args) > n[1]) {
@@ -197,7 +209,14 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	case "HELP":
 		return h.help(), actReply
 	case "AUTHINFO":
-		return h.authinfo(args), actReply
+		if h.o.StartTLS.needsTLS(h.c) {
+			return []string{"483 Encryption required"}, actReply
+		}
+		r := h.authinfo(args)
+		h.loggedIn = h.loggedIn || strings.HasPrefix(r[0], "281")
+		return r, actReply
+	case "STARTTLS":
+		return []string{h.c.startTLSLine(h.o.StartTLS, h.loggedIn)}, actReply
 	case "LIST":
 		return h.list(args), actReply
 	case "GROUP":
@@ -235,7 +254,8 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 func (h *storeConn) disabled(cmd string) bool {
 	return (cmd == "OVER" && h.o.NoOver) || (cmd == "XOVER" && h.o.NoXover) || (cmd == "NEWNEWS" && h.o.NoNewnews) ||
 		(cmd == "HDR" && h.o.NoHdr) || (cmd == "XHDR" && h.o.NoXhdr) ||
-		(cmd == "COMPRESS" && !h.o.Compress && !h.o.CompressOutputOnly)
+		(cmd == "COMPRESS" && !h.o.Compress && !h.o.CompressOutputOnly) ||
+		(cmd == "STARTTLS" && !h.o.StartTLS.on())
 }
 
 func (h *storeConn) capabilities() []string {
@@ -257,7 +277,14 @@ func (h *storeConn) capabilities() []string {
 		out = append(out, "POST")
 	}
 	if !h.authed {
-		out = append(out, "AUTHINFO USER")
+		if h.o.StartTLS.needsTLS(h.c) {
+			out = append(out, "AUTHINFO") // RFC 4643 2.2: no USER before TLS
+		} else {
+			out = append(out, "AUTHINFO USER")
+		}
+	}
+	if h.o.StartTLS.advertised(h.c, h.loggedIn) {
+		out = append(out, "STARTTLS")
 	}
 	if h.authed && !h.disabled("COMPRESS") && !h.c.Compressed() {
 		out = append(out, "COMPRESS DEFLATE")

@@ -2,6 +2,7 @@ package fakeserver
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -16,8 +17,9 @@ const readerSize = 64 << 10
 // own goroutine (the Handler); they are not safe for concurrent use.
 type Conn struct {
 	s    *Server
-	raw  net.Conn // the accepted TCP conn
-	conn net.Conn // raw, or the TLS server conn on top of it
+	raw  net.Conn  // the accepted TCP conn
+	conn net.Conn  // raw, or the TLS server conn on top of it
+	tls  *tls.Conn // the TLS conn once TLS is on (Options.TLS or StartTLS), else nil
 	r    *bufio.Reader
 	gone bool           // guarded by s.mu: counted out of Open()
 	cmds int            // client lines read with ReadLine on this conn (Faults.CloseAfter)

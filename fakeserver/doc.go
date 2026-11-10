@@ -4,7 +4,7 @@
 // counters. It listens on 127.0.0.1:0 unless given another address and never contacts any host.
 //
 // Contract (plan nntp-testkit). Implemented in server.go (Options, Step, StoreOptions, Faults,
-// Server), conn.go, tls.go, peer.go, store.go and storehandler.go:
+// Server), conn.go, tls.go, starttls.go, peer.go, store.go and storehandler.go:
 //
 //	type Options struct {
 //		Addr       string        // listen address, default "127.0.0.1:0"
@@ -60,7 +60,21 @@
 //	func (c *Conn) Server() *Server
 //	func (c *Conn) ID() int                          // accept order from 1 (rejected connections count too)
 //
-//	func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) // self-signed ECDSA cert for 127.0.0.1
+//	func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) // self-signed ECDSA cert for 127.0.0.1 (package tlscert: a CA, leaf options, files)
+//
+//	type StartTLSOptions struct {   // StoreOptions.StartTLS, PeerOptions.StartTLS: STARTTLS (RFC 4642); nil = unknown command (500)
+//		Config              *tls.Config // server config of the upgraded connection; required
+//		Refuse              string      // reply instead of 382 ("502 ...", "580 ..."): a refusal / stripping attacker; the connection stays plain
+//		HideCapability      bool        // STARTTLS not listed in CAPABILITIES
+//		AuthNeedsTLS        bool        // AUTHINFO before TLS 483, commands needing auth 483 (not 480), "AUTHINFO" without USER in CAPABILITIES
+//		CloseAfterHandshake int         // >0: the first N upgrades of the server are closed right after the handshake
+//	}
+//	func (c *Conn) StartTLS(cfg *tls.Config) error  // TLS server side from now on; call it after writing the 382; error when TLS/compression is on, the handshake fails or plaintext was pipelined after STARTTLS
+//	func (c *Conn) TLS() bool                       // implicit (Options.TLS) or upgraded
+//	func (c *Conn) TLSState() (tls.ConnectionState, bool)
+//	func (s *Server) TLSHandshakes() int            // completed handshakes: implicit TLS and STARTTLS
+//	func (s *Server) TLSFailed() int                // failed handshakes
+//	func (s *Server) TLSServerNames() []string      // SNI of every ClientHello in order ("" when the client sent none), failed handshakes included
 //
 //	type PeerOptions struct {
 //		User, Pass      string          // non-empty: AUTHINFO required; CHECK/TAKETHIS/IHAVE before auth → 480 (TAKETHIS after reading its article, IHAVE before any 335)
@@ -73,6 +87,7 @@
 //		OnArticle       func(msgID string, wire []string) // before the 239/235 reply
 //		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
 //		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
+//		StartTLS           *StartTLSOptions // offer STARTTLS as the Store handler does
 //	}
 //	func LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn) // f answers each client line, in any order; Faults apply as in Script mode
 //	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING, COMPRESS DEFLATE), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, COMPRESS, QUIT; else 500
@@ -130,6 +145,7 @@
 //		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
 //		Compress           bool // offer COMPRESS DEFLATE (RFC 8054), see below
 //		CompressOutputOnly bool // offer it broken: after the 206 only the output is compressed, the client's input is read uncompressed
+//		StartTLS           *StartTLSOptions // offer STARTTLS, see below
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
 //	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS, NEWNEWS, OVER MSGID, POST
@@ -178,6 +194,18 @@
 //	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
 //	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
+//
+// STARTTLS (RFC 4642): StoreHandler and PeerHandler offer it with StartTLS. It is listed in
+// CAPABILITIES while the connection is plain, not compressed and not authenticated by AUTHINFO;
+// the answer is 382 and the handshake follows its CRLF (a Handler calls Conn.StartTLS after
+// writing the 382). Afterwards it is no longer listed, and a second STARTTLS gets 502, as on an
+// implicit TLS connection (Options.TLS), after COMPRESS (TLS must come first; COMPRESS after
+// TLS works) and after a successful AUTHINFO. The upgrade resets the session (Store mode: the
+// selected group and article), and plaintext that the client pipelined behind STARTTLS closes
+// the connection. Knobs: Refuse (reply instead of 382, e.g. a stripping attacker's 502 or 580;
+// in Store mode Faults.Override "STARTTLS" works too, a "382" override upgrades),
+// HideCapability, AuthNeedsTLS (RFC 4643: AUTHINFO 483 before TLS) and CloseAfterHandshake.
+// The Server counts handshakes (implicit and STARTTLS) and records the SNI of every ClientHello.
 //
 // COMPRESS DEFLATE (RFC 8054): a Handler switches a connection with Conn.StartCompress right
 // after it wrote the 206; StoreHandler and PeerHandler do it with Compress, a Script step with
