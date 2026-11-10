@@ -29,7 +29,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 
 | package | what |
 |---|---|
-| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening` |
+| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening`, `ShortTempDir`, `SocketPathFits` |
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054); STARTTLS (RFC 4642) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS and STARTTLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `tlscert` | test CA and leaf certificates (expired, not yet valid, wrong name), as `tls.Certificate`, PEM or files with a 0600 key |
@@ -51,6 +51,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `WaitFor(tb, d, what, cond func() bool)` | poll `cond` every 50 ms until it holds; `tb.Fatalf("timed out after <d> waiting for <what>")` after `d` (0 = `Deadline()`) |
 | `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, and not in use on 0.0.0.0 or [::] either, for a server that must be told its port (another process may take it first) |
 | `Listening(addr) bool` | a TCP dial to `addr` succeeds within a second (closed at once, nothing written): a server is up, or with `WaitFor` it has stopped |
+| `ShortTempDir(tb) string` | a fresh 0700 directory under a short base (`os.TempDir()` if at most 32 bytes, else `/tmp`), named `nt<hash of tb.Name()>-<random>` (about 25 bytes), removed by `tb.Cleanup` (call it before starting servers that use it: cleanups run last-in first-out); for unix-domain sockets, whose path is limited (`MaxSocketPath` = 107 on Linux, 103 elsewhere: `sun_path` is 108 / 104 bytes with the NUL) and which `t.TempDir()` (`$TMPDIR/<test name><random>/001`, `$TMPDIR` is about 50 bytes on macOS) overflows with a long test name |
+| `MaxSocketPath`, `SocketPathFits(path) bool` | that limit, and a check for tests that build socket paths |
 
 ### client
 
@@ -321,15 +323,40 @@ the failure is the certificate's alone: `*tls.CertificateVerificationError` wrap
 
 | API | what |
 |---|---|
-| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG) |
+| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string; LogBytes int }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG); `LogBytes` caps each part of the failure dump (0 = `DefaultLogBytes`, 64 KiB); `Daemonizes`: the binary's first process exits 0 and a daemon stays, so `StartTCP` keeps dialling until `Deadline` after that exit (without it, an exit before ready fails at once); the daemon should redirect its stdio and must not call `setsid`, or `Stop` cannot reach it; the captured output is kept up to 16 MiB (`Stderr()` is then cut in the middle) |
 | `StartStdio(tb, Options) *Process` | stdin/stdout are the client connection (inetd style): `Conn()` |
-| `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT) |
-| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `Wait`, `Done`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode; `Done()` is closed once the process exited (a bounded wait that, unlike `Wait`, never stops it) |
-| `Stop()` | SIGTERM, SIGKILL after `StopTimeout` (`DefaultStopTimeout` = 5s); idempotent; run by `tb.Cleanup` |
+| `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT); with `Options.Daemonizes`, a daemon is waited for until `Deadline` |
+| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `SignalGroup(sig)`, `Wait`, `Done`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode; `Signal` reaches the leader, `SignalGroup` every process of its group; `Done()` is closed once the process exited (a bounded wait that, unlike `Wait`, never stops it) |
+| `Stop()` | SIGTERM to the process group, SIGKILL to the group after `min(StopTimeout, Deadline)` (`DefaultStopTimeout` = 5s) while the leader or any member is left; idempotent; run by `tb.Cleanup` |
+| `type RunOptions struct { Path string; Args, Env []string; Dir string; Stdin io.Reader; Timeout time.Duration; MaxOutput int; WaitDelay time.Duration }` | a one-shot command: `Env` appended to `os.Environ()` as in `Options`; `Dir` "" = the caller's directory; `Stdin` nil = /dev/null (`strings.NewReader` for a string); `Timeout` 0 = `testkit.Deadline()`; `MaxOutput` 0 = 1 MiB, < 0 = no cap; `WaitDelay` 0 = 3s |
+| `Run(tb, RunOptions) (out string, code int)` | combined output and exit code; fails `tb` on a start error, a timeout or death by a signal, not on a non-zero exit (the caller checks `code`) |
+| `TryRun(RunOptions) (out string, code int, err error)` | the same without `tb`; `code` is -1 and `err` set for a start error, a timeout (wraps `ErrTimeout`; names the timeout and holds the output so far) or a signal (named); `err` is nil for every exit status |
+| `GoBuild(tb, out, pkg string, ldflags ...string) string` | `go build` of a Go main package into directory `out` ("" = a shared temp directory, removed by `CleanBuilds()` in `TestMain`); timeout at least 5 min (`GoBuildFloor`); cached per process by (out, package directory, ldflags, `GOOS`, `GOARCH`, `GOFLAGS`, `CGO_ENABLED`) so tests share one build, also when parallel; a relative `pkg` counts as the directory it names; a compiler failure fails `tb` with the compiler output and is remembered, a timeout or I/O error is not; test processes building into the same explicit `out` race, so give each its own or use "" |
+
+Output cap: the first and the last half of `MaxOutput` bytes are kept with a `[... N bytes cut ...]`
+marker between them, so a tool stuck in a loop cannot flood the log or the memory. A command that
+exits while a child it started still holds the output pipe (a daemon) is given up on after
+`WaitDelay`; its exit code counts and `exec.ErrWaitDelay` is not an error. The daemon keeps running.
+
+Process groups: the server and each `Run` command start as the leader of a new process group.
+`Stop` signals the whole group, so forked workers and a daemon that the leader started and left
+running are stopped too; a timed-out `Run` kills the group (a shell and its sleeping child go
+together). A process that calls `setsid` or `setpgid` leaves the group and is not reached.
+
+When the test binary dies, the cleanups do not run. The first start of a server or command
+installs a handler for SIGINT, SIGTERM and SIGHUP (those not ignored) that SIGKILLs every group the
+kit started and has not stopped, then removes itself and raises the signal again: Ctrl-C of
+`go test` ends the binary as before and leaves no server. On Linux the direct child also gets
+`Pdeathsig` SIGKILL (the child is started, and waited for, on a goroutine locked to one thread,
+as the kernel ties the signal to the thread), so a binary killed with SIGKILL takes the leader
+with it. Not covered: only the leader has `Pdeathsig`, so a wrapper shell's server or forked
+workers are orphaned when the binary is SIGKILLed; macOS has no `Pdeathsig`, so a SIGKILLed
+binary can leave servers behind there; a panic exit such as `go test -timeout` raises runs neither.
+A normal exit, a failure or a timeout of a test is handled by the cleanup.
 
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes
-`Stderr()` (stdout too in TCP mode) and every file in `Options.Logs` to the test output with
-`tb.Log`. `Stop` needs a Unix system.
+`Stderr()` (stdout too in TCP mode; head and tail) and the tail of every file in `Options.Logs` to
+the test output with `tb.Log`, each part capped at `LogBytes`. `Stop` needs a Unix system.
 
 ### conformance
 
