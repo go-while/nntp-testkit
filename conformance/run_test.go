@@ -57,9 +57,9 @@ func closedAddr(t *testing.T) string {
 	return addr
 }
 
-// TestNames: the runner's checks are reader, auth, stream in that order, with unique names.
+// TestNames: the runner's checks are reader, auth, stream, starttls, compress in that order, with unique names.
 func TestNames(t *testing.T) {
-	want := slices.Concat(names(readerChecks()), names(authChecks()), names(streamChecks()))
+	want := slices.Concat(names(readerChecks()), names(authChecks()), names(streamChecks()), names(startTLSChecks()), names(compressChecks()))
 	got := Names()
 	if !slices.Equal(got, want) {
 		t.Fatalf("Names() = %q, want %q", got, want)
@@ -86,6 +86,17 @@ func TestCheckStorePasses(t *testing.T) {
 		"ihave": "IHAVE not advertised", "ihave-have": "IHAVE not advertised",
 		"ihave-malformed": "IHAVE not advertised",
 	}
+	// the Store server offers neither STARTTLS nor COMPRESS unless asked (see TestStartTLS*, TestCompress*)
+	for _, c := range append(startTLSChecks(), compressChecks()...) {
+		switch {
+		case c.Name == "tls-capabilities":
+			streamSkip[c.Name] = "no Options.TLS"
+		case strings.HasPrefix(c.Name, "starttls"):
+			streamSkip[c.Name] = "STARTTLS not advertised"
+		default:
+			streamSkip[c.Name] = "COMPRESS not advertised"
+		}
+	}
 	cases := []struct {
 		name string
 		so   fakeserver.StoreOptions
@@ -109,6 +120,7 @@ func TestCheckStorePasses(t *testing.T) {
 				"takethis": "no Options.PostGroup", "check-have": "no Options.PostGroup",
 				"takethis-duplicate": "no Options.PostGroup", "ihave": "no Options.PostGroup",
 				"ihave-have": "no Options.PostGroup", "post": "no Options.PostGroup",
+				"compress-upload": "no Options.PostGroup", "compress-upload-lines": "no Options.PostGroup",
 			}),
 		},
 	}
@@ -210,8 +222,15 @@ func TestCheckPeer(t *testing.T) {
 	srv := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.PeerHandler(po)})
 	skip := slices.Concat(names(readerChecks()), names(authChecks()))
 	r := mustCheck(t, Options{Addr: srv.Addr(), User: "u", Pass: "p", PostGroup: "alt.test", Skip: skip})
+	noTLS := slices.Concat(names(startTLSChecks()), names(compressChecks())) // the peer offers neither
 	for _, res := range r.Results {
 		want := Pass
+		if slices.Contains(noTLS, res.Name) {
+			if res.Status != Skip || !(strings.HasSuffix(res.Detail, " not advertised") || res.Name == "tls-capabilities") {
+				t.Errorf("%s: %s %q, want SKIP not advertised (tls-capabilities: no Options.TLS)", res.Name, res.Status, res.Detail)
+			}
+			continue
+		}
 		if slices.Contains(skip, res.Name) {
 			want = Skip
 			if res.Detail != "skipped by option" {

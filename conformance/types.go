@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -18,11 +19,29 @@ type Options struct {
 	// @conformance.invalid and say what they are in Subject.
 	PostGroup string
 
-	TLS      *tls.Config   // nil: plain TCP; else a TLS client from the first byte (no STARTTLS)
+	TLS *tls.Config // nil: plain TCP; else a TLS client from the first byte (no STARTTLS)
+
+	// StartTLS is the client configuration of the STARTTLS checks (starttls, starttls-twice,
+	// starttls-pipelined): RootCAs, ServerName (default: the host of Addr), MinVersion and so
+	// on. nil: the handshake is made without verifying the certificate (a test server has a
+	// self-signed one) and the Pass Detail of check starttls says so; &tls.Config{} verifies
+	// against the system roots with the host of Addr as the name. Not used with TLS (the
+	// connection is TLS from the first byte then and the STARTTLS checks are skipped).
+	StartTLS *tls.Config
+
 	Deadline time.Duration // hang guard per read/write; 0: testkit.Deadline()
 
 	// Skip lists check names (Result.Name) to leave out; they are reported as Skip.
 	Skip []string
+
+	// Allow tolerates known server bugs without dropping the rest of a check (Skip leaves out
+	// the whole check): the key is a check name, the value a substring of the Detail of a Fail
+	// of that check. A Fail whose Detail contains it is reported as a Skip with Detail
+	// "allowed: <the original Detail>" (Missing stays empty); a Fail with another Detail, and
+	// a check that passes, are untouched. An empty substring allows nothing. A check is
+	// judged by its first mistake, so a check that fails with an allowed Detail did not get
+	// to run what follows it.
+	Allow map[string]string
 
 	// ReportOnly makes Run return the report without failing tb on a Fail.
 	ReportOnly bool
@@ -97,6 +116,49 @@ func (r Report) ByName() map[string]Result {
 		out[res.Name] = res
 	}
 	return out
+}
+
+// Require fails tb, once per check named, for every one that did not Pass: a Fail, a Skip (a
+// check the server's capabilities or the Options left out is not a pass) and a name that is
+// not one of Names(). Each failure line has the check's status, its RFC and its Detail (and
+// the capability a Skip is missing). Use it to pin what a server must do, e.g.
+// r.Require(t, "compress", "starttls"), after Run with ReportOnly or RunVerbose. A name
+// listed twice is reported once.
+func (r Report) Require(tb testing.TB, names ...string) {
+	tb.Helper()
+	by := r.ByName()
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		res, ok := by[n]
+		switch {
+		case !ok:
+			tb.Errorf("conformance: required check %q is not in the report (a check name from Names(), and Check or Run must have returned a report)", n)
+		case res.Status != Pass:
+			msg := fmt.Sprintf("conformance: required check %s (%s) is %s", n, res.RFC, res.Status)
+			if res.Detail != "" {
+				msg += ": " + res.Detail
+			}
+			tb.Errorf("%s", msg)
+		}
+	}
+}
+
+// RequireNoFail fails tb once per check that failed; Pass and Skip are fine. It is what Run
+// does without ReportOnly, for a report taken with ReportOnly or Check. An empty report (the
+// server was not reached) is a failure too.
+func (r Report) RequireNoFail(tb testing.TB) {
+	tb.Helper()
+	if len(r.Results) == 0 {
+		tb.Errorf("conformance: the report has no results (the server was not reached)")
+		return
+	}
+	for _, f := range r.Failed() {
+		tb.Errorf("conformance: FAIL %s (%s): %s", f.Name, f.RFC, f.Detail)
+	}
 }
 
 // Counts returns the number of Pass, Fail and Skip results.
