@@ -1,6 +1,9 @@
 package article
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,8 +21,21 @@ const maxNameLen = 100
 // msgSeq numbers the Message-IDs of the process.
 var msgSeq atomic.Uint64
 
+// procNonce is chosen once per process: random bytes and the process id in base 36, so two test
+// binaries (go test runs the packages in parallel) with a test of the same name that draw the
+// same clock tick and sequence number still differ.
+var procNonce = func() string {
+	var b [5]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail on supported systems; the pid and the clock still apply
+		binary.BigEndian.PutUint32(b[:4], uint32(time.Now().UnixNano()))
+	}
+	n := uint64(b[0])<<32 | uint64(binary.BigEndian.Uint32(b[1:]))
+	return strconv.FormatUint(n, 36) + "-" + strconv.FormatUint(uint64(os.Getpid()), 36)
+}()
+
 // MsgID returns a new Message-ID, unique in the process and across runs, made from the test
-// name: "<Name.time.seq@testkit.invalid>" (see NewMsgID).
+// name: "<Name.time.nonce.seq@testkit.invalid>" (see NewMsgID).
 func MsgID(tb testing.TB) string {
 	tb.Helper()
 	return NewMsgID(tb.Name(), DefaultDomain)
@@ -31,19 +47,20 @@ func MsgIDAt(tb testing.TB, domain string) string {
 	return NewMsgID(tb.Name(), domain)
 }
 
-// NewMsgID returns "<name.time.seq@domain>": name with every character that is not a letter,
+// NewMsgID returns "<name.time.nonce.seq@domain>": name with every character that is not a letter,
 // digit, '-' or '_' replaced by '_' (a Go test name such as "TestX/sub case#01" holds spaces,
 // slashes and '#'; it is cut to 100 bytes, "t" when empty), the time in nanoseconds in base 36,
-// and a sequence number that counts up in the process, so two calls never return the same
-// string, also from parallel goroutines, and two runs against a server that keeps its history
-// differ. domain "" is DefaultDomain; a domain is not checked. With a valid domain
+// a nonce chosen once per process (random bits and the process id, base 36), and a sequence
+// number that counts up in the process, so two calls never return the same string, also from
+// parallel goroutines or from two test binaries running at the same time, and two runs against
+// a server that keeps its history differ. domain "" is DefaultDomain; a domain is not checked. With a valid domain
 // (letters, digits, '-' and dots) the result satisfies ValidMsgID and is far below 250 bytes.
 func NewMsgID(name, domain string) string {
 	if domain == "" {
 		domain = DefaultDomain
 	}
 	return "<" + sanitize(name) + "." + strconv.FormatInt(time.Now().UnixNano(), 36) + "." +
-		strconv.FormatUint(msgSeq.Add(1), 10) + "@" + domain + ">"
+		procNonce + "." + strconv.FormatUint(msgSeq.Add(1), 10) + "@" + domain + ">"
 }
 
 // sanitize turns a test name into an id-left part made of letters, digits, '-' and '_'.

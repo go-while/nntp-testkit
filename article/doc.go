@@ -34,14 +34,16 @@
 //	const DefaultDomain = "testkit.invalid"
 //	func MsgID(tb testing.TB) string                       // MsgIDAt(tb, DefaultDomain)
 //	func MsgIDAt(tb testing.TB, domain string) string      // NewMsgID(tb.Name(), domain)
-//	func NewMsgID(name, domain string) string              // "<name.time.seq@domain>"
+//	func NewMsgID(name, domain string) string              // "<name.time.nonce.seq@domain>"
 //	func ValidMsgID(id string) bool
 //
 // NewMsgID writes the name with every character that is not a letter, digit, '-' or '_' replaced
 // by '_' (cut to 100 bytes, "t" when empty), then the time in nanoseconds in base 36, then a
-// process-wide sequence number; domain "" is DefaultDomain and a domain is not checked. Two
-// calls never return the same string, also from parallel tests, and two runs differ (a server
-// with persistent history does not see a duplicate). ValidMsgID checks the form generators
+// nonce chosen once per process (random bits and the process id, base 36), then a process-wide
+// sequence number; domain "" is DefaultDomain and a domain is not checked. Two calls never
+// return the same string, also from parallel tests or from test binaries that run at the same
+// time with a same-named test, and two runs differ (a server with persistent history does not
+// see a duplicate). ValidMsgID checks the form generators
 // write: 5 to 250 bytes, "<" dot-atom-text "@" dot-atom-text ">" (RFC 5536 section 3.1.3; the
 // quoted and literal forms are not accepted).
 //
@@ -51,6 +53,8 @@
 //		Newsgroups, Subject, From, PathHost, MessageID, Domain string
 //		Date time.Time
 //		Body []string
+//		Approved string   // an Approved header after Date when set
+//		Extra    []string // more header lines after Date, each written raw
 //	}
 //	func New(tb testing.TB, o Options) *Article            // minimal valid article
 //	func Minimal(tb testing.TB, group string) *Article     // New with the group set
@@ -58,7 +62,7 @@
 //
 // New writes Path ("<PathHost>!not-for-mail"), From, Newsgroups, Subject, Message-ID and Date
 // (RFC 5536 section 3, UTC, to the second) in that order, CRLF line ends, the empty line and a
-// short body (Options.Body lines, each plus CRLF). Every zero Options field takes its default
+// short body (Options.Body lines, each plus CRLF); Approved and Extra fields follow Date. Every zero Options field takes its default
 // (group "test", subject "test article <sanitized test name>", a generated Message-ID, now).
 // tb is used for its name only.
 //
@@ -67,7 +71,10 @@
 //
 //	func (a *Article) Add(name, value string) *Article    // append "name: value"
 //	func (a *Article) AddRaw(raw string) *Article         // append raw as one field, byte for byte
-//	func (a *Article) Set(name, value string) *Article    // replace the first field of that name in place, drop the others, append if none
+//	func (a *Article) Set(name, value string) *Article    // replace the first field of that name in place (keeping its spelling of the name), drop the others, append if none
+//	func (a *Article) SetRaw(name, raw string) *Article   // the same with the exact field text: an empty "Path:" that stays in place
+//	func (a *Article) Insert(i int, raw string) *Article  // raw as a field before index i (clamped)
+//	func (a *Article) Canon() *Article                    // Parse(a.Bytes()): the article as it is once on the wire
 //	func (a *Article) Del(name string) *Article           // drop every field of that name
 //	func (a *Article) SetBody(b []byte) *Article          // copy of b, as is
 //	func (a *Article) SetBodyLines(lines ...string) *Article // each line plus CRLF; no dot-doubling
@@ -82,8 +89,10 @@
 //
 // Add writes "name: value", so an empty value gives "name: " with the space; AddRaw("Path:")
 // writes the empty Path without it, AddRaw("Path: a\r\n !b") folds before the '!', AddRaw("no
-// colon here") writes a line without colon. Set resets the line end of the replaced field to
-// CRLF. All the edit methods return the article, so calls chain.
+// colon here") writes a line without colon. Set keeps the spelling of the name
+// the old field had (Set("subject", "x") on "Subject: a" gives "Subject: x"; a new field is
+// spelled as given) and resets the line end of the replaced field to CRLF; SetRaw changes the
+// spelling, spacing or anything else by giving the whole text. All the edit methods return the article, so calls chain.
 //
 // Output:
 //
@@ -103,6 +112,7 @@
 //
 //	func Parse(raw []byte) *Article
 //	func ParseLines(lines []string) *Article   // each line plus CRLF, then Parse
+//	func ParseDotBlock(raw []byte) *Article    // the client's RawUntilDot bytes: terminator dropped, dots un-stuffed, nothing else changed
 //
 // Parse splits at the first empty line (CRLF or LF line ends both count; an empty line has no
 // bytes before its LF except an optional CR). Every header line stays: a line that starts with
@@ -113,8 +123,18 @@
 // a header becomes a line end for Parse: the text after it is a field of its own, usually
 // without colon; a bare CR stays inside its line. Value unfolds for lookup (removes each CRLF
 // or LF directly before a space or tab) and Duplicates and Count find repeated headers. The
-// result shares no memory with its input. ParseLines is for the client's ReadDotLines (the
-// un-stuffed lines of a served article).
+// result shares no memory with its input.
+//
+// A bare LF inside a field written by Add, Set or AddRaw is a line end once the article is on
+// the wire: a reader sees the text after it as a field of its own (Set("Subject", "a\nX-Evil:
+// y") sends an X-Evil header). Count, Get and the like see the article as built; Canon, which
+// Compare applies to both sides, sees it as read back.
+//
+// To read a served article back, use ParseDotBlock on the client's RawUntilDot: it keeps every
+// byte but the terminator and the stuffing dots. ParseLines on ReadDotLines output is for
+// well-formed articles only: ReadDotLines cannot tell a bare LF from CRLF and a CR before the
+// CRLF is lost, so a bare-LF article would show a false body difference. A server that itself
+// normalises bare CR or LF in what it serves cannot be compared byte for byte.
 //
 // Comparing a sent and a served article:
 //
@@ -122,9 +142,15 @@
 //	type DiffOptions struct {
 //		Allow               []string // more names a server may add, lose or change
 //		Strict              bool     // do not allow DefaultAllowed
+//		CaseSensitiveNames  bool     // a name spelled differently (From, FROM) is a change
 //		IgnoreTrailingSpace bool     // compare bodies without trailing space, tab and CR per line and without empty lines at the end
 //	}
-//	type Change struct{ Name string; Sent, Got []string }
+//	type Change struct {
+//		Name                string
+//		Sent, Got           []string
+//		SentNames, GotNames []string // spellings, set when CaseSensitiveNames found them different
+//	}
+//	func PathExtends(sent, got *Article) bool // got's Path is sent's with entries added in front (or the same)
 //	type Diff struct {
 //		Added, Lost []string
 //		Changed     []Change
@@ -141,8 +167,11 @@
 // The default allow-list is Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host,
 // NNTP-Posting-Date, Lines, X-Trace and X-Complaints-To: servers add, trim or rewrite those, so
 // they are ignored (also when they differ, are missing or appear only in got). Everything else
-// is matched by lower-cased name and compared by unfolded values, so re-folding is no change,
-// but a trimmed, re-spaced or re-cased value is. Added: names only in got; Lost: only in sent;
+// is canonicalised (Canon) on both sides, matched by lower-cased name (exactly with
+// CaseSensitiveNames) and compared by value with every fold (a line break and the spaces and
+// tabs after it) read as one space and spaces and tabs trimmed at both ends: re-folding, also
+// with a tab, is no change, but a different word, inner spacing or case is. PathExtends checks
+// what Compare lets pass: that the server kept the sent Path as the tail of its own. Added: names only in got; Lost: only in sent;
 // Changed: in both with other values or another number of fields (duplicates lost or
 // invented); Reordered: the fields both articles hold equally often come in another order. A
 // header that is missing in sent and got is nothing. The bodies are equal byte for byte unless
@@ -163,12 +192,17 @@
 // The cases (names; the Invalid ones marked *): latin1 (8-bit ISO-8859-1 body with MIME
 // headers), utf8, nul* (NUL in the body), nul-header*, bare-cr* and bare-lf* (in the body),
 // bare-cr-header*, bare-lf-header*, dot-lines (lines ".", "..", ".hidden", "...three"),
-// long-line (100000 bytes), long-header (5000 byte Subject), folded-subject, folded-path (a
+// long-line* (100000 bytes, over the 998 octets of RFC 5322 section 2.1.1), long-header* (5000
+// byte Subject on one line), max-line (998 octet body line and Subject), long-message-id (250
+// octets), folded-subject, folded-path (a
 // fold before '!'), no-colon*, space-before-colon*, dup-header* (Subject twice), empty-path*
 // ("Path:"), empty-body, no-blank-line* (no empty line, no body), header-case (lower and upper
-// case names), no-space-after-colon, latin1-header*, trailing-space, blank-lines. Each is a
+// case names), no-space-after-colon* (RFC 5536 writes "Name:" SP), empty-subject*, lf-only* (every line end a
+// bare LF), latin1-header*, trailing-space, blank-lines. Each is a
 // fresh article of Minimal(tb, group) with the quirk applied, so it has its own Message-ID.
-// Parse(c.Article(...).Bytes()).Bytes() equals the bytes for every case.
+// Parse(c.Article(...).Bytes()).Bytes() equals the bytes for every case. A zero Case builds
+// the plain Minimal article. Note that the wire adds a CRLF to a body that does not end in one
+// (lf-only), as the terminator needs it.
 //
 // Control messages (RFC 5537), each the article of New(tb, o) with a Control header added after
 // Subject; Options fields set by the caller win over the defaults named here:
@@ -177,7 +211,8 @@
 //	func Newgroup(tb testing.TB, o Options, group string, moderated bool) *Article
 //	func Rmgroup(tb testing.TB, o Options, group string) *Article
 //
-// Cancel: "Control: cancel <target>", Subject "cmsg cancel <target>", body "cancel <target>";
+// Cancel: "Control: cancel <target>", Subject "cmsg cancel <target>", body "cancel <target>",
+// Newsgroups o.Newsgroups or "test" (give the target's groups when the server needs them);
 // a server honours it only for the same From (set o.From to the original's) or, with a
 // Cancel-Key, a matching key (see package canlock). Newgroup: "Control: newgroup <group>"
 // (plus " moderated"), Subject "cmsg newgroup <group>", Newsgroups the group, a body in the

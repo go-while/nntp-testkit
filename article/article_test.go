@@ -330,7 +330,7 @@ func TestParseStructure(t *testing.T) {
 func TestEdit(t *testing.T) {
 	a := article.Parse([]byte("A: 1\r\nB: 2\r\na: 3\r\nC: 4\r\n\r\nx\r\n"))
 	a.Set("a", "new")
-	if got := a.Fields; len(got) != 3 || got[0].Raw != "a: new" || got[1].Raw != "B: 2" || got[2].Raw != "C: 4" {
+	if got := a.Fields; len(got) != 3 || got[0].Raw != "A: new" || got[1].Raw != "B: 2" || got[2].Raw != "C: 4" {
 		t.Errorf("Set: %q", got)
 	}
 	a.Set("D", "5")
@@ -519,11 +519,24 @@ func TestCorpusContents(t *testing.T) {
 	check("latin1-header", strings.Contains(get("latin1-header").Get("Subject"), "\xe9"), "latin1 header")
 	check("bare-cr-header", strings.Contains(get("bare-cr-header").Get("Subject"), "\r"), "bare cr header")
 	// bare LF in a header: Parse sees an extra field, bytes still survive
-	lf := get("bare-lf-header")
-	check("bare-lf-header", len(article.Parse(lf.Bytes()).Fields) == len(lf.Fields)+1, "extra field")
+	blf := get("bare-lf-header")
+	check("bare-lf-header", len(article.Parse(blf.Bytes()).Fields) == len(blf.Fields)+1 && len(blf.Canon().Fields) == len(blf.Fields)+1, "extra field")
+	check("long-line", get("long-line").BodyLines()[1] != "" && len(get("long-line").BodyLines()[1]) > 998, "over 998")
+	check("long-header", len(get("long-header").Get("Subject")) == 5000 && !strings.HasSuffix(get("long-header").Get("Subject"), " "), "5000, no trailing space")
+	ml := get("max-line")
+	for _, l := range ml.Lines() {
+		check("max-line", len(l) <= 998, "line over 998")
+	}
+	check("max-line", len(ml.BodyLines()[1]) == 998 && len(ml.Fields[3].Raw) == 998, "998 exactly")
+	lf := get("lf-only")
+	check("lf-only", !bytes.Contains(lf.Bytes(), []byte("\r")) && bytes.Count(lf.Bytes(), []byte("\n")) == len(lf.Fields)+3, "only LF")
+	check("empty-subject", get("empty-subject").Has("Subject") && get("empty-subject").Get("Subject") == "", "empty subject")
+	lm := get("long-message-id")
+	check("long-message-id", len(lm.MessageID()) == 250 && article.ValidMsgID(lm.MessageID()), "250 and valid")
+	check("long-message-id", lm.Fields[4].Name() == "Message-ID", "position")
 	// the Invalid flags
-	valid := map[string]bool{"latin1": true, "utf8": true, "dot-lines": true, "long-line": true, "long-header": true,
-		"folded-subject": true, "folded-path": true, "empty-body": true, "header-case": true, "no-space-after-colon": true,
+	valid := map[string]bool{"latin1": true, "utf8": true, "dot-lines": true, "max-line": true, "long-message-id": true,
+		"folded-subject": true, "folded-path": true, "empty-body": true, "header-case": true,
 		"trailing-space": true, "blank-lines": true}
 	for _, c := range article.Corpus() {
 		if c.Invalid == valid[c.Name] {
@@ -713,5 +726,212 @@ func TestControl(t *testing.T) {
 		if a.Count("Control") != 1 || !bytes.Equal(article.Parse(a.Bytes()).Bytes(), a.Bytes()) {
 			t.Errorf("control article: %q", a)
 		}
+	}
+}
+
+func TestCaseZero(t *testing.T) {
+	z := article.Case{}.Article(t, "alt.x")
+	if !hasRequired(z) || z.Get("Newsgroups") != "alt.x" {
+		t.Errorf("zero case: %q", z)
+	}
+}
+
+func TestMsgIDHasProcessNonce(t *testing.T) {
+	// two ids of the same name and domain differ in the sequence and share the nonce
+	a, b := article.NewMsgID("n", "d.invalid"), article.NewMsgID("n", "d.invalid")
+	pa, pb := strings.Split(a[1:len(a)-1], "@")[0], strings.Split(b[1:len(b)-1], "@")[0]
+	fa, fb := strings.Split(pa, "."), strings.Split(pb, ".")
+	if len(fa) != 4 || len(fb) != 4 || fa[2] != fb[2] || fa[2] == "" || fa[3] == fb[3] {
+		t.Errorf("fields %q %q", fa, fb)
+	}
+	if !strings.Contains(fa[2], "-") || !article.ValidMsgID(a) {
+		t.Errorf("nonce %q in %q", fa[2], a)
+	}
+}
+
+func TestCanon(t *testing.T) {
+	a := article.Minimal(t, "x").Set("Subject", "a\nX-Evil: y")
+	if a.Count("X-Evil") != 0 {
+		t.Fatal("before Canon")
+	}
+	c := a.Canon()
+	if c.Count("X-Evil") != 1 || c.Get("X-Evil") != "y" || !bytes.Equal(c.Bytes(), a.Bytes()) {
+		t.Errorf("Canon: %q", c)
+	}
+	if c.Count("X-Evil") != article.Parse(a.Bytes()).Count("X-Evil") {
+		t.Error("Canon differs from Parse(Bytes())")
+	}
+}
+
+func TestCompareRelayOfBrokenArticles(t *testing.T) {
+	// an untouched relay of every corpus case shows no difference, whatever its line ends
+	for _, c := range article.Corpus() {
+		t.Run(c.Name, func(t *testing.T) {
+			sent := c.Article(t, "x")
+			got := article.ParseDotBlock([]byte(stuffed(sent.Bytes())))
+			if !bytes.HasSuffix(sent.Bytes(), []byte("\r\n")) {
+				// the terminator needs a CRLF before it, so the wire adds one to such a body
+				sent = article.Parse(append(sent.Bytes(), "\r\n"...))
+			}
+			if d := article.Compare(sent, got, article.DiffOptions{}); !d.Empty() {
+				t.Errorf("relay shows a difference:\n%s", d)
+			}
+			if d := article.Compare(sent, got, article.DiffOptions{Strict: true, CaseSensitiveNames: true}); !d.Empty() {
+				t.Errorf("strict relay shows a difference:\n%s", d)
+			}
+			if !bytes.Equal(got.Bytes(), sent.Bytes()) {
+				t.Errorf("bytes changed")
+			}
+		})
+	}
+	a := article.Minimal(t, "x").Set("Subject", "bare\nlf")
+	if d := article.Compare(a, article.Parse(a.Bytes()), article.DiffOptions{}); !d.Empty() {
+		t.Errorf("bare LF: %s", d)
+	}
+}
+
+// stuffed is raw as a client sends it: dot-stuffed at every CRLF line start, then ".\r\n".
+func stuffed(raw []byte) string {
+	s := string(raw)
+	if strings.HasPrefix(s, ".") {
+		s = "." + s
+	}
+	s = strings.ReplaceAll(s, "\r\n.", "\r\n..")
+	if s != "" && !strings.HasSuffix(s, "\r\n") {
+		s += "\r\n"
+	}
+	return s + ".\r\n"
+}
+
+func TestParseDotBlock(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{".\r\n", ""},
+		{"A: b\r\n\r\nx\r\n.\r\n", "A: b\r\n\r\nx\r\n"},
+		{"A: b\r\n\r\n..\r\n...x\r\n..\r\n.\r\n", "A: b\r\n\r\n.\r\n..x\r\n.\r\n"},
+		{"..A: b\r\n\r\n.\r\n", ".A: b\r\n\r\n"},
+		{"A: b\r\n\r\nbare\nlf\rcr\r\r\n.\r\n", "A: b\r\n\r\nbare\nlf\rcr\r\r\n"},
+		{"x\n..y\r\n.\r\n", "x\n..y\r\n"},
+		{"no terminator\r\n", "no terminator\r\n"},
+		{"", ""},
+	} {
+		if got := article.ParseDotBlock([]byte(tt.in)).Bytes(); string(got) != tt.want {
+			t.Errorf("ParseDotBlock(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+	// agrees with client.Stuff
+	a := article.Minimal(t, "x").SetBodyLines(".", "..", ".x", "")
+	if got := article.ParseDotBlock([]byte(client.Stuff(a.Lines()))); !bytes.Equal(got.Bytes(), a.Bytes()) {
+		t.Errorf("round trip through Stuff: %q", got.Bytes())
+	}
+}
+
+func TestSetRawInsert(t *testing.T) {
+	a := article.Minimal(t, "x")
+	a.SetRaw("path", "Path:")
+	if a.Fields[0].Raw != "Path:" || a.Get("Path") != "" || len(a.Fields) != 6 {
+		t.Errorf("SetRaw: %q", a.Fields)
+	}
+	a.SetRaw("X-New", "X-New:v")
+	if a.Fields[len(a.Fields)-1].Raw != "X-New:v" {
+		t.Errorf("SetRaw appends: %q", a.Fields)
+	}
+	a.Add("X-Dup", "1").Add("x-dup", "2").SetRaw("X-Dup", "x-DUP : z")
+	if a.Count("X-Dup") != 0 || a.Count("x-dup ") != 1 {
+		t.Errorf("SetRaw dup: %q", a.Fields)
+	}
+	// Set keeps the existing spelling
+	b := article.Parse([]byte("SUBJECT: one\r\nsubject: two\r\n\r\n"))
+	b.Set("Subject", "new")
+	if string(b.Bytes()) != "SUBJECT: new\r\n\r\n" {
+		t.Errorf("Set spelling: %q", b.Bytes())
+	}
+	b.Set("Other", "v")
+	if b.Fields[1].Raw != "Other: v" {
+		t.Errorf("Set new name: %q", b.Fields)
+	}
+	c := (&article.Article{}).AddRaw("a: 1").AddRaw("c: 3")
+	c.Insert(1, "b: 2").Insert(0, "z: 0").Insert(99, "e: 5").Insert(-4, "y: -")
+	var raws []string
+	for _, f := range c.Fields {
+		raws = append(raws, f.Raw)
+	}
+	if !reflect.DeepEqual(raws, []string{"y: -", "z: 0", "a: 1", "b: 2", "c: 3", "e: 5"}) {
+		t.Errorf("Insert: %q", raws)
+	}
+}
+
+func TestOptionsApprovedExtra(t *testing.T) {
+	a := article.New(t, article.Options{Approved: "mod@x.invalid", Extra: []string{"X-One: 1", "no colon"}})
+	n := len(a.Fields)
+	if a.Fields[n-3].Raw != "Approved: mod@x.invalid" || a.Fields[n-2].Raw != "X-One: 1" || a.Fields[n-1].Raw != "no colon" || a.Fields[n-4].Name() != "Date" {
+		t.Errorf("fields %q", a.Fields)
+	}
+	if article.Minimal(t, "x").Has("Approved") {
+		t.Error("Approved by default")
+	}
+	g := article.Newgroup(t, article.Options{Approved: "a@b"}, "alt.g", false)
+	if g.Get("Approved") != "a@b" || g.Count("Control") != 1 {
+		t.Errorf("newgroup: %q", g)
+	}
+	// Cancel's group default
+	if c := article.Cancel(t, article.Options{}, "<a@b>"); c.Get("Newsgroups") != "test" {
+		t.Errorf("cancel default group %q", c.Get("Newsgroups"))
+	}
+}
+
+func TestComparePathExtends(t *testing.T) {
+	mk := func(p string) *article.Article { return (&article.Article{}).AddRaw("Path: " + p) }
+	for _, tt := range []struct {
+		sent, got string
+		none      string // "sent" or "got": that side has no Path
+		want      bool
+	}{
+		{"peer!not-for-mail", "peer!not-for-mail", "", true},
+		{"peer!not-for-mail", "me!peer!not-for-mail", "", true},
+		{"peer!not-for-mail", "a!b!peer!not-for-mail", "", true},
+		{"peer!not-for-mail", "me!speer!not-for-mail", "", false},
+		{"peer!not-for-mail", "me!peer!not-for-mail!x", "", false},
+		{"peer!not-for-mail", "not-for-mail", "", false},
+		{"peer!not-for-mail", "me!other!not-for-mail", "", false},
+		{"peer\r\n !not-for-mail", "me!peer!\r\n\tnot-for-mail", "", true},
+		{"", "", "sent", true},
+		{"peer!x", "", "got", false},
+	} {
+		s, g := mk(tt.sent), mk(tt.got)
+		switch tt.none {
+		case "sent":
+			s = &article.Article{}
+		case "got":
+			g = &article.Article{}
+		}
+		if got := article.PathExtends(s, g); got != tt.want {
+			t.Errorf("PathExtends(%q, %q) = %v", tt.sent, tt.got, got)
+		}
+	}
+}
+
+func TestCompareRefoldAndNameCase(t *testing.T) {
+	sent := article.Parse([]byte("Subject: one two three\r\nFrom: x\r\n\r\nb\r\n"))
+	got := article.Parse([]byte("Subject: one\r\n\ttwo\r\n  three\r\nFrom: x\r\n\r\nb\r\n"))
+	if d := article.Compare(sent, got, article.DiffOptions{}); !d.Empty() {
+		t.Errorf("refold with tab: %s", d)
+	}
+	if d := article.Compare(got, sent, article.DiffOptions{}); !d.Empty() {
+		t.Errorf("fold removed: %s", d)
+	}
+	// but a changed inner space is a change, trimmed ends are not
+	if d := article.Compare(sent, sent.Clone().Set("Subject", "one  two three"), article.DiffOptions{}); len(d.Changed) != 1 {
+		t.Errorf("inner space: %s", d)
+	}
+	if d := article.Compare(sent, sent.Clone().Set("Subject", "  one two three  "), article.DiffOptions{}); !d.Empty() {
+		t.Errorf("trimmed ends: %s", d)
+	}
+	re := sent.Clone().SetRaw("From", "FROM: x")
+	if d := article.Compare(sent, re, article.DiffOptions{}); !d.Empty() {
+		t.Errorf("name case by default: %s", d)
+	}
+	d := article.Compare(sent, re, article.DiffOptions{CaseSensitiveNames: true})
+	if len(d.Changed) != 1 || !reflect.DeepEqual(d.Changed[0].SentNames, []string{"From"}) || !reflect.DeepEqual(d.Changed[0].GotNames, []string{"FROM"}) {
+		t.Errorf("CaseSensitiveNames: %+v", d)
 	}
 }

@@ -26,6 +26,8 @@ type Options struct {
 	Domain     string    // domain of a generated Message-ID, "" = DefaultDomain
 	Date       time.Time // zero = now; written in UTC to the second
 	Body       []string  // body lines, none = one short line of text
+	Approved   string    // when set, an Approved header after Date (moderated groups, control messages)
+	Extra      []string  // more header lines, each written as one field after Date (and Approved) with AddRaw
 }
 
 // New builds a minimal valid article: the mandatory headers of RFC 5536 section 3 in the order
@@ -54,6 +56,12 @@ func New(tb testing.TB, o Options) *Article {
 		Add("Subject", subject).
 		Add("Message-ID", id).
 		Add("Date", date.UTC().Format(DateLayout))
+	if o.Approved != "" {
+		a.Add("Approved", o.Approved)
+	}
+	for _, raw := range o.Extra {
+		a.AddRaw(raw)
+	}
 	body := o.Body
 	if len(body) == 0 {
 		body = []string{"This is a test article made by nntp-testkit."}
@@ -77,8 +85,9 @@ func orDefault(s, def string) string {
 // Cancel builds a cancel control message for the article with Message-ID target
 // (RFC 5537 section 5.3): the article of New(tb, o) with the extra header
 // "Control: cancel <target>", Subject "cmsg cancel <target>" (unless o.Subject is set) and the
-// body "cancel <target>" (unless o.Body is set). A server honours it only when its From
-// matches the target's, so set o.From to the original's.
+// body "cancel <target>" (unless o.Body is set). Newsgroups is o.Newsgroups, "test" when empty:
+// give the groups of the target, for a server that looks the target up through them. A server
+// honours the cancel only when its From matches the target's, so set o.From to the original's.
 func Cancel(tb testing.TB, o Options, target string) *Article {
 	tb.Helper()
 	return control(tb, o, "cancel "+target, "cancel "+target)
@@ -129,9 +138,7 @@ func control(tb testing.TB, o Options, ctl, body string) *Article {
 	a := New(tb, o)
 	for i, f := range a.Fields {
 		if sameName(f.Name(), "Subject") {
-			fields := append([]Field(nil), a.Fields[:i+1]...)
-			fields = append(fields, Field{Raw: "Control: " + ctl})
-			a.Fields = append(fields, a.Fields[i+1:]...)
+			a.Insert(i+1, "Control: "+ctl)
 			break
 		}
 	}
