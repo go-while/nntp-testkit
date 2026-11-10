@@ -13,7 +13,8 @@
 //	func (r Report) ByName() map[string]Result  // the results by check name
 //
 // Every check opens its own connection, so one failure cannot poison the next. A check whose
-// capability the server does not advertise (CAPABILITIES) is reported as Skip, not Fail; the
+// capability the server does not advertise (CAPABILITIES) is reported as Skip, not Fail, with
+// Result.Missing naming the capability and Detail "<Missing> not advertised"; the
 // capability list itself is checked for format and for consistency with behaviour (READER →
 // GROUP works, OVER → OVER works, POST/IHAVE/STREAMING per RFC 4644). Options.Skip names checks
 // to leave out.

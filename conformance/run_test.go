@@ -129,6 +129,8 @@ func TestCheckStorePasses(t *testing.T) {
 				switch {
 				case skipped && (res.Status != Skip || !strings.Contains(res.Detail, want)):
 					t.Errorf("%s: %s %q, want SKIP %q", res.Name, res.Status, res.Detail, want)
+				case skipped && strings.HasSuffix(want, " not advertised") && res.Missing != strings.TrimSuffix(want, " not advertised"):
+					t.Errorf("%s: Missing %q, want %q", res.Name, res.Missing, strings.TrimSuffix(want, " not advertised"))
 				case !skipped && res.Status != Pass:
 					t.Errorf("%s: %s %q, want PASS", res.Name, res.Status, res.Detail)
 				}
@@ -452,7 +454,7 @@ func TestRunNeedsModeReader(t *testing.T) {
 	}}
 	srv := fakeserver.New(t, caps(""))
 	r := runChecks(Options{Addr: srv.Addr()}, []check{c})[0]
-	if r.Status != Skip || r.Detail != "server does not advertise XFEATURE" || ran {
+	if r.Status != Skip || r.Detail != "XFEATURE not advertised" || r.Missing != "XFEATURE" || ran {
 		t.Errorf("without the capability: %s %q (ran %v), want SKIP without running", r.Status, r.Detail, ran)
 	}
 	srv = fakeserver.New(t, caps("MODE-READER"))

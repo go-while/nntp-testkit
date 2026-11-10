@@ -46,7 +46,7 @@ func runReaderPhase(o Options, checks []check, posts bool, out []Result) {
 			defer s.close()
 			_, _ = s.capabilities() // a failure stays in s.capsErr, as in the runner
 			if c.Needs != "" && !s.has(c.Needs) && !s.has("MODE-READER") {
-				out[i] = c.skip("server does not advertise " + c.Needs)
+				out[i] = c.notAdvertised(c.Needs)
 				return
 			}
 			out[i] = c.Run(s, c)
@@ -61,7 +61,7 @@ func runReaderPhase(o Options, checks []check, posts bool, out []Result) {
 func postSkip(o Options, so fakeserver.StoreOptions) string {
 	switch {
 	case so.ReaderOnly:
-		return "server does not advertise POST"
+		return "POST not advertised"
 	case o.PostGroup == "":
 		return "no Options.PostGroup"
 	}
