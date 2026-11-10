@@ -40,42 +40,48 @@ func StuffBytes(article []byte) []byte {
 
 var crlf = []byte("\r\n")
 
-// sendBytes writes raw to the connection in one write under the hang guard.
-func (c *Conn) sendBytes(raw []byte) error {
+// SendBytes is Send for a []byte: raw bytes in one write under the hang guard, nothing
+// appended (e.g. StuffBytes(article) after a 340 or 335, without a string conversion).
+func (c *Conn) SendBytes(raw []byte) error {
 	c.bump()
 	_, err := c.Conn.Write(raw)
 	return err
 }
 
 // tryTwoStep is POST and IHAVE: send cmd; when the first reply is want (340, 335) send the
-// article and return the final reply, else return the first one. A refusal is not an error.
-func (c *Conn) tryTwoStep(cmd string, want int, article []byte) (int, string, error) {
-	code, line, err := c.TryCmd("%s", cmd)
+// article and return the final reply with sent true, else return the first one with sent
+// false. A refusal is not an error.
+func (c *Conn) tryTwoStep(cmd string, want int, article []byte) (code int, line string, sent bool, err error) {
+	code, line, err = c.TryCmd("%s", cmd)
 	if err != nil || code != want {
-		return code, line, err
+		return code, line, false, err
 	}
-	if err := c.sendBytes(StuffBytes(article)); err != nil {
-		return code, line, fmt.Errorf("%s: sending the article: %w", cmd, err)
+	if err := c.SendBytes(StuffBytes(article)); err != nil {
+		return code, line, false, fmt.Errorf("%s: sending the article: %w", cmd, err)
 	}
 	code, line, err = c.ReadStatus()
 	if err != nil {
 		err = fmt.Errorf("%s: reply to the article: %w", cmd, err)
 	}
-	return code, line, err
+	return code, line, true, err
 }
 
 // TryPost sends POST; on 340 it sends article (see StuffBytes) and returns the final reply
-// (240, 441, 440 ...), otherwise the first reply (440, 480, 502 ...). A refusal is a result,
-// not an error: err is set only for an I/O, parse or strict-mode error, with the code and line
-// of the last reply read.
-func (c *Conn) TryPost(article []byte) (code int, line string, err error) {
+// (240, 441, 440 ...) with sent true, otherwise the first reply (440, 480, 502 ...) with sent
+// false: sent tells which stage answered, so a test that expects a refusal after the transfer
+// (441) can tell it from one before (440, 480; some servers also answer 436 at either stage).
+// A refusal is a result, not an error: err is set only for an I/O, parse or strict-mode
+// error, with the code and line of the last reply read; sent is then true when the article
+// was written.
+func (c *Conn) TryPost(article []byte) (code int, line string, sent bool, err error) {
 	return c.tryTwoStep("POST", 340, article)
 }
 
 // TryIhave sends "IHAVE id" (id is the message-ID as it goes on the wire, angle brackets
 // included, sent as given); on 335 it sends article and returns the final reply (235, 436,
-// 437), otherwise the first reply (435, 436, 480 ...). Refusals are results, not errors.
-func (c *Conn) TryIhave(id string, article []byte) (code int, line string, err error) {
+// 437) with sent true, otherwise the first reply (435, 436, 480 ...) with sent false. 436
+// comes at either stage: sent tells which. Refusals are results, not errors.
+func (c *Conn) TryIhave(id string, article []byte) (code int, line string, sent bool, err error) {
 	return c.tryTwoStep("IHAVE "+id, 335, article)
 }
 
@@ -85,13 +91,15 @@ func (c *Conn) TryCheck(id string) (code int, line string, err error) {
 }
 
 // TryTakethis sends "TAKETHIS id" and the article in one write, without waiting in between
-// (RFC 4644), then reads the reply (239, 439 ...).
-func (c *Conn) TryTakethis(id string, article []byte) (code int, line string, err error) {
+// (RFC 4644), then reads the reply (239, 439 ...). The article is always sent, so sent is true
+// unless the write failed; it is there so that the three transfer commands read alike.
+func (c *Conn) TryTakethis(id string, article []byte) (code int, line string, sent bool, err error) {
 	cmd := append([]byte("TAKETHIS "+id+"\r\n"), StuffBytes(article)...)
-	if err := c.sendBytes(cmd); err != nil {
-		return 0, "", fmt.Errorf("TAKETHIS %s: %w", id, err)
+	if err := c.SendBytes(cmd); err != nil {
+		return 0, "", false, fmt.Errorf("TAKETHIS %s: %w", id, err)
 	}
-	return c.ReadStatus()
+	code, line, err = c.ReadStatus()
+	return code, line, true, err
 }
 
 // TryModeStream sends MODE STREAM and returns the reply (203, 501, 480 ...).
@@ -122,22 +130,24 @@ func (c *Conn) failOn(what string, code int, line string, err error) (int, strin
 }
 
 // Post is TryPost that fails tb on an I/O or protocol error (not on a refusal) and returns the
-// code and line.
-func (c *Conn) Post(article []byte) (int, string) {
+// code, the line and whether the article was sent.
+func (c *Conn) Post(article []byte) (code int, line string, sent bool) {
 	if c.tb != nil {
 		c.tb.Helper()
 	}
-	code, line, err := c.TryPost(article)
-	return c.failOn("POST", code, line, err)
+	code, line, sent, err := c.TryPost(article)
+	code, line = c.failOn("POST", code, line, err)
+	return code, line, sent
 }
 
 // Ihave is TryIhave that fails tb on an I/O or protocol error (not on a refusal).
-func (c *Conn) Ihave(id string, article []byte) (int, string) {
+func (c *Conn) Ihave(id string, article []byte) (code int, line string, sent bool) {
 	if c.tb != nil {
 		c.tb.Helper()
 	}
-	code, line, err := c.TryIhave(id, article)
-	return c.failOn("IHAVE "+id, code, line, err)
+	code, line, sent, err := c.TryIhave(id, article)
+	code, line = c.failOn("IHAVE "+id, code, line, err)
+	return code, line, sent
 }
 
 // Check is TryCheck that fails tb on an I/O or protocol error.
@@ -149,13 +159,15 @@ func (c *Conn) Check(id string) (int, string) {
 	return c.failOn("CHECK "+id, code, line, err)
 }
 
-// Takethis is TryTakethis that fails tb on an I/O or protocol error.
-func (c *Conn) Takethis(id string, article []byte) (int, string) {
+// Takethis is TryTakethis that fails tb on an I/O or protocol error. sent is true (the article
+// always goes out with the command).
+func (c *Conn) Takethis(id string, article []byte) (code int, line string, sent bool) {
 	if c.tb != nil {
 		c.tb.Helper()
 	}
-	code, line, err := c.TryTakethis(id, article)
-	return c.failOn("TAKETHIS "+id, code, line, err)
+	code, line, sent, err := c.TryTakethis(id, article)
+	code, line = c.failOn("TAKETHIS "+id, code, line, err)
+	return code, line, sent
 }
 
 // ModeStream is TryModeStream that fails tb on an I/O or protocol error.
@@ -316,10 +328,11 @@ func (c *Conn) readBlockBounded() ([]string, error) {
 		if line == "." {
 			return out, nil
 		}
-		if strings.HasPrefix(line, "..") {
+		if strings.HasPrefix(line, ".") {
+			if c.Strict && !strings.HasPrefix(line, "..") {
+				return out, &StrictError{Kind: BadDotStuffing, Line: line + "\r\n"}
+			}
 			line = line[1:]
-		} else if c.Strict && strings.HasPrefix(line, ".") {
-			return out, &StrictError{Kind: BadDotStuffing, Line: line + "\r\n"}
 		}
 		size += len(line) + 2
 		out = append(out, line)

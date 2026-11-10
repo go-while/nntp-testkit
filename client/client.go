@@ -218,10 +218,11 @@ func (c *Conn) TryReadDotLines() ([]string, error) {
 		if line == "." {
 			return out, nil
 		}
-		if strings.HasPrefix(line, "..") {
+		if strings.HasPrefix(line, ".") {
+			if c.Strict && !strings.HasPrefix(line, "..") {
+				return out, &StrictError{Kind: BadDotStuffing, Line: line + "\r\n"}
+			}
 			line = line[1:]
-		} else if c.Strict && strings.HasPrefix(line, ".") {
-			return out, &StrictError{Kind: BadDotStuffing, Line: line + "\r\n"}
 		}
 		out = append(out, line)
 	}
@@ -330,13 +331,14 @@ func ExpectLines(got, want []string) error {
 	return nil
 }
 
-// Unstuff removes the dot-stuffing of raw wire lines (".." prefix → "."); it returns a new slice.
+// Unstuff removes the dot-stuffing of raw wire lines as RFC 3977 section 3.1.1 has the receiver
+// do it: the first "." of every line that starts with one goes ("..x" becomes ".x", ".x"
+// becomes "x"). The terminator is not part of the lines; a lone "." would become "". It
+// returns a new slice.
 func Unstuff(wire []string) []string {
 	out := make([]string, len(wire))
 	for i, l := range wire {
-		if strings.HasPrefix(l, "..") {
-			l = l[1:]
-		}
+		l = strings.TrimPrefix(l, ".")
 		out[i] = l
 	}
 	return out

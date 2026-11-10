@@ -25,6 +25,8 @@
 //	func (c *Conn) ExpectCmd(want int, format string, args ...any) string // Cmd; fails tb unless the code is want; the status line
 //	func (c *Conn) ExpectStatus(want int, what string) string             // ReadStatus; fails tb on error or unless the code is want
 //	func (c *Conn) MustSend(raw string)                                   // Send; fails tb on error
+//	func (c *Conn) SendBytes(raw []byte) error                            // Send for a []byte (one write, nothing appended)
+//	func (c *Conn) MustSendBytes(raw []byte)                              // SendBytes; fails tb on error
 //	func (c *Conn) Capabilities() (map[string][]string, []string)         // CAPABILITIES: 101 and a block ParseCapabilities takes, else fails tb
 //	func (c *Conn) TryReadDotLines() ([]string, error)     // dot-terminated block, un-stuffed, CRLF stripped
 //	func (c *Conn) ReadDotLines() []string                 // TryReadDotLines; fails tb on error
@@ -45,29 +47,37 @@
 //	func ParseCode(line string) (int, error)               // 3-digit code at the start, followed by space or end
 //	func ExpectCode(code int, line string, want ...int) error
 //	func ExpectLines(got, want []string) error
-//	func Unstuff(wire []string) []string                   // ".." prefix → "."
+//	func Unstuff(wire []string) []string                   // RFC 3977 3.1.1: the first "." of every line that starts with one goes ("..x" → ".x", ".x" → "x")
 //	func Stuff(lines []string) string                      // lines → dot-stuffed CRLF block with ".\r\n": what a client sends after POST/IHAVE/TAKETHIS
 //	func ParseCapabilities(lines []string) (map[string][]string, error) // CAPABILITIES lines → upper-cased label → arguments; error on a blank or doubled line
 //
 // Requests (requests.go): the article argument is the raw article in wire form (CRLF line ends,
 // not dot-stuffed, no terminator; the article package's Bytes returns it). A refusal is a
 // result, not a failure: the Try forms return an error only for an I/O, parse or strict-mode
-// error, the plain forms fail tb only then. The id is the message-ID as it goes on the wire,
+// error, the plain forms fail tb only then. The transfer commands (POST, IHAVE, TAKETHIS) also
+// return sent: whether the article went out. A POST or IHAVE answer can come at two stages (a
+// refusal before the transfer, 440/480 or IHAVE 435/436, or after it, 441, 437 or IHAVE 436),
+// and a test that checks the code only cannot tell them apart: check sent, or use the Expect
+// forms, which fail unless the article was sent and the final code is the wanted one (to expect
+// the early refusal use ExpectCmd on "POST" or "IHAVE <id>"). The id is the message-ID as it goes on the wire,
 // angle brackets included, sent as given.
 //
 //	func StuffBytes(article []byte) []byte                 // dot-stuff each line start (after CRLF only: a bare LF is not a line start, so a lenient server like innd sees such a "." unstuffed), add the final CRLF when missing, append ".\r\n"; every other byte (bare CR, NUL, 8-bit) stays
-//	func (c *Conn) TryPost(article []byte) (code int, line string, err error)        // POST; on 340 send the article, return the final reply (240, 441 ...), else the first (440, 480 ...)
-//	func (c *Conn) TryIhave(id string, article []byte) (int, string, error)          // IHAVE id; on 335 send and return the final (235, 436, 437), else the first (435, 436, 480 ...)
-//	func (c *Conn) TryCheck(id string) (int, string, error)                          // CHECK id: 238, 431, 438 ...
-//	func (c *Conn) TryTakethis(id string, article []byte) (int, string, error)       // TAKETHIS id and the article in one write, then the reply (239, 439 ...)
-//	func (c *Conn) TryModeStream() (int, string, error)                              // MODE STREAM
+//	func (c *Conn) TryPost(article []byte) (code int, line string, sent bool, err error)   // POST; on 340 send the article, return the final reply (240, 441 ...) and sent true, else the first (440, 480 ...) and sent false
+//	func (c *Conn) TryIhave(id string, article []byte) (int, string, bool, error)          // IHAVE id; on 335 send and return the final (235, 436, 437) and true, else the first (435, 436, 480 ...) and false
+//	func (c *Conn) TryCheck(id string) (int, string, error)                                // CHECK id: 238, 431, 438 ...
+//	func (c *Conn) TryTakethis(id string, article []byte) (int, string, bool, error)       // TAKETHIS id and the article in one write, then the reply (239, 439 ...); sent is true unless the write failed
+//	func (c *Conn) TryModeStream() (int, string, error)                                    // MODE STREAM
 //	func (c *Conn) TryLogin(user, pass string) (int, string, error)                  // AUTHINFO USER, on 381 AUTHINFO PASS; the final reply (281, 481, 482, 502, 483 ...) or the first when not 381
-//	func (c *Conn) Post(article []byte) (int, string)       // the plain forms: TryX, fail tb on an error, return code and line
-//	func (c *Conn) Ihave(id string, article []byte) (int, string)
+//	func (c *Conn) Post(article []byte) (int, string, bool)  // the plain forms: TryX, fail tb on an error, return code, line and sent
+//	func (c *Conn) Ihave(id string, article []byte) (int, string, bool)
 //	func (c *Conn) Check(id string) (int, string)
-//	func (c *Conn) Takethis(id string, article []byte) (int, string)
+//	func (c *Conn) Takethis(id string, article []byte) (int, string, bool)
 //	func (c *Conn) ModeStream() (int, string)
 //	func (c *Conn) Login(user, pass string) (int, string)
+//	func (c *Conn) ExpectPost(want int, article []byte) string            // TryPost; fails tb unless the article was sent (340) and the final code is want; the final line
+//	func (c *Conn) ExpectIhave(want int, id string, article []byte) string // the same for IHAVE (335 first)
+//	func (c *Conn) ExpectTakethis(want int, id string, article []byte) string // TAKETHIS; fails tb unless the reply is want
 //
 //	type Reply struct { Cmd string; Code int; Line string; Lines []string } // Lines: the un-stuffed block of a multi-line reply, nil otherwise
 //	func MultiLine(cmd string, code int) bool               // RFC 3977/4644/2980 multi-line reply codes (100, 101, 215, 220-222, 224, 225, 230, 231, 282; 211 after LISTGROUP)
@@ -99,7 +109,7 @@
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF
 // (NoCRLF); TryReadDotLines returns BadDotStuffing for a line that starts with "." but is neither
-// ".." stuffed nor the terminator, and NoTerminator when the block ends (EOF or deadline) without
+// ".." stuffed nor the terminator (non-strict mode un-stuffs it as RFC 3977 3.1.1 says, ".x" becomes "x"), and NoTerminator when the block ends (EOF or deadline) without
 // ".\r\n" (also for a partial last line). StrictError has Kind (an int with String()), Line (the
 // offending line, raw), Bytes (for Pending) and Err (the underlying read error, via Unwrap, so
 // errors.Is(err, io.EOF) and net.Error timeout checks work), and a descriptive Error(). The tb-failing methods (Cmd, ReadDotLines, RawUntilDot) fail with the

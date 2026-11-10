@@ -364,9 +364,10 @@ func TestExpectLines(t *testing.T) {
 }
 
 func TestUnstuff(t *testing.T) {
-	wire := []string{"..", "...x", ".y", "z", ""}
+	// RFC 3977 3.1.1: the first dot of every line that starts with one goes, also of ".y"
+	wire := []string{"..", "...x", ".y", "z", "", "a.b"}
 	got := Unstuff(wire)
-	if err := ExpectLines(got, []string{".", "..x", ".y", "z", ""}); err != nil {
+	if err := ExpectLines(got, []string{".", "..x", "y", "z", "", "a.b"}); err != nil {
 		t.Fatal(err)
 	}
 	if wire[0] != ".." {
@@ -374,6 +375,21 @@ func TestUnstuff(t *testing.T) {
 	}
 	if got := Unstuff(nil); len(got) != 0 {
 		t.Fatalf("nil = %q", got)
+	}
+}
+
+// TestNonStrictUnstuff: a lenient client takes an unstuffed ".x" line as RFC 3977 3.1.1 says
+// (the leading dot goes); strict mode reports it, and the rest of the block stays unread.
+func TestNonStrictUnstuff(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n..a\r\n.b\r\nc\r\n.\r\n"))
+	c := Dial(t, p.addr())
+	c.Strict = false
+	got, err := c.TryReadDotLines()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ExpectLines(got, []string{".a", "b", "c"}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -625,7 +641,7 @@ func TestNonStrictAcceptsLF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ExpectLines(got, []string{"a", ".b", ".c"}); err != nil {
+	if err := ExpectLines(got, []string{"a", ".b", "c"}); err != nil {
 		t.Fatal(err)
 	}
 	if raw := c.RawUntilDot(); string(raw) != "x\r\n.\n" {
