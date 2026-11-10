@@ -347,13 +347,15 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			if offerCompress && !c.compressAfter(verb, c.last, o.CompressOutputOnly) {
 				return
 			}
-			if c.closeDue() {
-				return
-			}
+			// the upgrade before the CloseAfter check, as in the Store handler: a STARTTLS that
+			// is the last command before the close still gets its handshake
 			if upgraded, ok := c.startTLSAfter(o.StartTLS, verb, c.last); !ok {
 				return
 			} else if upgraded {
 				userOK, userSent = false, false // RFC 4642 2.2.2.1
+			}
+			if c.closeDue() {
+				return
 			}
 		}
 	}
