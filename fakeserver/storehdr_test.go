@@ -74,6 +74,9 @@ func TestStoreHdrOptions(t *testing.T) {
 	if contains(caps, "HDR") {
 		t.Fatalf("NoHdr but CAPABILITIES lists HDR: %q", caps)
 	}
+	if !contains(caps, "LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT") {
+		t.Fatalf("NoHdr: the LIST capability must not name HEADERS: %q", caps)
+	}
 	_, got := wantBlock(t, c, "XHDR Subject <a2@x>", 221)
 	wantEqual(t, "XHDR with NoHdr", got, []string{"<a2@x> two"})
 

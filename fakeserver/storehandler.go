@@ -31,11 +31,12 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT (+ HEADERS, not NoHdr), NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
 //	LIST [ACTIVE [wm]]  215 "name high low y|n" (y when Posting and not ReaderOnly); wm is a wildmat (*, ?, comma list, ! negation)
+//	LIST ACTIVE.TIMES [wm] 215 "name created creator" (Group.Created in Unix seconds, creator "news@fakeserver.invalid")
 //	LIST NEWSGROUPS [wm] 215 "name<TAB>description"; LIST OVERVIEW.FMT 215; LIST HEADERS 215 (":", ":bytes", ":lines"; 501 with NoHdr); other keywords 501
 //	GROUP g             211 "count low high g" (current article = low, none when empty); 411
 //	LISTGROUP [g [rng]] 211 + numbers; 411; 412 without g and without a selected group
@@ -238,7 +239,11 @@ func (h *storeConn) disabled(cmd string) bool {
 }
 
 func (h *storeConn) capabilities() []string {
-	out := []string{"101 Capability list:", "VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT"}
+	list := "LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT"
+	if !h.o.NoHdr {
+		list += " HEADERS" // RFC 3977 7.6.2: mandatory with HDR
+	}
+	out := []string{"101 Capability list:", "VERSION 2", "READER", list}
 	if !h.o.NoNewnews {
 		out = append(out, "NEWNEWS")
 	}
@@ -322,6 +327,10 @@ func (h *storeConn) reported(g Group) Group {
 	return g
 }
 
+// activeTimesCreator is the creator field of every LIST ACTIVE.TIMES line (RFC 3977 7.6.4: who
+// created the group, often a mailbox).
+const activeTimesCreator = "news@fakeserver.invalid"
+
 func (h *storeConn) list(args []string) []string {
 	kw, pattern := "ACTIVE", ""
 	if len(args) > 0 {
@@ -336,6 +345,14 @@ func (h *storeConn) list(args []string) []string {
 		for _, g := range h.st.Groups() {
 			if pattern == "" || wildmat(pattern, g.Name) {
 				out = append(out, h.activeLine(g))
+			}
+		}
+		return append(out, ".")
+	case "ACTIVE.TIMES":
+		out := []string{"215 Information follows"}
+		for _, g := range h.st.Groups() {
+			if pattern == "" || wildmat(pattern, g.Name) {
+				out = append(out, fmt.Sprintf("%s %d %s", g.Name, g.Created.Unix(), activeTimesCreator))
 			}
 		}
 		return append(out, ".")

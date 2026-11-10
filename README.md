@@ -144,7 +144,7 @@ Three modes, chosen per server:
 - **Handler**: `Options.Handler` gets each connection (`*fakeserver.Conn`); the conn is closed when
   it returns. `StoreHandler`, `PeerHandler` and `LineHandler` are ready-made handlers.
 - **Store**: `Options.Store` serves a `Store` with the built-in RFC 3977 handler: CAPABILITIES, MODE
-  READER, HELP, LIST (ACTIVE, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
+  READER, HELP, LIST (ACTIVE, ACTIVE.TIMES, NEWSGROUPS, OVERVIEW.FMT), GROUP, LISTGROUP, ARTICLE/HEAD/BODY/STAT,
   OVER/XOVER, HDR/XHDR (+ LIST HEADERS), NEXT/LAST, NEWGROUPS, NEWNEWS, DATE, POST, AUTHINFO USER/PASS, COMPRESS (with
   `StoreOpts.Compress`), QUIT. `StoreOpts.User`/`Pass`
   require authentication (480 before it); `ReaderOnly` greets 201 (unless `Greeting` is set) and
@@ -294,7 +294,7 @@ overview extensions are still handled as before.
 
 | RFC | checks |
 |---|---|
-| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-newsgroups` `list-overview-fmt` `list-unknown-keyword` `over` `over-errors` `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
+| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `listgroup-range` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-active-times` `list-newsgroups` `list-overview-fmt` `list-headers` `list-unknown-keyword` `over` `over-errors` `hdr` `newgroups` `newnews` `post` (with `PostGroup`) `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
 | RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
 | RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
 
@@ -306,7 +306,7 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 |---|---|
 | `-addr host:port` | the server under test (required) |
 | `-user`, `-pass` | AUTHINFO USER/PASS; without `-user` the RFC 4643 checks are skipped |
-| `-group` | a group the checks may post into (TAKETHIS, IHAVE); without it nothing is posted |
+| `-group` | a group the checks may post into (POST, TAKETHIS, IHAVE); without it nothing is posted |
 | `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
 | `-deadline` | hang guard per read and write, default `10s` |
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
@@ -320,8 +320,10 @@ cannot be reached.
 Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
 given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer
 (`PeerHandler`) passes the stream checks, and fakes with one deliberate mistake (a bare-LF
-greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields) fail
-exactly the matching check.
+greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields, a
+LISTGROUP that ignores its range, a bad LIST ACTIVE.TIMES time, a LIST HEADERS name with its
+colon, wrong HDR values, NEWGROUPS and NEWNEWS that ignore the date, a POST that is never filed)
+fail exactly the matching check.
 
 ### yenc
 

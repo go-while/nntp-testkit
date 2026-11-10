@@ -56,7 +56,7 @@ func wantEqual(t *testing.T, what string, got, want any) {
 func TestStoreCapabilities(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "HDR", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS", "NEWNEWS", "OVER MSGID", "HDR", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "MODE READER", 200)
 	wantCode(t, c, "MODE STREAM", 501)
 	wantCode(t, c, "MODE", 501)
@@ -80,7 +80,7 @@ func TestStoreCapabilities(t *testing.T) {
 
 	_, ro := storeServer(t, testStore(), StoreOptions{ReaderOnly: true}, Faults{})
 	_, caps = wantBlock(t, ro, "CAPABILITIES", 101)
-	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "NEWNEWS", "OVER MSGID", "HDR", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "reader-only caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS", "NEWNEWS", "OVER MSGID", "HDR", "IMPLEMENTATION fakeserver"})
 	wantCode(t, ro, "MODE READER", 201)
 	wantCode(t, ro, "POST", 440)
 	_, active := wantBlock(t, ro, "LIST", 215)
@@ -175,7 +175,17 @@ func TestStoreList(t *testing.T) {
 	wantEqual(t, "LIST NEWSGROUPS comp.*", got, []string{"comp.lang.go\tGo"})
 	_, got = wantBlock(t, c, "LIST OVERVIEW.FMT", 215)
 	wantEqual(t, "LIST OVERVIEW.FMT", got, defaultOverviewFmt)
-	wantCode(t, c, "LIST ACTIVE.TIMES", 501)
+	// ACTIVE.TIMES: name, Group.Created in Unix seconds, creator; a wildmat as for ACTIVE
+	created := time.Date(2020, 5, 6, 7, 8, 9, 0, time.UTC)
+	st.AddGroupAt("alt.test", "", created)
+	times := []string{"alt.test " + strconv.FormatInt(created.Unix(), 10) + " news@fakeserver.invalid"}
+	_, got = wantBlock(t, c, "LIST ACTIVE.TIMES alt.t*", 215)
+	wantEqual(t, "LIST ACTIVE.TIMES alt.t*", got, times)
+	_, got = wantBlock(t, c, "LIST ACTIVE.TIMES", 215)
+	if len(got) != 3 || got[1] != times[0] {
+		t.Errorf("LIST ACTIVE.TIMES %q, want 3 lines with %q second", got, times[0])
+	}
+	wantCode(t, c, "LIST DISTRIB.PATS", 501)
 	wantCode(t, c, "LIST ACTIVE a b", 501)
 
 	_, c2 := storeServer(t, st, StoreOptions{OverviewFmt: []string{"Subject:", ":bytes"}}, Faults{})
@@ -428,7 +438,7 @@ func TestStoreNewnews(t *testing.T) {
 func TestStoreNoNewnews(t *testing.T) {
 	_, c := storeServer(t, testStore(), StoreOptions{NoNewnews: true, NoOver: true}, Faults{})
 	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
-	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE NEWSGROUPS OVERVIEW.FMT", "HDR", "POST", "IMPLEMENTATION fakeserver"})
+	wantEqual(t, "caps", caps, []string{"VERSION 2", "READER", "LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS", "HDR", "POST", "IMPLEMENTATION fakeserver"})
 	wantCode(t, c, "NEWNEWS * 20260101 000000", 500)
 	wantCode(t, c, "NEWNEWS", 500) // unknown before the argument check
 	_, help := wantBlock(t, c, "HELP", 100)

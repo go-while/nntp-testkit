@@ -132,10 +132,10 @@
 //		CompressOutputOnly bool // offer it broken: after the 206 only the output is compressed, the client's input is read uncompressed
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
-//	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE NEWSGROUPS OVERVIEW.FMT, NEWNEWS, OVER MSGID, POST
+//	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS, NEWNEWS, OVER MSGID, POST
 //	// unless ReaderOnly, AUTHINFO USER while auth is required, COMPRESS DEFLATE with Compress
 //	// once authenticated and while compression is off, IMPLEMENTATION fakeserver), MODE
-//	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT], GROUP,
+//	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|ACTIVE.TIMES [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT|HEADERS], GROUP,
 //	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current; 412/420/423/430),
 //	// XOVER/OVER (range "n", "n-", "n-m" or message-id; 423 for an empty range), NEXT/LAST
 //	// (421/422), NEWGROUPS (Group.Created; RFC 3977 7.3.2 century rule), NEWNEWS wildmat date
