@@ -44,6 +44,52 @@
 //	func Stuff(lines []string) string                      // lines → dot-stuffed CRLF block with ".\r\n": what a client sends after POST/IHAVE/TAKETHIS
 //	func ParseCapabilities(lines []string) (map[string][]string, error) // CAPABILITIES lines → upper-cased label → arguments; error on a blank or doubled line
 //
+// Requests (requests.go): the article argument is the raw article in wire form (CRLF line ends,
+// not dot-stuffed, no terminator; the article package's Bytes returns it). A refusal is a
+// result, not a failure: the Try forms return an error only for an I/O, parse or strict-mode
+// error, the plain forms fail tb only then. The id is the message-ID as it goes on the wire,
+// angle brackets included, sent as given.
+//
+//	func StuffBytes(article []byte) []byte                 // dot-stuff each line start (after CRLF), add the final CRLF when missing, append ".\r\n"; every other byte (bare CR, NUL, 8-bit) stays
+//	func (c *Conn) TryPost(article []byte) (code int, line string, err error)        // POST; on 340 send the article, return the final reply (240, 441 ...), else the first (440, 480 ...)
+//	func (c *Conn) TryIhave(id string, article []byte) (int, string, error)          // IHAVE id; on 335 send and return the final (235, 436, 437), else the first (435, 436, 480 ...)
+//	func (c *Conn) TryCheck(id string) (int, string, error)                          // CHECK id: 238, 431, 438 ...
+//	func (c *Conn) TryTakethis(id string, article []byte) (int, string, error)       // TAKETHIS id and the article in one write, then the reply (239, 439 ...)
+//	func (c *Conn) TryModeStream() (int, string, error)                              // MODE STREAM
+//	func (c *Conn) TryLogin(user, pass string) (int, string, error)                  // AUTHINFO USER, on 381 AUTHINFO PASS; the final reply (281, 481, 482, 502, 483 ...) or the first when not 381
+//	func (c *Conn) Post(article []byte) (int, string)       // the plain forms: TryX, fail tb on an error, return code and line
+//	func (c *Conn) Ihave(id string, article []byte) (int, string)
+//	func (c *Conn) Check(id string) (int, string)
+//	func (c *Conn) Takethis(id string, article []byte) (int, string)
+//	func (c *Conn) ModeStream() (int, string)
+//	func (c *Conn) Login(user, pass string) (int, string)
+//
+//	type Reply struct { Cmd string; Code int; Line string; Lines []string } // Lines: the un-stuffed block of a multi-line reply, nil otherwise
+//	func MultiLine(cmd string, code int) bool               // RFC 3977/4644/2980 multi-line reply codes (100, 101, 215, 220-222, 224, 225, 230, 231, 282; 211 after LISTGROUP)
+//	func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) // write all cmds (CRLF appended unless the entry ends in one) from a goroutine while reading the replies in order; multi nil = MultiLine; on error the replies so far
+//	func (c *Conn) Pipeline(cmds []string, multi func(cmd string, code int) bool) []Reply            // TryPipeline; fails tb on error
+//
+// Dialing (dial.go):
+//
+//	func TryDialFrom(addr, localIP string, deadline time.Duration) (*Conn, error) // TryDial from a local source address ("127.0.0.2"); the OS must own it
+//	func DialFrom(tb testing.TB, addr, localIP string) *Conn                      // + greeting, tb.Cleanup(Close), fails tb
+//	func TryDialUntil(addr, prefix string, d time.Duration) (*Conn, error)        // redial every 50 ms until the greeting starts with prefix; d bounds the whole wait (0 = testkit.Deadline()); refused dials and other greetings count as "not yet"
+//	func DialUntil(tb testing.TB, addr, prefix string, d time.Duration) *Conn
+//
+// Raw I/O (raw.go): nothing is interpreted, no strict checks.
+//
+//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: none); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
+//	func (c *Conn) ReadUntilQuiet(quiet time.Duration, limit int) (data []byte, eof bool) // fails tb on an error other than EOF
+//	func (c *Conn) ExpectClosed(d time.Duration) ([]string, error)  // the peer closes within d (0 = hang guard); the lines it sent before, CRLF stripped (a partial last line included); EOF and ECONNRESET count as closed; error on timeout, more than 16 lines or 64 KiB, or another read error (lines returned too)
+//	func (c *Conn) MustClosed(d time.Duration) []string             // ExpectClosed; fails tb on an error
+//	func (c *Conn) SendChunks(raw []byte, n int, pause time.Duration) error // n bytes per write (n < 1 = 1), pause between writes: split CRLF or the terminator across writes
+//	func (c *Conn) SendDrip(raw []byte, pause time.Duration) error  // SendChunks with 1 byte
+//
+// Every wait of these helpers is the Conn's hang guard (testkit.Deadline() by default, so
+// NNTP_TEST_DEADLINE scales it) or the duration the caller passes; none sleeps a fixed time
+// except the caller's pause and DialUntil's 50 ms poll. Pipeline's guard slides: it is moved on
+// with every reply read, so a stalled server fails after one deadline and a long batch does not.
+//
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF
 // (NoCRLF); TryReadDotLines returns BadDotStuffing for a line that starts with "." but is neither
