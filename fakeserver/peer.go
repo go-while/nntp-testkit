@@ -77,10 +77,14 @@ type PeerOptions struct {
 	// (recorded and counted as usual) and never answers again, until the client closes, the
 	// server closes or Options.Deadline passes (then it closes the connection).
 	SilentAfterModeStream bool
+	// StartTLS offers STARTTLS (RFC 4642) as StoreOptions.StartTLS does: "STARTTLS" in
+	// CAPABILITIES while the connection is plain, 382 and the upgrade, then 502; see
+	// StartTLSOptions for the knobs. nil: STARTTLS is unknown (500).
+	StartTLS *StartTLSOptions
 }
 
 // PeerHandler returns a Handler that answers like a transit peer: CAPABILITIES (VERSION 2,
-// IHAVE, STREAMING unless NoStream (no READER: MODE READER answers 502), COMPRESS DEFLATE with Compress), MODE
+// IHAVE, STREAMING unless NoStream (no READER: MODE READER answers 502), COMPRESS DEFLATE with Compress, STARTTLS with StartTLS), MODE
 // STREAM/READER, AUTHINFO USER/PASS, CHECK, TAKETHIS, IHAVE, COMPRESS (with Compress or
 // CompressOutputOnly), QUIT; anything else gets 500. Have is guarded by a mutex inside the
 // handler: read it from a test only after the server is closed. OnArticle runs before the 239
@@ -151,6 +155,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				if offerCompress && authed && !c.Compressed() {
 					reply = append(reply, "COMPRESS DEFLATE")
 				}
+				if o.StartTLS.advertised(c, needAuth && authed) {
+					reply = append(reply, "STARTTLS")
+				}
 				reply = append(reply, ".")
 				if o.CapabilitiesReply != nil {
 					reply = o.CapabilitiesReply
@@ -178,6 +185,14 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				default:
 					reply = []string{unknown}
 				}
+			case "STARTTLS":
+				if !o.StartTLS.on() {
+					reply = []string{unknown}
+				} else if arg != "" {
+					reply = []string{"501 STARTTLS takes no arguments"}
+				} else {
+					reply = []string{c.startTLSLine(o.StartTLS, needAuth && authed)}
+				}
 			case "COMPRESS":
 				switch {
 				case !offerCompress:
@@ -188,6 +203,10 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = []string{compressReply(strings.Fields(arg), c.Compressed())}
 				}
 			case "AUTHINFO":
+				if o.StartTLS.needsTLS(c) {
+					reply = []string{"483 Encryption required"}
+					break
+				}
 				if c.Compressed() {
 					reply = []string{"502 compression active"}
 					break
@@ -312,6 +331,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			default:
 				reply = []string{unknown}
 			}
+			if o.StartTLS.needsTLS(c) && strings.HasPrefix(reply[0], "480") {
+				reply[0] = "483 Encryption required" // authentication is not possible before TLS
+			}
 			if !o.send(c, line, reply, plain) {
 				return
 			}
@@ -327,6 +349,11 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			}
 			if c.closeDue() {
 				return
+			}
+			if upgraded, ok := c.startTLSAfter(o.StartTLS, verb, c.last); !ok {
+				return
+			} else if upgraded {
+				userOK, userSent = false, false // RFC 4642 2.2.2.1
 			}
 		}
 	}

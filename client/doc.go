@@ -1,7 +1,7 @@
 // Package client is a test client for NNTP servers: a connection with a hang guard, one-call
 // commands, dot-block reading and a strict mode that reports wire-level mistakes of the server.
 //
-// Contract (plan nntp-testkit; implemented in client.go and strict.go):
+// Contract (plan nntp-testkit; implemented in client.go, strict.go, compress.go and starttls.go):
 //
 //	type Conn struct {
 //		Conn     net.Conn
@@ -35,6 +35,11 @@
 //	func (c *Conn) Compress()                               // TryCompress; fails tb unless 206
 //	func (c *Conn) StartCompress() error                    // compress from now on without sending anything (the test sent COMPRESS and read the 206); error when already on
 //	func (c *Conn) Compressed() bool
+//	func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) // STARTTLS (RFC 4642): 382, no byte may be buffered after it, handshake within the deadline; a new strict Conn over the *tls.Conn (no greeting read); errors: *StartTLSError (not 382; c stays plain), *StrictError{Pending} (plaintext after the 382), handshake/verification errors
+//	func (c *Conn) StartTLS(cfg *tls.Config) *Conn             // TryStartTLS; fails tb; tb.Cleanup(Close) for the new Conn
+//	func (c *Conn) TLS() (tls.ConnectionState, bool)           // peer certificates, version, ...; false when c is not TLS
+//	func (c *Conn) IsTLS() bool
+//	type StartTLSError struct { Code int; Line string }       // the server did not answer 382
 //	func (c *Conn) Close()
 //
 //	func ParseCode(line string) (int, error)               // 3-digit code at the start, followed by space or end
@@ -113,6 +118,18 @@
 // compressed data is a read error wrapping flate.CorruptInputError (every later read returns
 // it). Close ends the goroutine. The client does not stop a test from sending COMPRESS,
 // STARTTLS or AUTHINFO after compression, so it can check the server's 502.
+//
+// STARTTLS (RFC 4642): TryStartTLS sends STARTTLS and expects 382. Any byte already buffered
+// after the 382 line fails the upgrade (a *StrictError of Kind Pending wrapped with the
+// explanation, c closed): a server or man in the middle that sends plaintext before the
+// handshake, so that a client would read it as part of the TLS session (CVE-2011-0411). The
+// handshake is bounded by the hang guard, cfg is cloned and gets ServerName = the host of the
+// remote address when it has none and does not skip verification; verification errors come
+// back as the crypto/tls ones (*tls.CertificateVerificationError wrapping x509.HostnameError,
+// x509.CertificateInvalidError with Reason x509.Expired, x509.UnknownAuthorityError). The new Conn
+// keeps Deadline, Strict, Greeting and tb; c must not be used afterwards, except after a
+// *StartTLSError, which leaves it plain. The server forgets the session state on the upgrade,
+// so send CAPABILITIES again.
 //
 // The kit never contacts any host a test did not name; the deadline only stops a hung test.
 package client
