@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +23,11 @@ import (
 
 // DefaultStopTimeout is the wait between SIGTERM and SIGKILL when Options.StopTimeout is 0.
 const DefaultStopTimeout = 5 * time.Second
+
+// DefaultLogBytes is the cap of each part of the failure dump (the captured output, each Logs
+// file) when Options.LogBytes is 0. A log file keeps its tail, the captured output its head and
+// tail; a "[... N bytes cut ...]" marker shows where bytes were left out.
+const DefaultLogBytes = 64 << 10
 
 // dialRetry is the pause between readiness dials in StartTCP.
 const dialRetry = 20 * time.Millisecond
@@ -34,6 +41,7 @@ type Options struct {
 	StopTimeout time.Duration // SIGTERM → SIGKILL; 0 = DefaultStopTimeout
 	Deadline    time.Duration // readiness wait and pipe deadlines; 0 = testkit.Deadline()
 	Logs        []string      // files (relative to Dir unless absolute) to dump on failure
+	LogBytes    int           // cap per dumped log file and for the captured output; 0 = DefaultLogBytes
 
 	// Ulimit sets resource limits of the process, each one "-<letter> <value>" as the shell's
 	// ulimit takes it: "-n 16" (open files), "-f 64" (file size, in 512-byte blocks for sh),
@@ -53,6 +61,7 @@ type Process struct {
 	addr        string
 	stopTimeout time.Duration
 	deadline    time.Duration
+	logBytes    int
 	conn        *pipeConn // stdio mode only
 
 	out *lockedBuffer // captured stderr (and stdout in TCP mode)
@@ -89,6 +98,7 @@ func newProcess(tb testing.TB, o Options) *Process {
 		logs:        o.Logs,
 		stopTimeout: o.StopTimeout,
 		deadline:    o.Deadline,
+		logBytes:    o.LogBytes,
 		out:         &lockedBuffer{},
 		done:        make(chan struct{}),
 	}
@@ -100,6 +110,9 @@ func newProcess(tb testing.TB, o Options) *Process {
 	}
 	if p.deadline <= 0 {
 		p.deadline = testkit.Deadline()
+	}
+	if p.logBytes <= 0 {
+		p.logBytes = DefaultLogBytes
 	}
 	path := o.Path
 	if !filepath.IsAbs(path) && strings.ContainsRune(path, filepath.Separator) {
@@ -129,6 +142,7 @@ func newProcess(tb testing.TB, o Options) *Process {
 	cmd.Stderr = p.out
 	// Bounds Wait when a grandchild keeps the output pipe open after the process exited.
 	cmd.WaitDelay = p.stopTimeout
+	ownGroup(cmd)
 	p.cmd = cmd
 	return p
 }
@@ -140,13 +154,18 @@ func (p *Process) start(tb testing.TB) error {
 	if p.cmd.Path == "" {
 		return errors.New("Options.Path is empty")
 	}
-	if err := p.cmd.Start(); err != nil {
+	err := lockedStart(p.cmd, func(err error) {
+		// A daemon that inherited the output pipe keeps it open after the leader exited
+		// successfully; WaitDelay then ends the wait with ErrWaitDelay. That is not a failure.
+		if errors.Is(err, exec.ErrWaitDelay) {
+			err = nil
+		}
+		p.waitErr = err
+		close(p.done)
+	})
+	if err != nil {
 		return err
 	}
-	go func() {
-		p.waitErr = p.cmd.Wait()
-		close(p.done)
-	}()
 	tb.Cleanup(func() {
 		p.Stop()
 		if tb.Failed() {
@@ -156,21 +175,70 @@ func (p *Process) start(tb testing.TB) error {
 	return nil
 }
 
-// dumpLogs writes the captured output and every Logs file to the test output.
+// lockedStart starts cmd and returns the start error; on success cmd.Wait runs on the same
+// goroutine and finished receives its result. The goroutine stays locked to its OS thread until
+// the process has been waited for: with Pdeathsig the kernel kills the child when the thread
+// that created it exits, so that thread must not be one the Go runtime may retire.
+func lockedStart(cmd *exec.Cmd, finished func(error)) error {
+	started := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		err := cmd.Start()
+		started <- err
+		if err != nil {
+			return
+		}
+		finished(cmd.Wait())
+	}()
+	return <-started
+}
+
+// dumpLogs writes the captured output and the tail of every Logs file to the test output, each
+// capped at the LogBytes of the Options.
 func (p *Process) dumpLogs(tb testing.TB) {
-	tb.Logf("proc: %s (pid %d) stderr:\n%s", p.cmd.Path, p.Pid(), p.Stderr())
+	tb.Logf("proc: %s (pid %d) stderr:\n%s", p.cmd.Path, p.Pid(), cutMiddle(p.Stderr(), p.logBytes))
 	for _, name := range p.logs {
 		path := name
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(p.dir, path)
 		}
-		data, err := os.ReadFile(path)
+		data, err := readTail(path, p.logBytes)
 		if err != nil {
 			tb.Logf("proc: log %s: not readable: %v", path, err)
 			continue
 		}
 		tb.Logf("proc: log %s:\n%s", path, data)
 	}
+}
+
+// readTail returns the last max bytes of the file, preceded by a cut marker when it is longer.
+func readTail(path string, max int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := st.Size()
+	cut := int64(0)
+	if size > int64(max) {
+		cut = size - int64(max)
+		if _, err := f.Seek(cut, io.SeekStart); err != nil {
+			return "", err
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(max)))
+	if err != nil {
+		return "", err
+	}
+	if cut > 0 {
+		return cutMarker(cut) + string(data), nil
+	}
+	return string(data), nil
 }
 
 // StartTCP starts the process (stdin from /dev/null; stdout and stderr captured, see Stderr)
@@ -189,25 +257,41 @@ func StartTCP(tb testing.TB, o Options, addr string) *Process {
 		return p
 	}
 	limit := time.Now().Add(p.deadline)
+	exited := false // the leader exited with status 0: a daemon may still come up
 	for {
 		err := probe(addr, limit)
 		if err == nil {
 			return p
 		}
-		select {
-		case <-p.done:
-			tb.Fatalf("proc: %s exited before %s was ready: %v (last dial: %v)", o.Path, addr, p.waitErr, err)
-			return p
-		default:
+		if !exited {
+			select {
+			case <-p.done:
+				if p.waitErr != nil {
+					tb.Fatalf("proc: %s exited before %s was ready: %v (last dial: %v)", o.Path, addr, p.waitErr, err)
+					return p
+				}
+				// Exit status 0: a server that daemonises (the parent exits, the daemon
+				// keeps running in the group) looks like this; keep dialling until Deadline.
+				exited = true
+			default:
+			}
 		}
 		if !time.Now().Before(limit) {
-			tb.Fatalf("proc: %s not ready on %s within %v: %v", o.Path, addr, p.deadline, err)
+			if exited {
+				tb.Fatalf("proc: %s exited 0 and nothing was ready on %s within %v: %v", o.Path, addr, p.deadline, err)
+			} else {
+				tb.Fatalf("proc: %s not ready on %s within %v: %v", o.Path, addr, p.deadline, err)
+			}
 			return p
 		}
 		t := time.NewTimer(dialRetry)
-		select {
-		case <-p.done:
-		case <-t.C:
+		if exited {
+			<-t.C
+		} else {
+			select {
+			case <-p.done:
+			case <-t.C:
+			}
 		}
 		t.Stop()
 	}
@@ -254,7 +338,7 @@ func (p *Process) Pid() int {
 	return p.cmd.Process.Pid
 }
 
-// Signal sends sig to the process.
+// Signal sends sig to the process itself (the group leader); SignalGroup reaches its children too.
 func (p *Process) Signal(sig os.Signal) error {
 	if p.cmd.Process == nil {
 		return errors.New("proc: process not started")
@@ -262,34 +346,66 @@ func (p *Process) Signal(sig os.Signal) error {
 	return p.cmd.Process.Signal(sig)
 }
 
-// Stop sends SIGTERM, then SIGKILL when the process has not exited after StopTimeout, waits
-// for it and closes the stdio pipes. It is idempotent and also run by tb.Cleanup. It relies on
-// SIGTERM and SIGKILL, so it needs a Unix system.
+// SignalGroup sends sig to every process of the server's process group (the leader and the
+// children and grandchildren that did not leave the group with setsid or setpgid). It succeeds
+// when the group no longer exists.
+func (p *Process) SignalGroup(sig syscall.Signal) error {
+	if p.cmd.Process == nil {
+		return errors.New("proc: process not started")
+	}
+	return killGroup(p.cmd.Process.Pid, sig)
+}
+
+// Stop sends SIGTERM to the whole process group of the server, then SIGKILL to the group when
+// the leader or any other member is still there after StopTimeout (at most Deadline), waits for
+// the leader and closes the stdio pipes. So a server that forks workers leaves no orphan, and
+// a daemon that the leader started and left running (the leader exited, its children stay in
+// the group) is stopped too. A process that moved to another group or session (setsid) is not
+// reached. It is idempotent and also run by tb.Cleanup. It needs a Unix system. A zombie that
+// nothing reaps (a container whose PID 1 never calls wait) counts as a member until the grace
+// period ends.
 func (p *Process) Stop() {
 	p.stopOnce.Do(func() {
 		if p.cmd.Process == nil {
 			return
 		}
-		select {
-		case <-p.done:
-		default:
-			_ = p.cmd.Process.Signal(syscall.SIGTERM)
-			t := time.NewTimer(p.stopTimeout)
-			select {
-			case <-p.done:
-			case <-t.C:
-				_ = p.cmd.Process.Kill()
-				<-p.done
-			}
-			t.Stop()
+		pid := p.cmd.Process.Pid
+		_ = killGroup(pid, syscall.SIGTERM)
+		t := time.NewTimer(min(p.stopTimeout, p.deadline))
+		if !p.waitGone(pid, t.C) {
+			_ = killGroup(pid, syscall.SIGKILL)
+			<-p.done
 		}
+		t.Stop()
 		if p.conn != nil {
 			_ = p.conn.Close()
 		}
 	})
 }
 
-// Wait blocks until the process has exited and returns its exit error (nil on exit status 0);
+// waitGone waits until the leader has exited and its group is empty; false when limit fires
+// first.
+func (p *Process) waitGone(pid int, limit <-chan time.Time) bool {
+	for {
+		select {
+		case <-p.done:
+			if !groupAlive(pid) {
+				return true
+			}
+		default:
+		}
+		poll := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-limit:
+			poll.Stop()
+			return false
+		case <-poll.C:
+		}
+	}
+}
+
+// Wait blocks until the process has exited and returns its exit error (nil on exit status 0,
+// also when a daemon it left running still holds the output pipe: exec.ErrWaitDelay is dropped);
 // it is safe to call before or after Stop. When the process has not exited within Deadline,
 // Wait calls Stop and returns a "not exited within" error joined with the exit error; later
 // calls return the recorded exit error. It returns an error at once when the process never
