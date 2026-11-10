@@ -40,6 +40,43 @@ type PeerOptions struct {
 	// does) and CAPABILITIES does not list STREAMING. IHAVE works as before: innfeed and
 	// innxmit fall back to it.
 	NoStream bool
+
+	// HoldGreeting holds the greeting until the channel is closed (or delivers a value): the
+	// connection is accepted and counts in Open, MaxOpen and Accepted, the client waits for
+	// its greeting. Bounded by Options.Deadline and ended by Server.Close (the connection is
+	// then dropped without greeting). Needs Options.NoGreeting: the handler writes the
+	// greeting (Options.Greeting) itself. Typical use: the test dials K+1 times and asserts
+	// MaxOpen <= K, then closes the channel. A client that disconnects while held is noticed
+	// when the hold ends.
+	HoldGreeting <-chan struct{}
+	// GreetingDelay waits this long before the greeting (after HoldGreeting), at most
+	// Options.Deadline. Needs Options.NoGreeting like HoldGreeting.
+	GreetingDelay time.Duration
+	// BeforeReply runs on the connection's goroutine before every reply is written (the 335
+	// and the final 235/437 of IHAVE are two replies): cmd is the upper-cased command, line
+	// the client line, status the first line of the reply about to be written (before Faults).
+	// It may block, e.g. on Conn.Wait(ch), which returns when the test releases ch, at the
+	// Deadline or when the server closes; a hook that blocks on anything else must watch
+	// Server.Close itself. Counts, Have and OnArticle are not affected: they were done before
+	// the hook runs.
+	BeforeReply func(c *Conn, cmd, line, status string)
+	// CapabilitiesReply, when non-nil, replaces the whole answer to CAPABILITIES (the lines
+	// as written, a multi-line reply with its "." line), e.g. {"500 What?"} as Diablo's
+	// feeder answers.
+	CapabilitiesReply []string
+	// ModeStreamReply, when non-nil, replaces the answer to MODE STREAM (also under NoStream),
+	// e.g. {"203 StreamOK."} or {"501 no streaming"}. CHECK and TAKETHIS stay as they are
+	// (NoStream makes them unknown).
+	ModeStreamReply []string
+	// DropAfterChecks > 0: on each connection the first DropAfterChecks CHECKs (after
+	// authentication) are answered as usual, the next one gets DropReply (default
+	// "400 Service temporarily unavailable") and the connection is closed.
+	DropAfterChecks int
+	DropReply       string
+	// SilentAfterModeStream: after answering MODE STREAM the peer reads the client's lines
+	// (recorded and counted as usual) and never answers again, until the client closes, the
+	// server closes or Options.Deadline passes (then it closes the connection).
+	SilentAfterModeStream bool
 }
 
 // PeerHandler returns a Handler that answers like a transit peer: CAPABILITIES (VERSION 2,
@@ -78,8 +115,16 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 		o.Have[id] = true
 		return false
 	}
+	dropReply := o.DropReply
+	if dropReply == "" {
+		dropReply = "400 Service temporarily unavailable"
+	}
 	return func(c *Conn) {
+		if !o.greet(c) {
+			return
+		}
 		authed := !needAuth
+		checks := 0       // CHECKs answered on this connection (DropAfterChecks)
 		userOK := false   // AUTHINFO USER named the configured user
 		userSent := false // an AUTHINFO USER was seen (RFC 4643 §2.3.2: PASS before it is 482)
 		for {
@@ -96,6 +141,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				verb = "" // unknown: no article is read
 			}
 			var reply []string
+			drop, silent, plain := false, false, false
 			switch verb {
 			case "CAPABILITIES":
 				reply = []string{"101 capability list follows", "VERSION 2", "IHAVE"}
@@ -106,6 +152,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = append(reply, "COMPRESS DEFLATE")
 				}
 				reply = append(reply, ".")
+				if o.CapabilitiesReply != nil {
+					reply = o.CapabilitiesReply
+				}
 			case "MODE":
 				switch strings.ToUpper(arg) {
 				case "STREAM":
@@ -120,6 +169,10 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					if o.NoStream {
 						reply = []string{"501 Unknown MODE variant"}
 					}
+					if o.ModeStreamReply != nil {
+						reply = o.ModeStreamReply
+					}
+					silent = o.SilentAfterModeStream
 				case "READER":
 					reply = []string{"502 Transfer permission denied"} // innd with reader access denied: no READER, no MODE-READER capability
 				default:
@@ -175,6 +228,11 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = []string{"480 authentication required"}
 					break
 				}
+				checks++
+				if o.DropAfterChecks > 0 && checks > o.DropAfterChecks {
+					reply, drop = []string{dropReply}, true
+					break
+				}
 				mu.Lock()
 				switch {
 				case o.Have[arg]:
@@ -224,8 +282,15 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				if reply != nil {
 					break
 				}
-				if err := c.WriteLines("335 Send it"); err != nil {
+				if !o.send(c, line, []string{"335 Send it"}, false) {
 					return
+				}
+				if !strings.HasPrefix(c.last, "335") {
+					// Faults.Override made the first reply final: no article follows
+					if c.closeDue() {
+						return
+					}
+					continue
 				}
 				wire, err := c.ReadDotBlock()
 				if err != nil {
@@ -233,22 +298,34 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				}
 				if take(arg) {
 					reply = []string{"437 Rejected " + arg}
+					plain = true
 					break
 				}
 				if o.OnArticle != nil {
 					o.OnArticle(arg, wire)
 				}
 				reply = []string{"235 Article transferred OK"}
+				plain = true // Faults apply to the 335 only, as to POST's 340 in StoreHandler
 			case "QUIT":
-				_ = c.WriteLines("205 bye")
+				_ = o.send(c, line, []string{"205 bye"}, false)
 				return
 			default:
 				reply = []string{unknown}
 			}
-			if err := c.WriteLines(reply...); err != nil {
+			if !o.send(c, line, reply, plain) {
 				return
 			}
-			if offerCompress && !c.compressAfter(verb, reply[0], o.CompressOutputOnly) {
+			if drop {
+				return
+			}
+			if silent {
+				o.goSilent(c)
+				return
+			}
+			if offerCompress && !c.compressAfter(verb, c.last, o.CompressOutputOnly) {
+				return
+			}
+			if c.closeDue() {
 				return
 			}
 		}
