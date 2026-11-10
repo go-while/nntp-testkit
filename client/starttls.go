@@ -34,7 +34,7 @@ func (e *StartTLSError) Error() string {
 // timeout) closes c. The handshake is bounded by the hang guard like every step.
 //
 // cfg is cloned; when it has no ServerName and does not skip verification, ServerName is the
-// host of the remote address of c. TLS returns the negotiated connection state of the new Conn.
+// host of the remote address of c. TLSState returns the negotiated connection state of the new Conn.
 func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) {
 	if err := c.Send("STARTTLS\r\n"); err != nil {
 		return nil, fmt.Errorf("STARTTLS: %w", err)
@@ -85,9 +85,9 @@ func (c *Conn) StartTLS(cfg *tls.Config) *Conn {
 	return n
 }
 
-// TLS returns the TLS connection state when c is a TLS connection (made by TryStartTLS, or
+// TLSState returns the TLS connection state when c is a TLS connection (made by TryStartTLS, or
 // New over a *tls.Conn): peer certificates, version, negotiated protocol, server name.
-func (c *Conn) TLS() (tls.ConnectionState, bool) {
+func (c *Conn) TLSState() (tls.ConnectionState, bool) {
 	if tc, ok := c.Conn.(*tls.Conn); ok {
 		return tc.ConnectionState(), true
 	}

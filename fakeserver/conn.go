@@ -115,7 +115,7 @@ func (c *Conn) Raw() net.Conn { return c.conn }
 func (c *Conn) Server() *Server { return c.s }
 
 // readRaw reads one line without recording it; a read error counts the conn out of Open().
-// There is no read deadline: Close unblocks it.
+// There is no read deadline: Close unblocks it (a TLS handshake is bounded by the server's Deadline).
 func (c *Conn) readRaw() (string, error) {
 	line, err := c.r.ReadString('\n')
 	if err != nil {

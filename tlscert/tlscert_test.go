@@ -143,6 +143,14 @@ func TestWrite(t *testing.T) {
 	if fi, _ := os.Stat(f.Key); fi.Mode().Perm() != 0o600 {
 		t.Errorf("rewritten key mode %v", fi.Mode().Perm())
 	}
+	// a custom key mode, and a rewrite over a wider file replaces it
+	l.WriteKeyMode(t, dir, 0o640)
+	if fi, _ := os.Stat(f.Key); fi.Mode().Perm() != 0o640 {
+		t.Errorf("WriteKeyMode 0640: %v", fi.Mode().Perm())
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 3 {
+		t.Errorf("temp files left in %s: %d entries", dir, len(ents))
+	}
 	if p := ca.WriteCA(t, ""); p == "" || filepath.Base(p) != "ca.pem" {
 		t.Errorf("WriteCA path %q", p)
 	}
@@ -156,6 +164,12 @@ func TestDefaults(t *testing.T) {
 	now := time.Now()
 	if l.Cert.NotBefore.After(now) || l.Cert.NotAfter.Before(now) {
 		t.Errorf("default validity %v - %v", l.Cert.NotBefore, l.Cert.NotAfter)
+	}
+	if l.Cert.KeyUsage&x509.KeyUsageKeyEncipherment != 0 {
+		t.Error("KeyEncipherment on an EC leaf")
+	}
+	if r := NewCA(t).Issue(t, Options{KeyType: RSA}); r.Cert.KeyUsage&x509.KeyUsageKeyEncipherment == 0 {
+		t.Error("no KeyEncipherment on an RSA leaf")
 	}
 	c := NewCA(t).Issue(t, Options{ClientAuth: true})
 	if len(c.Cert.ExtKeyUsage) != 2 {

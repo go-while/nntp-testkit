@@ -40,7 +40,7 @@ type Options struct {
 	Store      *Store        // stateful mode: the store handler when Handler is nil (see storeHandler)
 	StoreOpts  StoreOptions  // options of the store handler
 	Faults     Faults        // fault hooks of Store and Script mode and LineHandler; copied by New/Start
-	Deadline   time.Duration // hang guard; 0 = testkit.Deadline()
+	Deadline   time.Duration // hang guard; 0 = testkit.Deadline(); also bounds every TLS handshake
 
 	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
 	// closed, like a provider's per-account limit. It counts in Accepted but never in Open.
@@ -296,11 +296,12 @@ type Server struct {
 	counts     map[string]int
 	accepted   int
 	open       int
-	maxOpen    int      // the most connections open at once (Open's peak)
-	tlsNames   []string // SNI of every ClientHello (TLSServerNames)
-	tlsOK      int      // completed TLS handshakes
-	tlsFailed  int      // failed TLS handshakes
-	tlsClosed  int      // STARTTLS upgrades closed at once (StartTLSOptions.CloseAfterHandshake)
+	maxOpen    int                         // the most connections open at once (Open's peak)
+	tlsNames   []string                    // SNI of every ClientHello (TLSServerNames)
+	tlsOK      int                         // completed TLS handshakes
+	tlsFailed  int                         // failed TLS handshakes
+	tlsHooked  map[*tls.Config]*tls.Config // hookedTLS cache
+	tlsClosed  int                         // STARTTLS upgrades closed at once (StartTLSOptions.CloseAfterHandshake)
 }
 
 // New listens on o.Addr, serves every connection in its own goroutine and registers
@@ -419,7 +420,11 @@ func (s *Server) reject(raw net.Conn) {
 	defer raw.Close()
 	_ = raw.SetDeadline(time.Now().Add(s.deadline)) // a TLS handshake reads too
 	if s.o.TLS != nil {
-		tc := tls.Server(raw, s.o.TLS)
+		tc, err := s.tlsHandshake(raw, s.o.TLS) // counted like every handshake
+		if err != nil {
+			return
+		}
+		_ = tc.SetDeadline(time.Now().Add(s.deadline))
 		defer tc.Close()
 		raw = tc
 	}

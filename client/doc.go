@@ -37,7 +37,7 @@
 //	func (c *Conn) Compressed() bool
 //	func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) // STARTTLS (RFC 4642): 382, no byte may be buffered after it, handshake within the deadline; a new strict Conn over the *tls.Conn (no greeting read); errors: *StartTLSError (not 382; c stays plain), *StrictError{Pending} (plaintext after the 382), handshake/verification errors
 //	func (c *Conn) StartTLS(cfg *tls.Config) *Conn             // TryStartTLS; fails tb; tb.Cleanup(Close) for the new Conn
-//	func (c *Conn) TLS() (tls.ConnectionState, bool)           // peer certificates, version, ...; false when c is not TLS
+//	func (c *Conn) TLSState() (tls.ConnectionState, bool)      // peer certificates, version, ...; false when c is not TLS
 //	func (c *Conn) IsTLS() bool
 //	type StartTLSError struct { Code int; Line string }       // the server did not answer 382
 //	func (c *Conn) Close()

@@ -203,7 +203,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = []string{compressReply(strings.Fields(arg), c.Compressed())}
 				}
 			case "AUTHINFO":
-				if o.StartTLS.needsTLS(c) {
+				if o.StartTLS.needsTLS(c, needAuth) {
 					reply = []string{"483 Encryption required"}
 					break
 				}
@@ -331,7 +331,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			default:
 				reply = []string{unknown}
 			}
-			if o.StartTLS.needsTLS(c) && len(reply) > 0 && strings.HasPrefix(reply[0], "480") {
+			if o.StartTLS.needsTLS(c, needAuth) && len(reply) > 0 && strings.HasPrefix(reply[0], "480") {
 				reply[0] = "483 Encryption required" // authentication is not possible before TLS
 			}
 			if !o.send(c, line, reply, plain) {

@@ -187,7 +187,7 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 		return []string{"500 Unknown command"}, actReply
 	}
 	if !h.authed && !authFree[cmd] {
-		if h.o.StartTLS.needsTLS(h.c) {
+		if h.o.StartTLS.needsTLS(h.c, true) {
 			return []string{"483 Encryption required"}, actReply
 		}
 		return []string{"480 Authentication required"}, actReply
@@ -209,7 +209,7 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	case "HELP":
 		return h.help(), actReply
 	case "AUTHINFO":
-		if h.o.StartTLS.needsTLS(h.c) {
+		if h.o.StartTLS.needsTLS(h.c, h.o.User != "" || h.o.Pass != "") {
 			return []string{"483 Encryption required"}, actReply
 		}
 		r := h.authinfo(args)
@@ -277,7 +277,7 @@ func (h *storeConn) capabilities() []string {
 		out = append(out, "POST")
 	}
 	if !h.authed {
-		if h.o.StartTLS.needsTLS(h.c) {
+		if h.o.StartTLS.needsTLS(h.c, true) {
 			out = append(out, "AUTHINFO") // RFC 4643 2.2: no USER before TLS
 		} else {
 			out = append(out, "AUTHINFO USER")

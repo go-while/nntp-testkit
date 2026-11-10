@@ -69,7 +69,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
 | `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
 | `TryStartTLS(cfg) (*Conn, error)` / `StartTLS(cfg) *Conn` | send `STARTTLS` (RFC 4642), expect 382, fail when any byte is already buffered after the 382 (plaintext injection, CVE-2011-0411), handshake within the deadline; a new strict `Conn` over the `*tls.Conn` (no greeting read; `cfg` is cloned, `ServerName` defaults to the remote host). A reply other than 382 is a `*StartTLSError{Code, Line}` and `c` stays plain; the injection is a `*StrictError` of Kind `Pending`; verification errors are crypto/tls's (`x509.HostnameError`, `x509.CertificateInvalidError` with `Reason` `Expired`, `x509.UnknownAuthorityError`). `StartTLS` fails tb and registers the cleanup |
-| `TLS() (tls.ConnectionState, bool)`, `IsTLS() bool` | peer certificates, version, server name of a TLS `Conn` |
+| `TLSState() (tls.ConnectionState, bool)`, `IsTLS() bool` | peer certificates, version, server name of a TLS `Conn` |
 | `Close()` | idempotent, nil-safe |
 | `ExpectCmd(want, format, args...) string` | `Cmd`, and fail tb unless the code is `want`; returns the status line |
 | `ExpectStatus(want, what) string` | read the next status line (the 240 after a POSTed article, a pipelined reply); fail tb on error or unless the code is `want` |
@@ -295,8 +295,8 @@ is 502, as on an implicit TLS connection, after COMPRESS (compress after TLS wor
 successful AUTHINFO. The upgrade forgets the session (selected group and article), and plaintext
 the client pipelined behind STARTTLS closes the connection. Test knobs: `Refuse` (a reply such as
 `502 ...` or `580 ...` instead of 382: a refusing server or a stripping attacker; in Store mode
-`Faults.Override` `"STARTTLS"` does the same), `HideCapability`, `AuthNeedsTLS` (AUTHINFO before
-TLS is 483 as RFC 4643 describes, and CAPABILITIES lists `AUTHINFO` without `USER`) and
+`Faults.Override` `"STARTTLS"` does the same), `HideCapability`, `AuthNeedsTLS` (with `User`/`Pass` set: AUTHINFO before
+TLS is 483 as RFC 4643 describes, and the Store handler lists `AUTHINFO` without `USER`) and
 `CloseAfterHandshake` (the first N upgrades are closed right after the handshake). The Server
 counts handshakes and records the SNI of every ClientHello. Make the certificates with `tlscert`.
 
@@ -307,10 +307,10 @@ counts handshakes and records the SNI of every ClientHello. Make the certificate
 | `NewCA(tb) *CA`; `CA{Cert *x509.Certificate; Key crypto.Signer; CertPEM []byte; Pool *x509.CertPool}` | a test CA (ECDSA P-256) |
 | `(*CA) Issue(tb, Options) *Leaf` | a leaf signed by the CA |
 | `SelfSigned(tb, Options) *Leaf` | a self-signed leaf that is its own trust anchor |
-| `type Options struct { CommonName string; DNSNames []string; IPs []net.IP; NotBefore, NotAfter time.Time; Expired, NotYetValid bool; KeyType KeyType; ClientAuth bool }` | the zero value: localhost, 127.0.0.1 and ::1, valid from an hour ago for a day, ECDSA. `Expired`/`NotYetValid` set a window in the past/future, `DNSNames`/`IPs` another name give a hostname mismatch; `KeyType` is `ECDSA`, `RSA` (2048) or `Ed25519` |
+| `type Options struct { CommonName string; DNSNames []string; IPs []net.IP; NotBefore, NotAfter time.Time; Expired, NotYetValid bool; KeyType KeyType; ClientAuth bool }` | the zero value: localhost, 127.0.0.1 and ::1, valid from a day ago for two days, ECDSA. `Expired`/`NotYetValid` set a window in the past/future, `DNSNames`/`IPs` another name give a hostname mismatch; `KeyType` is `ECDSA`, `RSA` (2048) or `Ed25519` |
 | `type Leaf struct { Cert; Key; CertPEM, KeyPEM, CAPEM []byte; Pool *x509.CertPool }` | `KeyPEM` is PKCS#8; `CAPEM` the issuer |
 | `(*Leaf) TLSCertificate() tls.Certificate`, `ServerConfig() *tls.Config`, `ClientConfig(serverName) *tls.Config` | for Go servers and fakes (`fakeserver.StartTLSOptions.Config`, `Options.TLS`) and clients (`client.Conn.TryStartTLS`); `CA.ClientConfig` too |
-| `(*Leaf) Write(tb, dir) Files{Cert, Key, CA string}` | `cert.pem`, `key.pem` (mode 0600) and `ca.pem` in `dir` (`""` = `tb.TempDir()`), for servers that read paths from their config (INN, diablo, NewsCache) |
+| `(*Leaf) Write(tb, dir) Files{Cert, Key, CA string}`, `WriteKeyMode(tb, dir, mode)` | `cert.pem`, `key.pem` (mode 0600, files replaced atomically) and `ca.pem` in `dir` (`""` = `tb.TempDir()`), for servers that read paths from their config (INN, diablo, NewsCache); a server running as another user needs `WriteKeyMode` 0640 + chgrp, or 0644 |
 | `(*CA) WriteCA(tb, dir) string` | `ca.pem` alone; its path |
 
 A leaf made to fail (`Expired`, `NotYetValid`, another name) still carries the issuer's trust, so

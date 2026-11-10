@@ -46,7 +46,7 @@ func TestStartTLS(t *testing.T) {
 		t.Error("plain conn reports TLS")
 	}
 	tc := c.StartTLS(ca.ClientConfig("localhost"))
-	st, ok := tc.TLS()
+	st, ok := tc.TLSState()
 	if !ok || !st.HandshakeComplete || st.Version < tls.VersionTLS12 {
 		t.Fatalf("state %+v ok=%v", st, ok)
 	}
@@ -124,8 +124,13 @@ func TestStartTLSInjection(t *testing.T) {
 	if !strings.Contains(err.Error(), "plaintext") || !strings.Contains(err.Error(), "382") {
 		t.Errorf("unclear error: %v", err)
 	}
-	if s.TLSHandshakes()+s.TLSFailed() != 0 {
-		t.Error("the client went on to the handshake")
+	// no handshake began: a server-side TLS handshake would have recorded a ClientHello; the
+	// handler never calls StartTLS, so also check that the client closed instead of sending one
+	if n := s.TLSServerNames(); len(n) != 0 {
+		t.Errorf("a ClientHello reached the server: %q", n)
+	}
+	if code, _, err := c.TryCmd("DATE"); err == nil {
+		t.Errorf("connection still usable after the failed upgrade (%d)", code)
 	}
 }
 
@@ -298,4 +303,60 @@ func TestStartTLSFiles(t *testing.T) {
 	s := fakeserver.New(t, fakeserver.Options{Store: tlsStore(), StoreOpts: fakeserver.StoreOptions{
 		StartTLS: &fakeserver.StartTLSOptions{Config: &tls.Config{Certificates: []tls.Certificate{cert}}}}})
 	Dial(t, s.Addr()).StartTLS(ca.ClientConfig("localhost")).ExpectCmd(111, "DATE")
+}
+
+// TestStartTLSResumption: a client session cache resumes the session on the second
+// connection, for STARTTLS and for implicit TLS (the server keeps one ticket key per config).
+func TestStartTLSResumption(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	leaf := ca.Issue(t, tlscert.Options{})
+	cfg := func() *tls.Config {
+		c := ca.ClientConfig("localhost")
+		c.ClientSessionCache = tls.NewLRUClientSessionCache(4)
+		return c
+	}
+	t.Run("STARTTLS", func(t *testing.T) {
+		s := fakeserver.New(t, fakeserver.Options{Store: tlsStore(), StoreOpts: fakeserver.StoreOptions{
+			StartTLS: &fakeserver.StartTLSOptions{Config: leaf.ServerConfig()}}})
+		cc := cfg()
+		var resumed []bool
+		for i := 0; i < 3; i++ {
+			tc := Dial(t, s.Addr()).StartTLS(cc)
+			tc.ExpectCmd(111, "DATE") // reads the session ticket
+			st, _ := tc.TLSState()
+			resumed = append(resumed, st.DidResume)
+		}
+		if !slices.Equal(resumed, []bool{false, true, true}) {
+			t.Errorf("DidResume %v, want [false true true]", resumed)
+		}
+	})
+	t.Run("implicit", func(t *testing.T) {
+		s := fakeserver.New(t, fakeserver.Options{TLS: leaf.ServerConfig(), Store: tlsStore()})
+		cc := cfg()
+		var resumed []bool
+		for i := 0; i < 3; i++ {
+			nc, err := tls.Dial("tcp", s.Addr(), cc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := New(t, nc)
+			if _, err := c.ReadGreeting(); err != nil {
+				t.Fatal(err)
+			}
+			st, _ := c.TLSState()
+			resumed = append(resumed, st.DidResume)
+		}
+		if !slices.Equal(resumed, []bool{false, true, true}) {
+			t.Errorf("DidResume %v, want [false true true]", resumed)
+		}
+	})
+}
+
+// TestStartTLSAuthNeedsTLSWithoutAuth: with no authentication configured the knob changes nothing.
+func TestStartTLSAuthNeedsTLSWithoutAuth(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	s := tlsServer(t, ca, tlscert.Options{}, fakeserver.StartTLSOptions{AuthNeedsTLS: true}, fakeserver.StoreOptions{})
+	c := Dial(t, s.Addr())
+	c.ExpectCmd(502, "AUTHINFO USER u")
+	c.ExpectCmd(211, "GROUP alt.test")
 }
