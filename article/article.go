@@ -21,14 +21,32 @@ type Field struct {
 	EOL string
 }
 
-// Name returns the text before the first colon, as written (no trimming, case kept), or ""
-// when the field has no colon.
+// Name returns the naive text before the first colon, as written (no trimming, case kept, any
+// characters), or "" when the field has no colon. For a line such as an mbox separator "From
+// nobody Thu Dec  8 12:55:04 2016" that is "From nobody Thu Dec  8 12" and HasColon is true:
+// use ValidName to tell a header field from such a line.
 func (f Field) Name() string {
 	name, _, ok := strings.Cut(f.Raw, ":")
 	if !ok {
 		return ""
 	}
 	return name
+}
+
+// ValidName reports whether Name is a field name in the sense of RFC 5322 section 3.6.8
+// (ftext): not empty, printable US-ASCII (33 to 126), so no space, tab, control or 8-bit byte
+// ("X-Spaced " and the mbox line above are not valid names).
+func (f Field) ValidName() bool {
+	n := f.Name()
+	if n == "" {
+		return false
+	}
+	for i := 0; i < len(n); i++ {
+		if n[i] < 33 || n[i] > 126 {
+			return false
+		}
+	}
+	return true
 }
 
 // HasColon reports whether Raw holds a colon.
@@ -417,4 +435,44 @@ func (a *Article) SetBodyLines(lines ...string) *Article {
 	}
 	a.Body = []byte(b.String())
 	return a
+}
+
+// PathEntries returns the entries of the first Path field in order: the unfolded value split at
+// '!', spaces and tabs around each entry (what a fold before or after a '!' leaves) trimmed.
+// A space inside an entry stays, so "a b!c" has the entries "a b" and "c". An empty or absent
+// Path has none.
+func (a *Article) PathEntries() []string {
+	v, ok := a.Lookup("Path")
+	if !ok || v == "" {
+		return nil
+	}
+	entries := strings.Split(v, "!")
+	for i, e := range entries {
+		entries[i] = strings.Trim(e, " \t")
+	}
+	return entries
+}
+
+// PrependPath puts "host!" at the front of the Path value, as a relaying server does: the
+// existing Path field is kept as it is, folds and spacing included, and only the text is
+// inserted after the colon and the spaces that follow it ("Path: a\r\n !b" becomes
+// "Path: host!a\r\n !b"). An empty Path value ("Path:") becomes "Path: host" and an article
+// without Path gets "Path: host". It returns a for chaining.
+func (a *Article) PrependPath(host string) *Article {
+	for i, f := range a.Fields {
+		if !sameName(f.Name(), "Path") {
+			continue
+		}
+		if f.Value() == "" {
+			a.Fields[i].Raw = f.Name() + ": " + host
+			return a
+		}
+		at := len(f.Name()) + 1
+		for at < len(f.Raw) && isWSP(f.Raw[at]) {
+			at++
+		}
+		a.Fields[i].Raw = f.Raw[:at] + host + "!" + f.Raw[at:]
+		return a
+	}
+	return a.Add("Path", host)
 }
