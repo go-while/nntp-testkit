@@ -155,7 +155,7 @@ func (c *Conn) SendChunks(raw []byte, n int, pause time.Duration) error {
 	n = max(n, 1)
 	for len(raw) > 0 {
 		k := min(n, len(raw))
-		if err := c.sendBytes(raw[:k]); err != nil {
+		if err := c.SendBytes(raw[:k]); err != nil {
 			return err
 		}
 		raw = raw[k:]

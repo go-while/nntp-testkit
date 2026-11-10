@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/go-while/nntp-testkit/conformance"
 	"github.com/go-while/nntp-testkit/fakeserver"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
 func store() *fakeserver.Store {
@@ -151,5 +155,117 @@ func TestRunTLS(t *testing.T) {
 	errb.Reset()
 	if code := run([]string{"-addr", srv.Addr(), "-tls"}, &out, &errb); code != 2 || !strings.Contains(errb.String(), "tls") {
 		t.Errorf("-tls with an untrusted cert: exit %d, stderr %q; want 2 naming tls", code, errb.String())
+	}
+}
+
+// TestRunStartTLSFlags: the STARTTLS checks handshake without verification by default (and say
+// so); -ca verifies against a CA file, a wrong CA fails the check, -starttls-verify uses the
+// system roots (which do not know the test CA).
+func TestRunStartTLSFlags(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	srv := fakeserver.New(t, fakeserver.Options{Store: store(), StoreOpts: fakeserver.StoreOptions{
+		StartTLS: &fakeserver.StartTLSOptions{Config: ca.Issue(t, tlscert.Options{}).ServerConfig()}}})
+	caFile := ca.WriteCA(t, t.TempDir())
+	otherFile := tlscert.NewCA(t).WriteCA(t, t.TempDir())
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stdout string
+		stderr string
+	}{
+		{"default", nil, 0, "certificate not verified", ""},
+		{"servername", []string{"-servername", "localhost"}, 0, "certificate not verified", ""},
+		{"ca", []string{"-ca", caFile}, 0, "PASS starttls ", ""},
+		{"ca-servername", []string{"-ca", caFile, "-servername", "localhost"}, 0, "PASS starttls ", ""},
+		{"wrong-ca", []string{"-ca", otherFile}, 1, "not accepted by Options.StartTLS", ""},
+		{"system-roots", []string{"-starttls-verify"}, 1, "not accepted by Options.StartTLS", ""},
+		{"wrong-name", []string{"-ca", caFile, "-servername", "other.example"}, 1, "not accepted by Options.StartTLS", ""},
+		{"ca-missing", []string{"-ca", "/nonexistent/ca.pem"}, 2, "", "-ca"},
+		{"ca-not-pem", []string{"-ca", writeFile(t, "not a certificate")}, 2, "", "no PEM certificate"},
+		{"ca-insecure", []string{"-ca", caFile, "-tls-insecure"}, 2, "", "exclude each other"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			args := append([]string{"-addr", srv.Addr(), "-deadline", "5s", "-skip", skipAllBut("starttls")}, tc.args...)
+			code := run(args, &out, &errb)
+			if code != tc.code || !strings.Contains(out.String(), tc.stdout) || !strings.Contains(errb.String(), tc.stderr) {
+				t.Errorf("exit %d (want %d)\nstdout:\n%s\nstderr:\n%s", code, tc.code, out.String(), errb.String())
+			}
+		})
+	}
+}
+
+// skipAllBut returns the -skip value that leaves out every check whose name does not start with prefix.
+func skipAllBut(prefix string) string {
+	var skip []string
+	for _, n := range conformance.Names() {
+		if !strings.HasPrefix(n, prefix) {
+			skip = append(skip, n)
+		}
+	}
+	return strings.Join(skip, ",")
+}
+
+func writeFile(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "f.pem")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRunJSONMissing: a check skipped for a capability the server lacks carries it in "missing".
+func TestRunJSONMissing(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: store()})
+	var out, errb bytes.Buffer
+	if code := run([]string{"-addr", srv.Addr(), "-json"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d, stderr %s", code, errb.String())
+	}
+	var r jsonReport
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range r.Results {
+		if res.Name == "compress" && (res.Status != "SKIP" || res.Missing != "COMPRESS") {
+			t.Errorf("compress: %+v, want SKIP missing COMPRESS", res)
+		}
+	}
+}
+
+// TestRunAllow: -allow name=substring turns a matching Fail into a Skip (exit 0), is
+// repeatable, and a bad value or an unknown check is a usage error.
+func TestRunAllow(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: store(),
+		Faults: fakeserver.Faults{Override: map[string][]string{"HELP": {"500 nope"}}}})
+	base := []string{"-addr", srv.Addr(), "-deadline", "5s", "-skip", skipAllBut("help")}
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stdout string
+		stderr string
+	}{
+		{"fails", nil, 1, "FAIL help", ""},
+		{"allowed", []string{"-allow", `help=got "500 nope"`}, 0, `SKIP help`, ""},
+		{"allowed-detail", []string{"-allow", `help=got "500 nope"`}, 0, `allowed: HELP: got`, ""},
+		{"repeated", []string{"-allow", "date=x", "-allow", "help=500 nope"}, 0, "allowed:", ""},
+		{"substring-with-equals", []string{"-allow", "help=a=b"}, 1, "FAIL help", ""},
+		{"not-matching", []string{"-allow", "help=501"}, 1, "FAIL help", ""},
+		{"twice-same-check", []string{"-allow", "help=500", "-allow", "help=nope"}, 2, "", "already has an -allow substring"},
+		{"no-equals", []string{"-allow", "help"}, 2, "", "name=substring"},
+		{"empty-substring", []string{"-allow", "help="}, 2, "", "non-empty substring"},
+		{"unknown-check", []string{"-allow", "nosuch=x"}, 2, "", `unknown check "nosuch"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			code := run(append(append([]string{}, base...), tc.args...), &out, &errb)
+			if code != tc.code || !strings.Contains(out.String(), tc.stdout) || !strings.Contains(errb.String(), tc.stderr) {
+				t.Errorf("exit %d (want %d)\nstdout:\n%s\nstderr:\n%s", code, tc.code, out.String(), errb.String())
+			}
+		})
 	}
 }

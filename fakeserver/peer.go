@@ -15,6 +15,10 @@ type PeerOptions struct {
 	Defer436Once    map[string]bool // IHAVE of these ids → 436 the first time only (initial reply: no article is sent)
 	StallModeStream time.Duration   // sleep before the first MODE STREAM reply of the handler; capped at Options.Deadline
 	OnArticle       func(msgID string, wire []string)
+	// OnArticleRaw runs right after OnArticle with the article as the client wrote it: the
+	// exact bytes of the dot block, still dot-stuffed, without the "." terminator (see
+	// Conn.ReadDotBlockRaw); article.ParseDotBlock takes it. Same moment and goroutine.
+	OnArticleRaw func(msgID string, raw []byte)
 
 	// Compress offers COMPRESS DEFLATE (RFC 8054) as StoreOptions.Compress does:
 	// "COMPRESS DEFLATE" in CAPABILITIES while compression is off, COMPRESS 206 (then both
@@ -43,14 +47,16 @@ type PeerOptions struct {
 
 	// HoldGreeting holds the greeting until the channel is closed (or delivers a value): the
 	// connection is accepted and counts in Open, MaxOpen and Accepted, the client waits for
-	// its greeting. Bounded by Options.Deadline and ended by Server.Close (the connection is
-	// then dropped without greeting). Needs Options.NoGreeting: the handler writes the
-	// greeting (Options.Greeting) itself. Typical use: the test dials K+1 times and asserts
-	// MaxOpen <= K, then closes the channel. A client that disconnects while held is noticed
-	// when the hold ends.
+	// its greeting. The hold ends at Options.Deadline (testkit.Deadline(), 60 s by default)
+	// at the latest, and then the connection is dropped without a greeting: a test that
+	// releases the channel later than that sees a closed connection, not a late greeting.
+	// Server.Close ends the hold the same way. Needs Options.NoGreeting: the handler writes the
+	// greeting (Options.Greeting) itself; NewPeer and StartPeer set it. Typical use: the test
+	// dials K+1 times and asserts MaxOpen <= K, then closes the channel. A client that
+	// disconnects while held is noticed when the hold ends.
 	HoldGreeting <-chan struct{}
 	// GreetingDelay waits this long before the greeting (after HoldGreeting), at most
-	// Options.Deadline. Needs Options.NoGreeting like HoldGreeting.
+	// Options.Deadline. Needs Options.NoGreeting like HoldGreeting (NewPeer sets it).
 	GreetingDelay time.Duration
 	// BeforeReply runs on the connection's goroutine before every reply is written (the 335
 	// and the final 235/437 of IHAVE are two replies): cmd is the upper-cased command, line
@@ -264,7 +270,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				}
 				mu.Unlock()
 			case "TAKETHIS":
-				wire, err := c.ReadDotBlock()
+				wire, raw, err := c.ReadDotBlockRaw()
 				if err != nil {
 					return
 				}
@@ -278,6 +284,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				}
 				if o.OnArticle != nil {
 					o.OnArticle(arg, wire)
+				}
+				if o.OnArticleRaw != nil {
+					o.OnArticleRaw(arg, raw)
 				}
 				reply = []string{"239 " + arg}
 			case "IHAVE":
@@ -311,7 +320,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					}
 					continue
 				}
-				wire, err := c.ReadDotBlock()
+				wire, raw, err := c.ReadDotBlockRaw()
 				if err != nil {
 					return
 				}
@@ -322,6 +331,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				}
 				if o.OnArticle != nil {
 					o.OnArticle(arg, wire)
+				}
+				if o.OnArticleRaw != nil {
+					o.OnArticleRaw(arg, raw)
 				}
 				reply = []string{"235 Article transferred OK"}
 				plain = true // Faults apply to the 335 only, as to POST's 340 in StoreHandler

@@ -37,8 +37,11 @@
 //	func (s *Server) Addr() string                   // "host:port"
 //	func (s *Server) Host() string
 //	func (s *Server) Port() int
+//	func NewPeer(tb testing.TB, o Options, po *PeerOptions) *Server // New with Handler = PeerHandler(po) and NoGreeting set when po has HoldGreeting/GreetingDelay; po nil = &PeerOptions{}; an o.Handler already set fails tb
+//	func StartPeer(o Options, po *PeerOptions) (*Server, error)      // the same without testing
 //	func (s *Server) Lines() []string                // every client line in order, all connections
 //	func (s *Server) Articles() [][]string           // every dot block read (ReadDot steps, POST/TAKETHIS/IHAVE payloads), raw wire lines
+//	func (s *Server) ArticlesRaw() [][]byte          // the same blocks as the client wrote them: the exact bytes between the command and the "." terminator, stuffed, CRLF intact; article.ParseDotBlock takes an element
 //	func (s *Server) Mismatches() []string
 //	func (s *Server) Accepted() int                  // connections accepted so far
 //	func (s *Server) Open() int                      // connections not yet gone
@@ -52,7 +55,8 @@
 //	type Conn struct { ... }                         // one server-side connection
 //	func (c *Conn) ReadLine() (string, error)        // CRLF/LF stripped; records the line and counts the command
 //	func (c *Conn) WriteLines(lines ...string) error // each + CRLF
-//	func (c *Conn) ReadDotBlock() ([]string, error)  // raw wire lines up to "."; recorded in Articles()
+//	func (c *Conn) ReadDotBlock() ([]string, error)  // raw wire lines up to "."; recorded in Articles() and ArticlesRaw()
+//	func (c *Conn) ReadDotBlockRaw() ([]string, []byte, error) // the same, also the exact bytes of the block (not the "." line)
 //	func (c *Conn) Raw() net.Conn                    // the TLS conn when TLS, else the TCP conn; after StartCompress the compressing conn on top
 //	func (c *Conn) StartCompress() error             // RFC 8054 COMPRESS DEFLATE from now on, both directions; call it after writing the 206; error when already on
 //	func (c *Conn) StartCompressOutputOnly() error   // broken COMPRESS: deflate only the server's output, read the client's bytes uncompressed
@@ -85,10 +89,11 @@
 //		NoStream        bool            // innd with streaming off: MODE STREAM 501, CHECK/TAKETHIS unknown (500, TAKETHIS's article lines are read as commands), no STREAMING capability
 //		StallModeStream time.Duration   // sleep before the handler's first MODE STREAM reply
 //		OnArticle       func(msgID string, wire []string) // before the 239/235 reply
+//		OnArticleRaw    func(msgID string, raw []byte)    // right after OnArticle: the article's exact stuffed bytes, no terminator (article.ParseDotBlock)
 //		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
 //		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
-//		HoldGreeting       <-chan struct{} // greeting waits for close/receive; needs Options.NoGreeting; bounded by Deadline, dropped on Close; the conn counts as open
-//		GreetingDelay      time.Duration   // sleep before the greeting (after HoldGreeting), capped at Deadline; needs Options.NoGreeting
+//		HoldGreeting       <-chan struct{} // greeting waits for close/receive; needs Options.NoGreeting (NewPeer sets it); the hold ends at Deadline (60 s default) and then the connection is dropped without a greeting, as on Close; the conn counts as open
+//		GreetingDelay      time.Duration   // sleep before the greeting (after HoldGreeting), capped at Deadline; needs Options.NoGreeting (NewPeer sets it)
 //		BeforeReply        func(c *Conn, cmd, line, status string) // before every reply (IHAVE: 335 and the final one); may block, e.g. c.Wait(ch)
 //		CapabilitiesReply  []string        // non-nil: the whole answer to CAPABILITIES, e.g. {"500 What?"} (Diablo's feeder)
 //		ModeStreamReply    []string        // non-nil: the answer to MODE STREAM, e.g. {"203 StreamOK."} or {"501 ..."}; wins over NoStream's 501
@@ -105,7 +110,8 @@
 //	// to the 335 only (as to POST's 340): an overridden first reply that is not a 335 is
 //	// final and no article is read; the final 235/437 is written as it is (BeforeReply can
 //	// hold it). BeforeReply runs before the Faults. HoldGreeting/GreetingDelay: the handler
-//	// writes Options.Greeting itself, so Options.NoGreeting must be set.
+//	// writes Options.Greeting itself, so Options.NoGreeting must be set: NewPeer/StartPeer
+//	// do that, with a manual Handler: PeerHandler(po) the test fails on the first connection.
 //	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
 //	// Defer436Once; else 335, the article (dot block), then 437 (Reject, or held meanwhile) or
 //	// 235 (added to Have, OnArticle).

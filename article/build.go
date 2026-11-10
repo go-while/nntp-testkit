@@ -1,6 +1,7 @@
 package article
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -28,36 +29,70 @@ type Options struct {
 	Body       []string  // body lines, none = one short line of text
 	Approved   string    // when set, an Approved header after Date (moderated groups, control messages)
 	Extra      []string  // more header lines, each written as one field after Date (and Approved) with AddRaw
+	Omit       []string  // names (case-insensitive) of the generated headers to leave out: Path, From, Newsgroups, Subject, Message-ID, Date, Approved; Extra is not affected
 }
 
 // New builds a minimal valid article: the mandatory headers of RFC 5536 section 3 in the order
 // Path, From, Newsgroups, Subject, Message-ID, Date, an empty line and a short body, all with
-// CRLF. tb only supplies the test name. A caller that needs the article broken edits the
-// result.
+// CRLF. tb only supplies the test name (for the Subject and Message-ID, unless given or
+// omitted). A caller that needs the article broken edits the result. A newsreader's POST,
+// which has no Path, Date or Message-ID, is
+//
+//	article.New(t, article.Options{Omit: []string{"Path", "Date", "Message-ID"}})
 func New(tb testing.TB, o Options) *Article {
 	tb.Helper()
-	groups := orDefault(o.Newsgroups, DefaultGroup)
-	subject := o.Subject
-	if subject == "" {
-		subject = "test article " + sanitize(tb.Name())
+	if o.Subject == "" && !o.omits("Subject") {
+		o.Subject = "test article " + sanitize(tb.Name())
 	}
-	id := o.MessageID
-	if id == "" {
-		id = MsgIDAt(tb, o.Domain)
+	if o.MessageID == "" && !o.omits("Message-ID") {
+		o.MessageID = MsgIDAt(tb, o.Domain)
 	}
+	return build(o)
+}
+
+// NewArticle is New without testing: it needs no tb, so a program or a helper outside a test
+// can use it. Nothing is derived from a test name, so it returns an error when Subject or
+// MessageID is empty and not in Omit; every other field has a default as in New.
+func NewArticle(o Options) (*Article, error) {
+	if o.Subject == "" && !o.omits("Subject") {
+		return nil, errors.New("article: NewArticle needs Options.Subject (or Omit it)")
+	}
+	if o.MessageID == "" && !o.omits("Message-ID") {
+		return nil, errors.New("article: NewArticle needs Options.MessageID (or Omit it)")
+	}
+	return build(o), nil
+}
+
+// omits reports whether name is in Omit.
+func (o Options) omits(name string) bool {
+	for _, n := range o.Omit {
+		if sameName(n, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// build writes the article of o, whose Subject and MessageID are settled.
+func build(o Options) *Article {
 	date := o.Date
 	if date.IsZero() {
 		date = time.Now()
 	}
 	a := &Article{}
-	a.Add("Path", orDefault(o.PathHost, DefaultPathHost)+"!not-for-mail").
-		Add("From", orDefault(o.From, DefaultFrom)).
-		Add("Newsgroups", groups).
-		Add("Subject", subject).
-		Add("Message-ID", id).
-		Add("Date", date.UTC().Format(DateLayout))
+	add := func(name, value string) {
+		if !o.omits(name) {
+			a.Add(name, value)
+		}
+	}
+	add("Path", orDefault(o.PathHost, DefaultPathHost)+"!not-for-mail")
+	add("From", orDefault(o.From, DefaultFrom))
+	add("Newsgroups", orDefault(o.Newsgroups, DefaultGroup))
+	add("Subject", o.Subject)
+	add("Message-ID", o.MessageID)
+	add("Date", date.UTC().Format(DateLayout))
 	if o.Approved != "" {
-		a.Add("Approved", o.Approved)
+		add("Approved", o.Approved)
 	}
 	for _, raw := range o.Extra {
 		a.AddRaw(raw)
@@ -138,9 +173,8 @@ func control(tb testing.TB, o Options, ctl, body string) *Article {
 	a := New(tb, o)
 	for i, f := range a.Fields {
 		if sameName(f.Name(), "Subject") {
-			a.Insert(i+1, "Control: "+ctl)
-			break
+			return a.Insert(i+1, "Control: "+ctl)
 		}
 	}
-	return a
+	return a.Insert(0, "Control: "+ctl) // Subject omitted
 }

@@ -9,11 +9,12 @@ import (
 
 // DefaultAllowed returns the header fields a server may add or change on its way (they are
 // ignored by Compare unless DiffOptions.Strict): Path, Xref, Injection-Info, Injection-Date,
-// NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace and X-Complaints-To. A new slice each
-// time.
+// NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To and Organization
+// (INN and others add the configured organization to a posted article that has none). A new
+// slice each time.
 func DefaultAllowed() []string {
 	return []string{"Path", "Xref", "Injection-Info", "Injection-Date", "NNTP-Posting-Host",
-		"NNTP-Posting-Date", "Lines", "X-Trace", "X-Complaints-To"}
+		"NNTP-Posting-Date", "Lines", "X-Trace", "X-Complaints-To", "Organization"}
 }
 
 // DiffOptions tune Compare.
@@ -27,6 +28,8 @@ type DiffOptions struct {
 	// CRs, and without empty lines at the end. A body that differs in any other byte still
 	// differs. Off: the bodies must be equal byte for byte.
 	IgnoreTrailingSpace bool
+	// IgnoreOrder does not report Reordered (for servers that rearrange the head).
+	IgnoreOrder bool
 	// CaseSensitiveNames makes a field whose name is spelled differently (From and FROM) a
 	// change; off, names are compared case-insensitively.
 	CaseSensitiveNames bool
@@ -148,7 +151,7 @@ func Compare(sent, got *Article, o DiffOptions) Diff {
 		return seq
 	}
 	oSent, oGot := order(sent), order(got)
-	if !equalStrings(oSent, oGot) {
+	if !o.IgnoreOrder && !equalStrings(oSent, oGot) {
 		d.Reordered, d.OrderSent, d.OrderGot = true, oSent, oGot
 	}
 	d.BodyDiffers, d.BodyDetail = compareBodies(sent.Body, got.Body, o.IgnoreTrailingSpace)
@@ -202,31 +205,22 @@ func compareValue(f Field) string {
 }
 
 // PathExtends reports whether got's Path is sent's Path with entries added in front, as a
-// server does ("relay!peer!not-for-mail" extends "peer!not-for-mail"), or is the same: the tail
-// is kept whole, entry for entry. Spaces and folds are ignored. It is true when sent has no
+// server does ("relay!peer!not-for-mail" extends "peer!not-for-mail"), or is the same: the
+// PathEntries of sent are the last entries of got's, entry for entry. Folds around a '!' are
+// ignored, but a space inside an entry is part of it, so a Path that gained a token such as
+// "peer junk!not-for-mail" does not extend. It is true when sent has no
 // Path (nothing to keep) and false when only got lacks one. Compare allows Path to change, so
 // use this to check what a server did to it.
 func PathExtends(sent, got *Article) bool {
 	sent, got = sent.Canon(), got.Canon()
-	s, ok := sent.Lookup("Path")
-	if !ok {
+	if _, ok := sent.Lookup("Path"); !ok {
 		return true
 	}
-	g, ok := got.Lookup("Path")
-	if !ok {
+	if _, ok := got.Lookup("Path"); !ok {
 		return false
 	}
-	s, g = squashSpace(s), squashSpace(g)
-	return g == s || strings.HasSuffix(g, "!"+s)
-}
-
-func squashSpace(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
-			return -1
-		}
-		return r
-	}, s)
+	s, g := sent.PathEntries(), got.PathEntries()
+	return len(g) >= len(s) && equalStrings(g[len(g)-len(s):], s)
 }
 
 func equalStrings(a, b []string) bool {

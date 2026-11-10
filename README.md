@@ -29,7 +29,7 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 
 | package | what |
 |---|---|
-| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening` |
+| `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening`, `ShortTempDir`, `SocketPathFits` |
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054); STARTTLS (RFC 4642) |
 | `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS and STARTTLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
 | `tlscert` | test CA and leaf certificates (expired, not yet valid, wrong name), as `tls.Certificate`, PEM or files with a 0600 key |
@@ -51,6 +51,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `WaitFor(tb, d, what, cond func() bool)` | poll `cond` every 50 ms until it holds; `tb.Fatalf("timed out after <d> waiting for <what>")` after `d` (0 = `Deadline()`) |
 | `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, and not in use on 0.0.0.0 or [::] either, for a server that must be told its port (another process may take it first) |
 | `Listening(addr) bool` | a TCP dial to `addr` succeeds within a second (closed at once, nothing written): a server is up, or with `WaitFor` it has stopped |
+| `ShortTempDir(tb) string` | a fresh 0700 directory under a short base (`os.TempDir()` if at most 32 bytes, else `/tmp`), named `nt<hash of tb.Name()>-<random>` (about 25 bytes), removed by `tb.Cleanup` (call it before starting servers that use it: cleanups run last-in first-out); for unix-domain sockets, whose path is limited (`MaxSocketPath` = 107 on Linux, 103 elsewhere: `sun_path` is 108 / 104 bytes with the NUL) and which `t.TempDir()` (`$TMPDIR/<test name><random>/001`, `$TMPDIR` is about 50 bytes on macOS) overflows with a long test name |
+| `MaxSocketPath`, `SocketPathFits(path) bool` | that limit, and a check for tests that build socket paths |
 
 ### client
 
@@ -75,11 +77,12 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `ExpectStatus(want, what) string` | read the next status line (the 240 after a POSTed article, a pipelined reply); fail tb on error or unless the code is `want` |
 | `MustSend(raw)` | `Send` that fails tb |
 | `Capabilities() (map[string][]string, []string)` | send CAPABILITIES; fail tb unless 101 and a list `ParseCapabilities` takes; the map and the lines in order |
-| `ParseCode`, `ExpectCode`, `ExpectLines`, `Unstuff` | text helpers |
+| `ParseCode`, `ExpectCode`, `ExpectLines`, `Unstuff` | text helpers (`Unstuff` removes the first dot of every line that starts with one, RFC 3977 3.1.1) |
 | `Stuff(lines) string` | the lines as a client sends them after POST, IHAVE or TAKETHIS: dot-stuffed, CRLF after each, `.\r\n` at the end |
 | `ParseCapabilities(lines) (map[string][]string, error)` | CAPABILITIES lines → label upper-cased (labels are case-insensitive, RFC 3977 §3.3.1) → arguments as sent (an empty slice for none); error on a blank line or a label listed twice, the map holds the rest |
 | `StuffBytes(article []byte) []byte` | an article in wire form (CRLF, not stuffed, no terminator) as a client sends it: line starts (after CRLF; a bare LF is not one) dot-stuffed, final CRLF added, `.\r\n` appended; every other byte (bare CR, NUL, 8-bit) untouched |
-| `TryPost(article) (code, line, err)`, `TryIhave(id, article)`, `TryCheck(id)`, `TryTakethis(id, article)`, `TryModeStream()`, `TryLogin(user, pass)` | the transfer and login exchanges in one call. POST/IHAVE send the article on 340/335 and return the final reply, else the first one; TAKETHIS sends command and article without waiting; LOGIN sends PASS on 381. A refusal (435, 440, 480, 481 ...) is a result: `err` is for I/O and protocol errors only. `id` includes the `<>` |
+| `TryPost(article) (code, line, sent, err)`, `TryIhave(id, article)`, `TryCheck(id)`, `TryTakethis(id, article)`, `TryModeStream()`, `TryLogin(user, pass)` | the transfer and login exchanges in one call. POST/IHAVE send the article on 340/335 and return the final reply, else the first one; TAKETHIS sends command and article without waiting; LOGIN sends PASS on 381. A refusal (435, 440, 480, 481 ...) is a result: `err` is for I/O and protocol errors only. `sent` says whether the article went out (a 436 or 437 can come before or after the transfer; TAKETHIS always sends). `ExpectPost(want, article)`, `ExpectIhave(want, id, article)`, `ExpectTakethis(want, id, article)` fail the test unless the article was sent and the final code is `want`. `id` includes the `<>` |
+| `SendBytes`, `MustSendBytes` | `Send` and `MustSend` for a `[]byte` (e.g. `StuffBytes(article)`) |
 | `Post`, `Ihave`, `Check`, `Takethis`, `ModeStream`, `Login` | the same, `(code, line)`; fail tb only on an I/O or protocol error, never on a refusal |
 | `TryPipeline(cmds, multi) ([]Reply, error)` / `Pipeline(...)`, `type Reply struct { Cmd string; Code int; Line string; Lines []string }`, `MultiLine(cmd, code) bool` | write all commands from a goroutine while reading the replies in order (no deadlock when the server stops reading); `multi(cmd, code)` says whether a dot block follows (nil: `MultiLine`; `Reply.Cmd` is the entry's first line); the deadline slides with every line, a dot block also ends within 10 deadlines and 64 MiB |
 | `TryDialFrom(addr, localIP, deadline)` / `DialFrom(tb, addr, localIP)` | dial from a chosen source address (127.0.0.2) and read the greeting; skip the test where the OS cannot bind it (macOS without an alias) |
@@ -160,8 +163,8 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 
 | field | effect |
 |---|---|
-| `HoldGreeting <-chan struct{}` | the greeting waits until the channel is closed (or delivers a value, releasing one connection); the connection counts as open meanwhile, so a test can assert `MaxOpen <= K`. Needs `Options.NoGreeting: true` (the peer writes `Options.Greeting` itself); a hold past the Deadline or `Close` drops the connection |
-| `GreetingDelay time.Duration` | wait before the greeting (after `HoldGreeting`), capped at the Deadline; needs `NoGreeting` |
+| `HoldGreeting <-chan struct{}` | the greeting waits until the channel is closed (or delivers a value, releasing one connection); the connection counts as open meanwhile, so a test can assert `MaxOpen <= K`. Needs `Options.NoGreeting: true` (the peer writes `Options.Greeting` itself; `fakeserver.NewPeer(t, opts, po)` sets it for you); a hold past the Deadline (60 s by default) or `Close` drops the connection |
+| `GreetingDelay time.Duration` | wait before the greeting (after `HoldGreeting`), capped at the Deadline; needs `NoGreeting` (set by `NewPeer`/`StartPeer`) |
 | `BeforeReply func(c *Conn, cmd, line, status string)` | runs before every reply is written (IHAVE: before the 335 and before the final one) and may block, e.g. `c.Wait(release)`: hold a reply at a known point. A reply held when the server closes is not sent |
 | `CapabilitiesReply []string` | the whole answer to CAPABILITIES, e.g. `{"500 What?"}` |
 | `ModeStreamReply []string` | the answer to MODE STREAM, e.g. `{"203 StreamOK."}` (Diablo's feeder, with `CapabilitiesReply`) or `{"501 ..."}`; CHECK and TAKETHIS keep working (unlike `NoStream`) |
@@ -321,15 +324,40 @@ the failure is the certificate's alone: `*tls.CertificateVerificationError` wrap
 
 | API | what |
 |---|---|
-| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG) |
+| `type Options struct { Path string; Args, Env []string; Dir string; StopTimeout, Deadline time.Duration; Logs, Ulimit []string; LogBytes int }` | `Dir` "" = `tb.TempDir()`; `Env` appended to `os.Environ()`; `Ulimit` entries such as `"-n 16"` (open files) or `"-f 64"` (file size) are set by `/bin/sh`, which then execs `Path`: fd exhaustion and write failures (EFBIG); `LogBytes` caps each part of the failure dump (0 = `DefaultLogBytes`, 64 KiB); `Daemonizes`: the binary's first process exits 0 and a daemon stays, so `StartTCP` keeps dialling until `Deadline` after that exit (without it, an exit before ready fails at once); the daemon should redirect its stdio and must not call `setsid`, or `Stop` cannot reach it; the captured output is kept up to 16 MiB (`Stderr()` is then cut in the middle) |
 | `StartStdio(tb, Options) *Process` | stdin/stdout are the client connection (inetd style): `Conn()` |
-| `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT) |
-| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `Wait`, `Done`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode; `Done()` is closed once the process exited (a bounded wait that, unlike `Wait`, never stops it) |
-| `Stop()` | SIGTERM, SIGKILL after `StopTimeout` (`DefaultStopTimeout` = 5s); idempotent; run by `tb.Cleanup` |
+| `StartTCP(tb, Options, addr) *Process` | ready once a dial to `addr` yields a greeting line (one probe connection, then QUIT); with `Options.Daemonizes`, a daemon is waited for until `Deadline` |
+| `(*Process) Conn`, `Addr`, `Pid`, `Signal(sig)`, `SignalGroup(sig)`, `Wait`, `Done`, `Stderr` | `Conn` is nil in TCP mode, `Addr` "" in stdio mode; `Signal` reaches the leader, `SignalGroup` every process of its group; `Done()` is closed once the process exited (a bounded wait that, unlike `Wait`, never stops it) |
+| `Stop()` | SIGTERM to the process group, SIGKILL to the group after `min(StopTimeout, Deadline)` (`DefaultStopTimeout` = 5s) while the leader or any member is left; idempotent; run by `tb.Cleanup` |
+| `type RunOptions struct { Path string; Args, Env []string; Dir string; Stdin io.Reader; Timeout time.Duration; MaxOutput int; WaitDelay time.Duration }` | a one-shot command: `Env` appended to `os.Environ()` as in `Options`; `Dir` "" = the caller's directory; `Stdin` nil = /dev/null (`strings.NewReader` for a string); `Timeout` 0 = `testkit.Deadline()`; `MaxOutput` 0 = 1 MiB, < 0 = no cap; `WaitDelay` 0 = 3s |
+| `Run(tb, RunOptions) (out string, code int)` | combined output and exit code; fails `tb` on a start error, a timeout or death by a signal, not on a non-zero exit (the caller checks `code`) |
+| `TryRun(RunOptions) (out string, code int, err error)` | the same without `tb`; `code` is -1 and `err` set for a start error, a timeout (wraps `ErrTimeout`; names the timeout and holds the output so far) or a signal (named); `err` is nil for every exit status |
+| `GoBuild(tb, out, pkg string, ldflags ...string) string` | `go build` of a Go main package into directory `out` ("" = a shared temp directory, removed by `CleanBuilds()` in `TestMain`); timeout at least 5 min (`GoBuildFloor`); cached per process by (out, package directory, ldflags, `GOOS`, `GOARCH`, `GOFLAGS`, `CGO_ENABLED`) so tests share one build, also when parallel; a relative `pkg` counts as the directory it names; a compiler failure fails `tb` with the compiler output and is remembered, a timeout or I/O error is not; test processes building into the same explicit `out` race, so give each its own or use "" |
+
+Output cap: the first and the last half of `MaxOutput` bytes are kept with a `[... N bytes cut ...]`
+marker between them, so a tool stuck in a loop cannot flood the log or the memory. A command that
+exits while a child it started still holds the output pipe (a daemon) is given up on after
+`WaitDelay`; its exit code counts and `exec.ErrWaitDelay` is not an error. The daemon keeps running.
+
+Process groups: the server and each `Run` command start as the leader of a new process group.
+`Stop` signals the whole group, so forked workers and a daemon that the leader started and left
+running are stopped too; a timed-out `Run` kills the group (a shell and its sleeping child go
+together). A process that calls `setsid` or `setpgid` leaves the group and is not reached.
+
+When the test binary dies, the cleanups do not run. The first start of a server or command
+installs a handler for SIGINT, SIGTERM and SIGHUP (those not ignored) that SIGKILLs every group the
+kit started and has not stopped, then removes itself and raises the signal again: Ctrl-C of
+`go test` ends the binary as before and leaves no server. On Linux the direct child also gets
+`Pdeathsig` SIGKILL (the child is started, and waited for, on a goroutine locked to one thread,
+as the kernel ties the signal to the thread), so a binary killed with SIGKILL takes the leader
+with it. Not covered: only the leader has `Pdeathsig`, so a wrapper shell's server or forked
+workers are orphaned when the binary is SIGKILLed; macOS has no `Pdeathsig`, so a SIGKILLed
+binary can leave servers behind there; a panic exit such as `go test -timeout` raises runs neither.
+A normal exit, a failure or a timeout of a test is handled by the cleanup.
 
 Log dump: the cleanup of both Start functions stops the process and, when the test failed, writes
-`Stderr()` (stdout too in TCP mode) and every file in `Options.Logs` to the test output with
-`tb.Log`. `Stop` needs a Unix system.
+`Stderr()` (stdout too in TCP mode; head and tail) and the tail of every file in `Options.Logs` to
+the test output with `tb.Log`, each part capped at `LogBytes`. `Stop` needs a Unix system.
 
 ### conformance
 
@@ -339,7 +367,9 @@ Log dump: the cleanup of both Start functions stops the process and, when the te
 | `RunVerbose(tb, Options) Report` | `Run` that first logs every result that is not a Skip (`tb.Logf`, one line each), so a passing run shows what passed |
 | `Check(Options) (Report, error)` | the same without `testing`; the error only when the first connection cannot be opened (no listener, TLS failure, dial or greeting timeout); a greeting with a wire mistake, or a 400/502 greeting ("service unavailable: <line>"), is the `greeting` check's Fail and every other check is skipped, not an error |
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; Deadline time.Duration; Skip []string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (no STARTTLS); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
+| `(Report) Require(tb, names ...string)` | fails `tb` once per named check that did not Pass: a Fail, a Skip (not a pass) and a name not in `Names()`; each line has status, RFC and Detail |
+| `(Report) RequireNoFail(tb)` | fails `tb` once per Fail (what `Run` does, for a `ReportOnly` or `Check` report); an empty report fails too |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; Allow map[string]string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Allow` maps a check name to a substring: a Fail of that check whose Detail contains it becomes a Skip "allowed: <Detail>" (known server bugs, without dropping the rest of the check; `Skip` drops the whole check). Use a specific substring: a check stops at its first mistake, so everything after an allowed Fail goes unseen; `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
 | `type Result struct { Name string; Status Status; Detail, RFC, Missing string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note); on a Skip for a capability the server does not advertise, `Missing` names it ("NEWNEWS", "STREAMING", "LIST ACTIVE.TIMES") and `Detail` reads "<Missing> not advertised": match skips on `Missing` |
 | `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
 
@@ -363,6 +393,31 @@ overview extensions are still handled as before.
 | RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `listgroup-range` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-active-times` `list-newsgroups` `list-overview-fmt` `list-headers` `list-unknown-keyword` `over` `over-errors` `hdr` `newgroups` `newnews` `post` (with `PostGroup`) `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
 | RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
 | RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
+| RFC 4642, RFC 8143 (STARTTLS advertised; `tls-capabilities` with `Options.TLS`) | `starttls` `starttls-twice` `starttls-pipelined` `tls-capabilities` |
+| RFC 8054 (COMPRESS DEFLATE advertised; uploads with `PostGroup`) | `compress` `compress-unknown` `compress-twice` `compress-upload` `compress-upload-lines` |
+
+The STARTTLS and COMPRESS checks run only when CAPABILITIES lists the capability (a Skip with
+`Missing` "STARTTLS" or "COMPRESS" otherwise; "COMPRESS DEFLATE" when COMPRESS is listed without
+DEFLATE, which `compress` itself fails). Decisions worth knowing: the STARTTLS checks never log
+in (STARTTLS is invalid after AUTHINFO) and are skipped when `Options.TLS` is set; the
+handshake is not verified unless `Options.StartTLS` (flags `-ca`, `-starttls-verify`) says so,
+and `starttls` then passes with the Detail "certificate not verified"; a 580 passes `starttls`
+with a Detail (the server may have no certificate) and skips the other two; a 502 or 483 from a
+plain, unauthenticated connection that lists STARTTLS fails. `starttls-pipelined` sends a DATE
+in the same write as STARTTLS, then does the handshake and listens: it fails when the DATE is
+answered in plaintext after the 382 or run after the handshake (RFC 8143 §4: the server MUST
+discard it; RFC 4642 forbids pipelining STARTTLS, so a dropped connection, a TLS alert or a
+failed handshake all pass, and any other reply than 382 or 580 to it skips). Without a
+verifying `Options.StartTLS` the handshake accepts TLS 1.0 and up. `tls-capabilities` (only with
+`Options.TLS`) fails when CAPABILITIES over implicit TLS lists STARTTLS; a SASL EXTERNAL
+listed without a client certificate is only noted. The COMPRESS checks
+log in only when COMPRESS is not listed before (or is answered 480); a 403 answer to COMPRESS
+(unable to activate) skips the check. `compress-unknown` expects 503 for an unknown algorithm
+and 501 for none; `compress-twice` expects 502 for a second COMPRESS DEFLATE, and
+for STARTTLS and AUTHINFO when they were advertised before (RFC 8054 §2.2.2); the unknown algorithm gets 502 or 503 there. The upload checks
+post 3000 lines of 100 bytes (some dot-stuffed, some empty, one a lone dot) and fail when the
+reply is not there within `Deadline` (INN issue #269: nnrpd waited for socket data while
+compressed input was pending).
 
 ```bash
 go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:1119 [-user u -pass p] [-group g]
@@ -374,17 +429,21 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-user`, `-pass` | AUTHINFO USER/PASS; without `-user` the RFC 4643 checks are skipped |
 | `-group` | a group the checks may post into (POST, TAKETHIS, IHAVE); without it nothing is posted |
 | `-tls`, `-tls-insecure` | TLS from the first byte, `ServerName` = the host of `-addr`; `-tls-insecure` skips the certificate check (and implies `-tls`) |
+| `-ca file` | PEM file of CA certificates that verify the server certificate of `-tls` and of the STARTTLS checks (instead of the system roots); implies `-starttls-verify`; not with `-tls-insecure` |
+| `-servername name` | TLS server name (SNI, and the name the certificate must carry) for `-tls` and STARTTLS; default the host of `-addr` |
+| `-starttls-verify` | verify the certificate in the STARTTLS checks (against `-ca`, else the system roots); without it (and without `-ca`) the handshake is not verified and the report says so |
+| `-allow name=substring` | repeatable: a Fail of check `name` whose detail contains the substring becomes a Skip "allowed: ..." (a known server bug); the substring must not be empty, an unknown check is a usage error, and a check named twice is one too (one substring per check); use a specific substring, because everything after the check's first mistake goes unseen |
 | `-deadline` | hang guard per read and write, default `10s` |
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
-| `-json` | the report as JSON (`results`, `capabilities`, `pass`/`fail`/`skip` counts) instead of text |
+| `-json` | the report as JSON (`results` with `name`, `status`, `rfc`, `detail` and, for a skip for a missing capability, `missing`; `capabilities`; `pass`/`fail`/`skip` counts) instead of text |
 | `-strict-overview-fmt` | require preferred `:bytes`/`:lines` instead of the RFC-permitted legacy aliases; off by default |
 
 Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
 cannot be reached.
 
 Self-test (the `conformance` tests): the kit's own Store server passes every check it can be
-given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE), the transit peer
+given (the stream and IHAVE checks skip: it lists neither STREAMING nor IHAVE; the STARTTLS and COMPRESS checks skip unless `StoreOptions.StartTLS` and `Compress` are set, and then pass), the transit peer
 (`PeerHandler`) passes the stream checks, and fakes with one deliberate mistake (a bare-LF
 greeting, an ARTICLE reply cut before its terminator, a NUL after a 411, 7 OVER fields, a
 LISTGROUP that ignores its range, a bad LIST ACTIVE.TIMES time, a LIST HEADERS name with its
@@ -419,14 +478,14 @@ terminating `.`; `client.Stuff` (or the client's send) adds both.
 | API | what |
 |---|---|
 | `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.nonce.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a per-process nonce, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
-| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra` (more raw header lines) |
+| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra, Omit` (more raw header lines; generated headers to leave out, e.g. `Path`, `Date`, `Message-ID` for a newsreader's POST); `NewArticle(Options) (*Article, error)` is `New` without a tb (needs Subject and MessageID, or their Omit) |
 | `type Article struct { Fields []Field; Sep string; Body []byte }`, `type Field struct { Raw, EOL string }` | the raw form: a field is its exact text (folds included) and its line end (`""` = CRLF, `"\n"`, `NoEOL`); `Sep` is what separates head and body (`NoEOL`: no empty line) |
-| `Add(name, value)`, `AddRaw(raw)`, `Insert(i, raw)`, `Set(name, value)`, `SetRaw(name, raw)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path (`SetRaw("Path", "Path:")` empties it in place), `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place keeping the old spelling of the name and drops duplicates |
+| `Add(name, value)`, `AddRaw(raw)`, `Insert(i, raw)`, `PrependPath(host)`, `Set(name, value)`, `SetRaw(name, raw)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path (`SetRaw("Path", "Path:")` empties it in place), `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place keeping the old spelling of the name and drops duplicates; `PrependPath` puts `host!` in front of the Path keeping its folds |
 | `SetBody([]byte)`, `SetBodyLines(lines...)` | the body as bytes, or lines each plus CRLF (a leading `.` is not doubled) |
-| `Get(name)`, `Lookup(name)`, `Values(name)`, `Has`, `Count`, `Duplicates()`, `MessageID()` | read, case-insensitive; values are unfolded |
+| `Get(name)`, `Lookup(name)`, `Values(name)`, `Has`, `Count`, `Duplicates()`, `MessageID()`, `PathEntries()` | read, case-insensitive; values are unfolded; `PathEntries` splits the Path at `!` (folds removed). `Field.Name()` is the naive text before the first colon (an mbox `From nobody Thu Dec  8 12:55:04 2016` line gives `From nobody Thu Dec  8 12`); `Field.ValidName()` tells a real field name |
 | `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()`, `Canon()` | the wire form, and CRLF-split lines (what `client.Stuff` takes); `Canon()` is `Parse(Bytes())`: a bare LF inside a field is a line end on the wire, so it splits the field |
 | `Parse(raw) *Article` / `ParseDotBlock(raw)` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b`. `ParseDotBlock` takes the client's `RawUntilDot` bytes (drops the terminator and the stuffing dots, nothing else), the right way to read a served article back; `ParseLines` on `ReadDotLines` output loses bare LF and CR-before-CRLF |
-| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, plus `Allow`; `Strict` drops the defaults), and the body byte for byte (`IgnoreTrailingSpace` to relax); both sides are canonicalised, folds count as one space, `CaseSensitiveNames` checks the spelling; a server that normalises bare CR/LF cannot be compared byte for byte. `PathExtends(sent, got)`: the sent Path is the tail of the served one |
+| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, Organization, plus `Allow`; `Strict` drops the defaults; `IgnoreOrder` drops the Reordered report), and the body byte for byte (`IgnoreTrailingSpace` to relax); both sides are canonicalised, folds count as one space, `CaseSensitiveNames` checks the spelling; a server that normalises bare CR/LF cannot be compared byte for byte. `PathExtends(sent, got)`: the sent Path entries are the tail of the served ones |
 | `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `max-line`, `long-message-id`, `folded-subject`, `folded-path`, `lf-only`, `no-colon`, `dup-header`, `empty-path`, `empty-subject`, ... (`Case.Invalid` marks the RFC-breaking ones) |
 | `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature; `Cancel`'s Newsgroups is `Options.Newsgroups`, "test" when empty |
 
