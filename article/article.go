@@ -186,8 +186,9 @@ func ParseLines(lines []string) *Article {
 
 // ParseDotBlock parses a multi-line block as it came off the wire: the bytes of the client's
 // RawUntilDot, dot-stuffed and ending in the ".\r\n" terminator. The terminator is dropped and
-// every line that starts with ".." (at the start of the data or after a CRLF) loses one dot;
-// nothing else changes, so a bare CR or LF in the served article survives, unlike with
+// every line that starts with a dot (at the start of the data or after a CRLF) loses that dot,
+// as RFC 3977 §3.1.1 tells a receiver to do (".." becomes ".", and the invalid ".x" becomes
+// "x", as client.Unstuff does); nothing else changes, so a bare CR or LF in the served article survives, unlike with
 // ParseLines on ReadDotLines output (which cannot tell a bare LF from CRLF and drops a CR
 // before CRLF). Input without the terminator is taken as it is.
 func ParseDotBlock(raw []byte) *Article {
@@ -198,7 +199,7 @@ func ParseDotBlock(raw []byte) *Article {
 	}
 	out := make([]byte, 0, len(raw))
 	for i := 0; i < len(raw); i++ {
-		if (i == 0 || (raw[i-1] == '\n' && i >= 2 && raw[i-2] == '\r')) && bytes.HasPrefix(raw[i:], []byte("..")) {
+		if (i == 0 || (raw[i-1] == '\n' && i >= 2 && raw[i-2] == '\r')) && raw[i] == '.' {
 			continue
 		}
 		out = append(out, raw[i])

@@ -1075,3 +1075,13 @@ func TestCompareIgnoreOrderAndOrganization(t *testing.T) {
 		t.Errorf("Strict: %s", d)
 	}
 }
+
+// TestParseDotBlockUnstuffsEveryDottedLine: as client.Unstuff, the receiver removes the first
+// dot of every line that begins with one (RFC 3977 §3.1.1), also of an invalid ".x".
+func TestParseDotBlockUnstuffsEveryDottedLine(t *testing.T) {
+	raw := []byte("Subject: s\r\n\r\n..two\r\n.x\r\nplain\r\n.\r\n")
+	got := string(article.ParseDotBlock(raw).Body)
+	if want := ".two\r\nx\r\nplain\r\n"; got != want {
+		t.Errorf("body %q, want %q", got, want)
+	}
+}
