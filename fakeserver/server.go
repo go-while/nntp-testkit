@@ -34,13 +34,13 @@ type Options struct {
 	Greeting   string        // default DefaultGreeting (DefaultGreetingNoPost for a read-only Store)
 	NoGreeting bool          // no greeting; without Handler: never write (greeting stall), reads are still recorded
 	RawStall   bool          // accept TCP, never write (TLS-handshake / SOCKS stall); bytes read are discarded
-	TLS        *tls.Config   // non-nil: TLS server on every accepted conn (cert from TLSConfig)
+	TLS        *tls.Config   // non-nil: TLS server on every accepted conn from the first byte (cert from TLSConfig); STARTTLS is StoreOpts.StartTLS / PeerOptions.StartTLS
 	Script     []Step        // run sequentially on every connection after the greeting
 	Handler    func(*Conn)   // replaces Script and Store when set; the conn is closed when it returns
 	Store      *Store        // stateful mode: the store handler when Handler is nil (see storeHandler)
 	StoreOpts  StoreOptions  // options of the store handler
 	Faults     Faults        // fault hooks of Store and Script mode and LineHandler; copied by New/Start
-	Deadline   time.Duration // hang guard; 0 = testkit.Deadline()
+	Deadline   time.Duration // hang guard; 0 = testkit.Deadline(); also bounds every TLS handshake
 
 	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
 	// closed, like a provider's per-account limit. It counts in Accepted but never in Open.
@@ -136,6 +136,11 @@ type StoreOptions struct {
 	// the 206 only the server's output is deflated and the client's input is read without
 	// inflating it (Conn.StartCompressOutputOnly): a broken server, for client tests.
 	CompressOutputOnly bool
+
+	// StartTLS offers STARTTLS (RFC 4642): "STARTTLS" in CAPABILITIES while the connection is
+	// plain, 382 and the upgrade, then 502 (see StartTLSOptions for the rules and test knobs).
+	// nil: STARTTLS is an unknown command (500).
+	StartTLS *StartTLSOptions
 }
 
 // Faults are fault hooks keyed by upper-cased command name ("ARTICLE"). They apply in Store
@@ -291,7 +296,12 @@ type Server struct {
 	counts     map[string]int
 	accepted   int
 	open       int
-	maxOpen    int // the most connections open at once (Open's peak)
+	maxOpen    int                         // the most connections open at once (Open's peak)
+	tlsNames   []string                    // SNI of every ClientHello (TLSServerNames)
+	tlsOK      int                         // completed TLS handshakes
+	tlsFailed  int                         // failed TLS handshakes
+	tlsHooked  map[*tls.Config]*tls.Config // hookedTLS cache
+	tlsClosed  int                         // STARTTLS upgrades closed at once (StartTLSOptions.CloseAfterHandshake)
 }
 
 // New listens on o.Addr, serves every connection in its own goroutine and registers
@@ -410,7 +420,11 @@ func (s *Server) reject(raw net.Conn) {
 	defer raw.Close()
 	_ = raw.SetDeadline(time.Now().Add(s.deadline)) // a TLS handshake reads too
 	if s.o.TLS != nil {
-		tc := tls.Server(raw, s.o.TLS)
+		tc, err := s.tlsHandshake(raw, s.o.TLS) // counted like every handshake
+		if err != nil {
+			return
+		}
+		_ = tc.SetDeadline(time.Now().Add(s.deadline))
 		defer tc.Close()
 		raw = tc
 	}
@@ -434,7 +448,11 @@ func (s *Server) serve(raw net.Conn, id int) {
 		}
 	}
 	if s.o.TLS != nil {
-		c.conn = tls.Server(raw, s.o.TLS)
+		tc, err := s.tlsHandshake(raw, s.o.TLS)
+		if err != nil {
+			return
+		}
+		c.conn, c.tls = tc, tc
 	}
 	c.r = newReader(c.conn)
 	if !s.o.NoGreeting {

@@ -1,7 +1,7 @@
 // Package client is a test client for NNTP servers: a connection with a hang guard, one-call
 // commands, dot-block reading and a strict mode that reports wire-level mistakes of the server.
 //
-// Contract (plan nntp-testkit; implemented in client.go and strict.go):
+// Contract (plan nntp-testkit; implemented in client.go, strict.go, compress.go and starttls.go):
 //
 //	type Conn struct {
 //		Conn     net.Conn
@@ -35,6 +35,11 @@
 //	func (c *Conn) Compress()                               // TryCompress; fails tb unless 206
 //	func (c *Conn) StartCompress() error                    // compress from now on without sending anything (the test sent COMPRESS and read the 206); error when already on
 //	func (c *Conn) Compressed() bool
+//	func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) // STARTTLS (RFC 4642): 382, no byte may be buffered after it, handshake within the deadline; a new strict Conn over the *tls.Conn (no greeting read); errors: *StartTLSError (not 382; c stays plain), *StrictError{Pending} (plaintext after the 382), handshake/verification errors
+//	func (c *Conn) StartTLS(cfg *tls.Config) *Conn             // TryStartTLS; fails tb; tb.Cleanup(Close) for the new Conn
+//	func (c *Conn) TLSState() (tls.ConnectionState, bool)      // peer certificates, version, ...; false when c is not TLS
+//	func (c *Conn) IsTLS() bool
+//	type StartTLSError struct { Code int; Line string }       // the server did not answer 382
 //	func (c *Conn) Close()
 //
 //	func ParseCode(line string) (int, error)               // 3-digit code at the start, followed by space or end
@@ -43,6 +48,53 @@
 //	func Unstuff(wire []string) []string                   // ".." prefix → "."
 //	func Stuff(lines []string) string                      // lines → dot-stuffed CRLF block with ".\r\n": what a client sends after POST/IHAVE/TAKETHIS
 //	func ParseCapabilities(lines []string) (map[string][]string, error) // CAPABILITIES lines → upper-cased label → arguments; error on a blank or doubled line
+//
+// Requests (requests.go): the article argument is the raw article in wire form (CRLF line ends,
+// not dot-stuffed, no terminator; the article package's Bytes returns it). A refusal is a
+// result, not a failure: the Try forms return an error only for an I/O, parse or strict-mode
+// error, the plain forms fail tb only then. The id is the message-ID as it goes on the wire,
+// angle brackets included, sent as given.
+//
+//	func StuffBytes(article []byte) []byte                 // dot-stuff each line start (after CRLF only: a bare LF is not a line start, so a lenient server like innd sees such a "." unstuffed), add the final CRLF when missing, append ".\r\n"; every other byte (bare CR, NUL, 8-bit) stays
+//	func (c *Conn) TryPost(article []byte) (code int, line string, err error)        // POST; on 340 send the article, return the final reply (240, 441 ...), else the first (440, 480 ...)
+//	func (c *Conn) TryIhave(id string, article []byte) (int, string, error)          // IHAVE id; on 335 send and return the final (235, 436, 437), else the first (435, 436, 480 ...)
+//	func (c *Conn) TryCheck(id string) (int, string, error)                          // CHECK id: 238, 431, 438 ...
+//	func (c *Conn) TryTakethis(id string, article []byte) (int, string, error)       // TAKETHIS id and the article in one write, then the reply (239, 439 ...)
+//	func (c *Conn) TryModeStream() (int, string, error)                              // MODE STREAM
+//	func (c *Conn) TryLogin(user, pass string) (int, string, error)                  // AUTHINFO USER, on 381 AUTHINFO PASS; the final reply (281, 481, 482, 502, 483 ...) or the first when not 381
+//	func (c *Conn) Post(article []byte) (int, string)       // the plain forms: TryX, fail tb on an error, return code and line
+//	func (c *Conn) Ihave(id string, article []byte) (int, string)
+//	func (c *Conn) Check(id string) (int, string)
+//	func (c *Conn) Takethis(id string, article []byte) (int, string)
+//	func (c *Conn) ModeStream() (int, string)
+//	func (c *Conn) Login(user, pass string) (int, string)
+//
+//	type Reply struct { Cmd string; Code int; Line string; Lines []string } // Lines: the un-stuffed block of a multi-line reply, nil otherwise
+//	func MultiLine(cmd string, code int) bool               // RFC 3977/4644/2980 multi-line reply codes (100, 101, 215, 220-222, 224, 225, 230, 231, 282; 211 after LISTGROUP)
+//	func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) // write all cmds (CRLF appended unless the entry ends in one) from a goroutine while reading the replies in order; multi nil = MultiLine; Reply.Cmd and multi's cmd are the entry's first line; the deadline slides per line, a dot block has an absolute bound of 10 deadlines and 64 MiB; on error the replies so far
+//	func (c *Conn) Pipeline(cmds []string, multi func(cmd string, code int) bool) []Reply            // TryPipeline; fails tb on error
+//
+// Dialing (dial.go):
+//
+//	func TryDialFrom(addr, localIP string, deadline time.Duration) (*Conn, error) // TryDial from a local source address ("127.0.0.2"); the OS must own it
+//	func DialFrom(tb testing.TB, addr, localIP string) *Conn                      // + greeting, tb.Cleanup(Close), fails tb
+//	func TryDialUntil(addr, prefix string, d time.Duration) (*Conn, error)        // redial every 50 ms until the greeting starts with prefix; d bounds the whole wait (0 = testkit.Deadline()); refused dials and other greetings count as "not yet"
+//	func DialUntil(tb testing.TB, addr, prefix string, d time.Duration) *Conn
+//
+// Raw I/O (raw.go): nothing is interpreted, no strict checks.
+//
+//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: none); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
+//	func (c *Conn) ReadUntilQuiet(quiet time.Duration, limit int) (data []byte, eof bool) // fails tb on an error other than EOF
+//	func (c *Conn) ExpectClosed(d time.Duration) ([]string, error)  // the peer closes within d (0 = hang guard); the lines it sent before, CRLF stripped (a partial last line included); EOF and ECONNRESET count as closed; error on timeout, more than 16 lines or 64 KiB, or another read error (lines returned too)
+//	func (c *Conn) MustClosed(d time.Duration) []string             // ExpectClosed; fails tb on an error
+//	func (c *Conn) SendChunks(raw []byte, n int, pause time.Duration) error // n bytes per write (n < 1 = 1), pause between writes: split CRLF or the terminator across writes
+//	func (c *Conn) SendDrip(raw []byte, pause time.Duration) error  // SendChunks with 1 byte
+//
+// Every wait of these helpers is the Conn's hang guard (testkit.Deadline() by default, so
+// NNTP_TEST_DEADLINE scales it) or the duration the caller passes; none sleeps a fixed time
+// except the caller's pause and DialUntil's 50 ms poll. Pipeline's guard slides: it is moved on
+// with every line read, so a stalled server fails after one deadline and a long batch does not;
+// a dot block also has the absolute bound above.
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF
@@ -67,6 +119,18 @@
 // compressed data is a read error wrapping flate.CorruptInputError (every later read returns
 // it). Close ends the goroutine. The client does not stop a test from sending COMPRESS,
 // STARTTLS or AUTHINFO after compression, so it can check the server's 502.
+//
+// STARTTLS (RFC 4642): TryStartTLS sends STARTTLS and expects 382. Any byte already buffered
+// after the 382 line fails the upgrade (a *StrictError of Kind Pending wrapped with the
+// explanation, c closed): a server or man in the middle that sends plaintext before the
+// handshake, so that a client would read it as part of the TLS session (CVE-2011-0411). The
+// handshake is bounded by the hang guard, cfg is cloned and gets ServerName = the host of the
+// remote address when it has none and does not skip verification; verification errors come
+// back as the crypto/tls ones (*tls.CertificateVerificationError wrapping x509.HostnameError,
+// x509.CertificateInvalidError with Reason x509.Expired, x509.UnknownAuthorityError). The new Conn
+// keeps Deadline, Strict, Greeting and tb; c must not be used afterwards, except after a
+// *StartTLSError, which leaves it plain. The server forgets the session state on the upgrade,
+// so send CAPABILITIES again.
 //
 // The kit never contacts any host a test did not name; the deadline only stops a hung test.
 package client

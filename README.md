@@ -30,12 +30,14 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 | package | what |
 |---|---|
 | `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening` |
-| `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054) |
-| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
+| `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054); STARTTLS (RFC 4642) |
+| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS and STARTTLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
+| `tlscert` | test CA and leaf certificates (expired, not yet valid, wrong name), as `tls.Certificate`, PEM or files with a 0600 key |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
 | `cmd/nntp-conformance` | command-line front end of `conformance`: prints the report, exit 1 on any Fail |
 | `yenc` | yEnc-encoded test posts: single and multi-part, broken ones, data profiles, a generated group |
+| `article` | news articles as raw bytes: unique Message-IDs, minimal valid articles, deliberately broken ones, header edit and lookup, parse, header diff of a sent and a served article, a corpus of tricky articles, control messages |
 | `canlock` | Cancel-Lock and Cancel-Key values (RFC 8315): compute them, check a key against a lock |
 | `mailrec`, `cmd/fakesendmail` | a stand-in sendmail that records each mail, for servers that mail moderators or report by mail |
 
@@ -66,6 +68,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `ExpectNoPending(d) error` | nothing may arrive within `d` |
 | `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
 | `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
+| `TryStartTLS(cfg) (*Conn, error)` / `StartTLS(cfg) *Conn` | send `STARTTLS` (RFC 4642), expect 382, fail when any byte is already buffered after the 382 (plaintext injection, CVE-2011-0411), handshake within the deadline; a new strict `Conn` over the `*tls.Conn` (no greeting read; `cfg` is cloned, `ServerName` defaults to the remote host). A reply other than 382 is a `*StartTLSError{Code, Line}` and `c` stays plain; the injection is a `*StrictError` of Kind `Pending`; verification errors are crypto/tls's (`x509.HostnameError`, `x509.CertificateInvalidError` with `Reason` `Expired`, `x509.UnknownAuthorityError`). `StartTLS` fails tb and registers the cleanup |
+| `TLSState() (tls.ConnectionState, bool)`, `IsTLS() bool` | peer certificates, version, server name of a TLS `Conn` |
 | `Close()` | idempotent, nil-safe |
 | `ExpectCmd(want, format, args...) string` | `Cmd`, and fail tb unless the code is `want`; returns the status line |
 | `ExpectStatus(want, what) string` | read the next status line (the 240 after a POSTed article, a pipelined reply); fail tb on error or unless the code is `want` |
@@ -74,6 +78,15 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `ParseCode`, `ExpectCode`, `ExpectLines`, `Unstuff` | text helpers |
 | `Stuff(lines) string` | the lines as a client sends them after POST, IHAVE or TAKETHIS: dot-stuffed, CRLF after each, `.\r\n` at the end |
 | `ParseCapabilities(lines) (map[string][]string, error)` | CAPABILITIES lines → label upper-cased (labels are case-insensitive, RFC 3977 §3.3.1) → arguments as sent (an empty slice for none); error on a blank line or a label listed twice, the map holds the rest |
+| `StuffBytes(article []byte) []byte` | an article in wire form (CRLF, not stuffed, no terminator) as a client sends it: line starts (after CRLF; a bare LF is not one) dot-stuffed, final CRLF added, `.\r\n` appended; every other byte (bare CR, NUL, 8-bit) untouched |
+| `TryPost(article) (code, line, err)`, `TryIhave(id, article)`, `TryCheck(id)`, `TryTakethis(id, article)`, `TryModeStream()`, `TryLogin(user, pass)` | the transfer and login exchanges in one call. POST/IHAVE send the article on 340/335 and return the final reply, else the first one; TAKETHIS sends command and article without waiting; LOGIN sends PASS on 381. A refusal (435, 440, 480, 481 ...) is a result: `err` is for I/O and protocol errors only. `id` includes the `<>` |
+| `Post`, `Ihave`, `Check`, `Takethis`, `ModeStream`, `Login` | the same, `(code, line)`; fail tb only on an I/O or protocol error, never on a refusal |
+| `TryPipeline(cmds, multi) ([]Reply, error)` / `Pipeline(...)`, `type Reply struct { Cmd string; Code int; Line string; Lines []string }`, `MultiLine(cmd, code) bool` | write all commands from a goroutine while reading the replies in order (no deadlock when the server stops reading); `multi(cmd, code)` says whether a dot block follows (nil: `MultiLine`; `Reply.Cmd` is the entry's first line); the deadline slides with every line, a dot block also ends within 10 deadlines and 64 MiB |
+| `TryDialFrom(addr, localIP, deadline)` / `DialFrom(tb, addr, localIP)` | dial from a chosen source address (127.0.0.2) and read the greeting; skip the test where the OS cannot bind it (macOS without an alias) |
+| `TryDialUntil(addr, prefix, d)` / `DialUntil(tb, addr, prefix, d)` | redial every 50 ms until the greeting starts with `prefix` (a server that greets 400 while it starts); refused dials count as not yet |
+| `TryReadUntilQuiet(quiet, limit) ([]byte, error)` / `ReadUntilQuiet(...) (data, eof)` | raw bytes until the server is silent for `quiet` or `limit` bytes; `io.EOF` when the server closed |
+| `ExpectClosed(d) ([]string, error)` / `MustClosed(d) []string` | the peer closes within `d`; the lines it sent before the close (QUIT 205, 400 then close); EOF and a reset count as closed |
+| `SendChunks(raw, n, pause) error`, `SendDrip(raw, pause)` | write `raw` n bytes (1) per write with a pause: split CRLF or the terminator across writes |
 | `type StrictError struct { Kind Kind; Line string; Bytes []byte; Err error }`, `type Kind int` | strict-mode error |
 
 `Cmd`, `ReadDotLines`, `RawUntilDot`, `ExpectCmd`, `ExpectStatus`, `MustSend` and `Capabilities` fail
@@ -124,9 +137,13 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
 | `(*Conn) StartCompress() error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
-| `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it |
+| `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it (package `tlscert` makes CA-issued ones) |
+| `StoreOptions.StartTLS`, `PeerOptions.StartTLS *StartTLSOptions{Config *tls.Config; Refuse string; HideCapability, AuthNeedsTLS bool; CloseAfterHandshake int}` | STARTTLS (RFC 4642), see below; nil: unknown command |
+| `(*Conn) StartTLS(cfg) error`, `TLS() bool`, `TLSState()` | for a Handler: TLS server side from now on (call it after writing the 382) |
+| `(*Server) TLSHandshakes()`, `TLSFailed()`, `TLSServerNames()` | completed and failed handshakes (implicit TLS and STARTTLS), SNI of every ClientHello |
 | `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
+| `(*Conn) Wait(ch <-chan struct{}) bool`, `Sleep(d) bool` | for a Handler or `PeerOptions.BeforeReply`: block until `ch` fires (true) or the Deadline passes / the server closes (false); `Sleep` is bounded the same way |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
 | `Article`, `ByMessageID`, `Group`, `Groups`, `Numbers`, `Overview`, `Next`, `Last` | lookups |
@@ -137,6 +154,23 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `type Article`, `Group`, `Location`; `(Article) Header`, `WithDefaults` | data model; `Article.Arrived` is the arrival time NEWNEWS uses (`AddArticle` sets a zero one to now) |
 | `StoreHandler(*Store, StoreOptions) func(*Conn)`; `type StoreOptions` | RFC 3977 reader over a Store; options below |
 | `DefaultGreeting`, `DefaultGreetingNoPost`, `DateLayout` | constants |
+
+`PeerOptions` knobs for peers that hold, slow, cut or answer oddly (all keep `Counts`, `Accepted`,
+`MaxOpen`, `Have` and `OnArticle`, are bounded by `Options.Deadline` and end on `Close`):
+
+| field | effect |
+|---|---|
+| `HoldGreeting <-chan struct{}` | the greeting waits until the channel is closed (or delivers a value, releasing one connection); the connection counts as open meanwhile, so a test can assert `MaxOpen <= K`. Needs `Options.NoGreeting: true` (the peer writes `Options.Greeting` itself); a hold past the Deadline or `Close` drops the connection |
+| `GreetingDelay time.Duration` | wait before the greeting (after `HoldGreeting`), capped at the Deadline; needs `NoGreeting` |
+| `BeforeReply func(c *Conn, cmd, line, status string)` | runs before every reply is written (IHAVE: before the 335 and before the final one) and may block, e.g. `c.Wait(release)`: hold a reply at a known point. A reply held when the server closes is not sent |
+| `CapabilitiesReply []string` | the whole answer to CAPABILITIES, e.g. `{"500 What?"}` |
+| `ModeStreamReply []string` | the answer to MODE STREAM, e.g. `{"203 StreamOK."}` (Diablo's feeder, with `CapabilitiesReply`) or `{"501 ..."}`; CHECK and TAKETHIS keep working (unlike `NoStream`) |
+| `DropAfterChecks int`, `DropReply string` | per connection, the CHECK after the first N gets `DropReply` (default `400 Service temporarily unavailable`) and the connection closes |
+| `SilentAfterModeStream bool` | answer MODE STREAM, then read and record lines but never answer, until the client closes, `Close` or the Deadline |
+
+`Options.Faults` apply to `PeerHandler` as to a `LineHandler` (Delay, Override, OverrideLine,
+CloseAfter, Drip, ...): `OverrideLine: {"MODE STREAM": {"203 StreamOK."}}` is the same as
+`ModeStreamReply`. For IHAVE they apply to the 335 only, as to POST's 340.
 
 Three modes, chosen per server:
 
@@ -251,7 +285,37 @@ handler starts compression when the status it wrote for COMPRESS, after the faul
 `Faults.Override` `"COMPRESS"` `{"403 Unable to activate compression"}` is a server that cannot,
 `{}` one that never answers. Corrupt compressed input closes the connection. Bytes a client
 pipelines after `COMPRESS DEFLATE` are inflated too (INN's nnrpd reads them as plain commands).
-There is no STARTTLS (TLS is `Options.TLS`), and crypto/tls has no TLS-level compression.
+crypto/tls has no TLS-level compression.
+
+**STARTTLS** (RFC 4642): the Store handler and `PeerHandler` offer it with `StartTLS`
+(`StartTLSOptions`; `Options.TLS` stays implicit TLS from the first byte). It is listed in
+CAPABILITIES while the connection is plain, not compressed and not authenticated; it answers 382
+and the handshake follows the CRLF of that line. Afterwards it is not listed and a second STARTTLS
+is 502, as on an implicit TLS connection, after COMPRESS (compress after TLS works) and after a
+successful AUTHINFO. The upgrade forgets the session (selected group and article), and plaintext
+the client pipelined behind STARTTLS closes the connection. Test knobs: `Refuse` (a reply such as
+`502 ...` or `580 ...` instead of 382: a refusing server or a stripping attacker; in Store mode
+`Faults.Override` `"STARTTLS"` does the same), `HideCapability`, `AuthNeedsTLS` (with `User`/`Pass` set: AUTHINFO before
+TLS is 483 as RFC 4643 describes, and the Store handler lists `AUTHINFO` without `USER`) and
+`CloseAfterHandshake` (the first N upgrades are closed right after the handshake). The Server
+counts handshakes and records the SNI of every ClientHello. Make the certificates with `tlscert`.
+
+### tlscert
+
+| API | what |
+|---|---|
+| `NewCA(tb) *CA`; `CA{Cert *x509.Certificate; Key crypto.Signer; CertPEM []byte; Pool *x509.CertPool}` | a test CA (ECDSA P-256) |
+| `(*CA) Issue(tb, Options) *Leaf` | a leaf signed by the CA |
+| `SelfSigned(tb, Options) *Leaf` | a self-signed leaf that is its own trust anchor |
+| `type Options struct { CommonName string; DNSNames []string; IPs []net.IP; NotBefore, NotAfter time.Time; Expired, NotYetValid bool; KeyType KeyType; ClientAuth bool }` | the zero value: localhost, 127.0.0.1 and ::1, valid from a day ago for two days, ECDSA. `Expired`/`NotYetValid` set a window in the past/future, `DNSNames`/`IPs` another name give a hostname mismatch; `KeyType` is `ECDSA`, `RSA` (2048) or `Ed25519` |
+| `type Leaf struct { Cert; Key; CertPEM, KeyPEM, CAPEM []byte; Pool *x509.CertPool }` | `KeyPEM` is PKCS#8; `CAPEM` the issuer |
+| `(*Leaf) TLSCertificate() tls.Certificate`, `ServerConfig() *tls.Config`, `ClientConfig(serverName) *tls.Config` | for Go servers and fakes (`fakeserver.StartTLSOptions.Config`, `Options.TLS`) and clients (`client.Conn.TryStartTLS`); `CA.ClientConfig` too |
+| `(*Leaf) Write(tb, dir) Files{Cert, Key, CA string}`, `WriteKeyMode(tb, dir, mode)` | `cert.pem`, `key.pem` (mode 0600, files replaced atomically) and `ca.pem` in `dir` (`""` = `tb.TempDir()`), for servers that read paths from their config (INN, diablo, NewsCache); a server running as another user needs `WriteKeyMode` 0640 + chgrp, or 0644 |
+| `(*CA) WriteCA(tb, dir) string` | `ca.pem` alone; its path |
+
+A leaf made to fail (`Expired`, `NotYetValid`, another name) still carries the issuer's trust, so
+the failure is the certificate's alone: `*tls.CertificateVerificationError` wrapping
+`x509.CertificateInvalidError` (`Reason` `x509.Expired` for both time windows) or `x509.HostnameError`.
 
 ### proc
 
@@ -344,6 +408,43 @@ into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (th
 dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
 cuts a post off mid-body instead.
 
+### article
+
+Articles as raw bytes, for suites that post and fetch. Nothing is normalised: an `Article` keeps the
+order of its header fields, the exact case of their names, duplicates, empty values, folds, lines
+without a colon, bare CR or LF, NUL and 8-bit bytes, so a test can send what a normal library would
+refuse to write. `Bytes()` is the wire form: CRLF line ends, **not** dot-stuffed, without the
+terminating `.`; `client.Stuff` (or the client's send) adds both.
+
+| API | what |
+|---|---|
+| `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.nonce.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a per-process nonce, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
+| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra` (more raw header lines) |
+| `type Article struct { Fields []Field; Sep string; Body []byte }`, `type Field struct { Raw, EOL string }` | the raw form: a field is its exact text (folds included) and its line end (`""` = CRLF, `"\n"`, `NoEOL`); `Sep` is what separates head and body (`NoEOL`: no empty line) |
+| `Add(name, value)`, `AddRaw(raw)`, `Insert(i, raw)`, `Set(name, value)`, `SetRaw(name, raw)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path (`SetRaw("Path", "Path:")` empties it in place), `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place keeping the old spelling of the name and drops duplicates |
+| `SetBody([]byte)`, `SetBodyLines(lines...)` | the body as bytes, or lines each plus CRLF (a leading `.` is not doubled) |
+| `Get(name)`, `Lookup(name)`, `Values(name)`, `Has`, `Count`, `Duplicates()`, `MessageID()` | read, case-insensitive; values are unfolded |
+| `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()`, `Canon()` | the wire form, and CRLF-split lines (what `client.Stuff` takes); `Canon()` is `Parse(Bytes())`: a bare LF inside a field is a line end on the wire, so it splits the field |
+| `Parse(raw) *Article` / `ParseDotBlock(raw)` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b`. `ParseDotBlock` takes the client's `RawUntilDot` bytes (drops the terminator and the stuffing dots, nothing else), the right way to read a served article back; `ParseLines` on `ReadDotLines` output loses bare LF and CR-before-CRLF |
+| `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, plus `Allow`; `Strict` drops the defaults), and the body byte for byte (`IgnoreTrailingSpace` to relax); both sides are canonicalised, folds count as one space, `CaseSensitiveNames` checks the spelling; a server that normalises bare CR/LF cannot be compared byte for byte. `PathExtends(sent, got)`: the sent Path is the tail of the served one |
+| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `max-line`, `long-message-id`, `folded-subject`, `folded-path`, `lf-only`, `no-colon`, `dup-header`, `empty-path`, `empty-subject`, ... (`Case.Invalid` marks the RFC-breaking ones) |
+| `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature; `Cancel`'s Newsgroups is `Options.Newsgroups`, "test" when empty |
+
+```go
+for _, c := range article.Corpus() {
+	t.Run(c.Name, func(t *testing.T) {
+		sent := c.Article(t, "test")
+		cl.ExpectCmd(340, "POST")
+		cl.MustSend(client.Stuff(sent.Lines())) // stuffing and the final "." are the client's
+		cl.ExpectStatus(240, "post")
+		// ... later fetch it back with ARTICLE: the raw block keeps bare CR and LF
+		cl.ExpectCmd(220, "ARTICLE %s", sent.MessageID())
+		got := article.ParseDotBlock(cl.RawUntilDot())
+		article.ExpectSame(t, sent, got, article.DiffOptions{Allow: []string{"Content-Length"}})
+	})
+}
+```
+
 ### canlock
 
 Cancel-Lock and Cancel-Key header values (RFC 8315 section 4), for testing servers that check
@@ -360,7 +461,7 @@ match INN's `tests/lib/canlock-t.c` vectors.
 
 ```go
 key := canlock.Key(canlock.SHA256, "secret", "", "<1@example.invalid>")
-art.Headers = append(art.Headers, "Cancel-Lock: "+canlock.Lock(canlock.SHA256, key))
+art.Add("Cancel-Lock", canlock.Lock(canlock.SHA256, key))
 // ... the cancel carries "Cancel-Key: "+key
 ```
 
