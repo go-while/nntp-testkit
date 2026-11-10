@@ -401,7 +401,9 @@ func TestReaderChecksCatchMistakes(t *testing.T) {
 
 // TestPostCatchesLostArticle: a server that answers 240 to POST but never files the article
 // fails post once the hang guard runs out. Not parallel: it replaces asNewID.
-func TestPostCatchesLostArticle(t *testing.T) {
+// TestPostLostArticleNoted: a 240 whose message-id STAT never finds passes, with a Detail
+// saying so: a server may assign its own message-id or queue the article for a moderator.
+func TestPostLostArticleNoted(t *testing.T) {
 	old := asNewID
 	asNewID = func(name string) string { return "<" + name + "@conformance.invalid>" }
 	t.Cleanup(func() { asNewID = old })
@@ -416,8 +418,8 @@ func TestPostCatchesLostArticle(t *testing.T) {
 		}
 	}
 	r := runReader(t, Options{Addr: srv.Addr(), PostGroup: "conf.test.b", Deadline: 300 * time.Millisecond}, post)[0]
-	if r.Status != Fail || !strings.Contains(r.Detail, "after the 240") {
-		t.Errorf("post: %s %q, want FAIL saying the article is missing after the 240", r.Status, r.Detail)
+	if r.Status != Pass || !strings.Contains(r.Detail, "may have assigned its own message-id") {
+		t.Errorf("post: %s %q, want PASS with a Detail that the message-id was not found", r.Status, r.Detail)
 	}
 	// the article did arrive: the store has it, only STAT was told to deny it
 	if n := len(srv.Articles()); n != 1 {
@@ -427,8 +429,8 @@ func TestPostCatchesLostArticle(t *testing.T) {
 
 // TestModeReaderAuthFirst: a server that answers MODE READER with 480 until the client logs in
 // (it lists AUTHINFO). Without Options.User mode-reader passes and says so; with it the check
-// logs in and MODE READER must then work; a 480 from a server that does not list AUTHINFO
-// fails.
+// logs in and MODE READER must then work; a 480 from a server that does not list AUTHINFO (yet)
+// passes with a Detail saying so.
 func TestModeReaderAuthFirst(t *testing.T) {
 	t.Parallel()
 	caps := func(extra ...string) []string {
@@ -471,7 +473,7 @@ func TestModeReaderAuthFirst(t *testing.T) {
 				{Expect: "CAPABILITIES", Reply: caps()},
 				{Expect: "MODE READER", Reply: []string{"480 Authentication required"}},
 			},
-			status: Fail, detail: "does not list AUTHINFO",
+			status: Pass, detail: "does not list AUTHINFO yet",
 		},
 	}
 	for _, tc := range cases {

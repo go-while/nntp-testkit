@@ -565,7 +565,9 @@ func checkCapabilities(s *session, c check) Result {
 // (not MODE-READER), or 502 on a server that lists neither. A 480 (RFC 3977 §3.2.1: the
 // command needs authentication first; RFC 4643 §2.2) is accepted from a server that lists
 // AUTHINFO: without Options.User the check passes with a Detail saying so; with it the check
-// logs in and sends MODE READER again, which must then answer 200, 201 or 502 as above.
+// logs in and sends MODE READER again, which must then answer 200, 201 or 502 as above. A 480
+// from a server that does not list AUTHINFO yet (it may offer it only later, e.g. after
+// STARTTLS), or that refuses AUTHINFO USER (it may offer only SASL), passes with a Detail.
 func checkModeReader(s *session, c check) Result {
 	reader, modeReader := s.has("READER"), s.has("MODE-READER")
 	code, line, err := s.single([]int{200, 201, 480, 502}, "MODE READER")
@@ -575,7 +577,9 @@ func checkModeReader(s *session, c check) Result {
 	detail := ""
 	if code == 480 {
 		if capArgs(s.caps, "AUTHINFO") == nil {
-			return c.failf("MODE READER: %q, but CAPABILITIES does not list AUTHINFO", line)
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER: %q, and CAPABILITIES does not list AUTHINFO yet (it may be offered later, e.g. after STARTTLS); not retried", line)
+			return r
 		}
 		if s.o.User == "" {
 			r := c.pass()
@@ -587,7 +591,9 @@ func checkModeReader(s *session, c check) Result {
 			return c.failf("login after %q to MODE READER: %v", line, err)
 		}
 		if !done {
-			return c.failf("MODE READER: %q, but AUTHINFO USER is not offered (500, 501 or 502)", line)
+			r := c.pass()
+			r.Detail = fmt.Sprintf("MODE READER: %q, and AUTHINFO USER is refused (500, 501 or 502; the server may offer only SASL); not retried", line)
+			return r
 		}
 		caps, err := s.capabilities()
 		if err != nil {
@@ -832,7 +838,11 @@ func checkNoCurrent(s *session, c check) Result {
 		cmds = append(cmds, "HDR Subject")
 	}
 	for _, cmd := range cmds {
-		if _, _, err := s.single([]int{420}, "%s", cmd); err != nil {
+		want := []int{420}
+		if cmd == "HDR Subject" {
+			want = []int{420, 503} // a server may restrict HDR to some headers (§8.5.2)
+		}
+		if _, _, err := s.single(want, "%s", cmd); err != nil {
 			return c.failf("in the empty group %s: %v", g.name, err)
 		}
 	}

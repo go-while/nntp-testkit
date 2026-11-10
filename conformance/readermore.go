@@ -71,7 +71,8 @@ func checkListgroupRange(s *session, c check) Result {
 		{strconv.FormatInt(t.num, 10), t.num, t.num, []int64{t.num}},
 		{fmt.Sprintf("%d-%d", t.num, t.num), t.num, t.num, []int64{t.num}},
 		{fmt.Sprintf("%d-%d", t.num+1, t.num), 1, 0, []int64{}},
-		{fmt.Sprintf("%d-", high), high, high, nil},
+		// open-ended: articles that arrived since GROUP may be listed too
+		{fmt.Sprintf("%d-", high), high, maxArticle, nil},
 	}
 	for _, tc := range cases {
 		cmd := fmt.Sprintf("LISTGROUP %s %s", t.g.name, tc.rng)
@@ -131,9 +132,21 @@ func checkListActiveTimes(s *session, c check) Result {
 	if r, ok := s.listKeyword(c, "ACTIVE.TIMES", ""); !ok {
 		return r
 	}
-	_, lines, err := s.multi(215, "LIST ACTIVE.TIMES")
+	code, line, err := s.expect([]int{215, 503}, "LIST ACTIVE.TIMES")
 	if err != nil {
 		return c.fail(err.Error())
+	}
+	if code == 503 {
+		// INN lists the keyword but answers 503 while its active.times file is missing (a
+		// fresh install); the keyword is optional (§7.6.4)
+		return c.skipf("LIST ACTIVE.TIMES: %q (the server has no data for it)", line)
+	}
+	lines, err := s.c.TryReadDotLines()
+	if err != nil {
+		return c.failf("LIST ACTIVE.TIMES: block: %s", describe(err))
+	}
+	if err := s.quiet(quietWindow); err != nil {
+		return c.failf("after LIST ACTIVE.TIMES: %s", describe(err))
 	}
 	for _, l := range lines {
 		f := strings.Fields(l)
@@ -305,7 +318,7 @@ func checkHdr(s *session, c check) Result {
 			if !f.oneLine && n != t.num {
 				return c.failf("%s: first line %q, want article %d", cmd, l, t.num)
 			}
-			if strings.TrimSpace(v) != want {
+			if strings.Join(strings.Fields(v), " ") != strings.Join(strings.Fields(want), " ") {
 				return c.failf("%s: line %q: value %q, want the Subject of article %d %q", cmd, l, v, t.num, want)
 			}
 		}
@@ -397,10 +410,14 @@ func checkNewnews(s *session, c check) Result {
 	return c.pass()
 }
 
-// checkPost: POST (§6.3.1) into Options.PostGroup: 340, the article (with a dot-stuffed body
-// line), 240; then the article is found by its message-id (STAT, asked again until the hang
-// guard runs out: filing may lag the 240) and ARTICLE gives the body line back un-stuffed. A
-// 441 is a Skip naming the reply (the server refused this article, e.g. by a filter).
+// checkPost: POST (§6.3.1) into Options.PostGroup (an unmoderated group): 340, the article
+// (with a dot-stuffed body line), 240; then the article is found by its message-id (STAT, asked
+// again until the hang guard runs out: filing may lag the 240) and ARTICLE gives the body line
+// back un-stuffed. A 440 (posting not allowed), a 480 (log in first) or a 441 (the server
+// refused this article, e.g. by a filter) is a Skip naming the reply. When the message-id is
+// never found the check still passes on the 240, with a Detail: a server may assign its own
+// message-id (§6.3.1 does not oblige it to keep the client's) or queue the article for a
+// moderator.
 func checkPost(s *session, c check) Result {
 	if s.o.PostGroup == "" {
 		return c.skip("no Options.PostGroup")
@@ -409,8 +426,12 @@ func checkPost(s *session, c check) Result {
 		return r
 	}
 	id := asNewID(c.Name)
-	if _, _, err := s.expect([]int{340}, "POST"); err != nil {
+	pcode, pline, err := s.expect([]int{340, 440, 480}, "POST")
+	if err != nil {
 		return c.fail(err.Error())
+	}
+	if pcode != 340 {
+		return c.skipf("POST: %q", pline)
 	}
 	if err := s.c.Send(asArticle(s.o.PostGroup, c.Name, id)); err != nil {
 		return c.failf("POST: article: %v", err)
@@ -437,7 +458,9 @@ func checkPost(s *session, c check) Result {
 			break
 		}
 		if time.Now().After(stop) {
-			return c.failf("STAT %s: still %q %v after the 240", id, sline, s.o.deadline())
+			r := c.pass()
+			r.Detail = fmt.Sprintf("240, but STAT %s still %q %v later: the server may have assigned its own message-id or queued the article for a moderator; the stored body was not checked", id, sline, s.o.deadline())
+			return r
 		}
 		time.Sleep(pollInterval)
 	}
