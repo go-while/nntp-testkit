@@ -54,7 +54,8 @@ func init() { storeHandler = StoreHandler }
 //
 // With StoreOptions.User or Pass set, every command but CAPABILITIES, MODE, HELP, AUTHINFO, DATE
 // and QUIT answers 480 until AUTHINFO succeeds. An unknown command gets 500, a known one with a
-// wrong argument count or syntax 501. Ranges are "n", "n-" and "n-m".
+// wrong argument count or syntax 501 (also an argument that is neither a number or range nor a
+// message-id, such as "12x" or "<ctrl><id>", even without a selected group). Ranges are "n", "n-" and "n-m".
 //
 // COMPRESS (RFC 8054) switches the connection to compression when the status line written
 // for it, after the Faults, is a 206 and compression is off; so Faults.Override "COMPRESS"
