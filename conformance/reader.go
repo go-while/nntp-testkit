@@ -76,6 +76,7 @@ func readerChecks() []check {
 		{Name: "help", RFC: "RFC 3977 §7.2", Run: checkHelp},
 		{Name: "unknown-command", RFC: "RFC 3977 §3.2.1", Run: checkUnknownCommand},
 		{Name: "bad-arguments", RFC: "RFC 3977 §3.2.1", Needs: "READER", Run: checkBadArguments},
+		{Name: "command-syntax", RFC: "RFC 3977 §3.1", Needs: "READER", Run: checkCommandSyntax},
 		{Name: "quit-eof", RFC: "RFC 3977 §5.4", Run: checkQuit},
 	}
 }

@@ -18,7 +18,11 @@ func (h *storeConn) hdr(cmd string, args []string) []string {
 	field := args[0]
 	var lines []string
 	group := h.group
+	var r numRange
 	if len(args) == 2 && strings.HasPrefix(args[1], "<") {
+		if !strings.HasSuffix(args[1], ">") {
+			return []string{"501 Syntax error in message-id"}
+		}
 		a, locs, ok := h.st.ByMessageID(args[1])
 		if !ok {
 			return []string{"430 No article with that message-id"}
@@ -30,6 +34,12 @@ func (h *storeConn) hdr(cmd string, args []string) []string {
 		group = locs[0].Group
 		lines = []string{h.hdrLine(num, field, a, group, missing)}
 	} else {
+		if len(args) == 2 { // parsed before the group is looked at, as in article
+			var ok bool
+			if r, ok = parseRange(args[1]); !ok {
+				return []string{"501 Syntax error in range"}
+			}
+		}
 		if h.group == "" {
 			return []string{"412 No newsgroup selected"}
 		}
@@ -41,10 +51,6 @@ func (h *storeConn) hdr(cmd string, args []string) []string {
 			}
 			arts = []Article{a}
 		} else {
-			r, ok := parseRange(args[1])
-			if !ok {
-				return []string{"501 Syntax error in range"}
-			}
 			if r.open {
 				g, _ := h.st.Group(h.group)
 				r.to, r.open = max(g.High, 0), false

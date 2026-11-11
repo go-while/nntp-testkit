@@ -216,6 +216,8 @@
 //	// Deadline and close the connection.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
 //
+// StoreHandler splits a command line on any Unicode white space (strings.Fields: also VT, FF and NBSP, not only SP and TAB; lenient, the RFC allows it) and ignores the keyword's case; an ARTICLE/HEAD/BODY/STAT/OVER/HDR argument that is neither a number (range) nor a message-id (<...>) is 501, also without a selected group.
+//
 // STARTTLS (RFC 4642): StoreHandler and PeerHandler offer it with StartTLS. It is listed in
 // CAPABILITIES while the connection is plain, not compressed and not authenticated by AUTHINFO;
 // the answer is 382 and the handshake follows its CRLF (a Handler calls Conn.StartTLS after

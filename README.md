@@ -390,7 +390,7 @@ overview extensions are still handled as before.
 
 | RFC | checks |
 |---|---|
-| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `listgroup-range` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-active-times` `list-newsgroups` `list-overview-fmt` `list-headers` `list-unknown-keyword` `over` `over-errors` `hdr` `newgroups` `newnews` `post` (with `PostGroup`) `date` `help` `unknown-command` `bad-arguments` `quit-eof` |
+| RFC 3977 | `greeting` `capabilities` `mode-reader` `group` `listgroup` `listgroup-range` `next-last` `article` `head` `body` `stat` `no-group` `no-current-article` `article-out-of-range` `article-unknown-id` `list-active` `list-active-times` `list-newsgroups` `list-overview-fmt` `list-headers` `list-unknown-keyword` `over` `over-errors` `hdr` `newgroups` `newnews` `post` (with `PostGroup`) `date` `help` `unknown-command` `bad-arguments` `command-syntax` `quit-eof` |
 | RFC 4643 (with `User`) | `authinfo-user-pass` `authinfo-wrong-pass` `authinfo-pass-without-user` `authinfo-480` `authinfo-after-auth` `authinfo-capabilities` |
 | RFC 4644 and RFC 3977 §6.3.2 (STREAMING / IHAVE; posting ones with `PostGroup`) | `mode-stream` `mode-stream-capability` `check-new` `check-pipelined` `takethis` `check-have` `takethis-duplicate` `ihave` `ihave-have` `ihave-malformed` |
 | RFC 4642, RFC 8143 (STARTTLS advertised; `tls-capabilities` with `Options.TLS`) | `starttls` `starttls-twice` `starttls-pipelined` `tls-capabilities` |

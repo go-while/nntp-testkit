@@ -42,8 +42,11 @@
 //     date forms, nothing for a future date); NEWNEWS (message-ids, nothing for a future
 //     date); POST into Options.PostGroup (340/240, then the article is found by its
 //     message-id with the dot-stuffed body line intact); DATE format; HELP; QUIT 205 then EOF
-//     with nothing pending; unknown command 500; bad arguments 501; CRLF-only line ends and
-//     nothing pending after any reply.
+//     with nothing pending; unknown command 500; bad arguments 501; command-syntax (§3.1: STAT,
+//     ARTICLE, GROUP and LIST ACTIVE with 2 or 5 spaces, TABs or SP TAB SP between the words and
+//     with lower-case or mixed-case keywords answer like the plain spelling; nothing else is
+//     sent: no leading or trailing white space, other separators, control bytes or long lines);
+//     CRLF-only line ends and nothing pending after any reply.
 //   - RFC 4643: AUTHINFO USER/PASS sequences (381/281/481/482, 480 before authentication on
 //     restricted commands, 502 after success) when Options.User is set.
 //   - RFC 4644: MODE STREAM (203), CHECK (238/431/438), TAKETHIS (239/439) and IHAVE

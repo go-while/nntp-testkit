@@ -208,8 +208,10 @@ func TestCheckArticleNoTerminator(t *testing.T) {
 	}})
 	r := mustCheck(t, Options{Addr: srv.Addr()})
 	fails := r.Failed()
-	if len(fails) != 1 || fails[0].Name != "article" || !strings.Contains(fails[0].Detail, "NoTerminator") {
-		t.Fatalf("failed %+v, want exactly article naming NoTerminator", fails)
+	// command-syntax sends ARTICLE once and meets the same cut reply
+	if len(fails) != 2 || fails[0].Name != "article" || fails[1].Name != "command-syntax" ||
+		!strings.Contains(fails[0].Detail, "NoTerminator") || !strings.Contains(fails[1].Detail, "NoTerminator") {
+		t.Fatalf("failed %+v, want article and command-syntax naming NoTerminator", fails)
 	}
 }
 

@@ -232,7 +232,7 @@ func TestReaderChecksSkipWithoutCapability(t *testing.T) {
 		skipped := map[string]bool{"group": true, "listgroup": true, "next-last": true, "article": true,
 			"head": true, "body": true, "stat": true, "no-current-article": true,
 			"article-out-of-range": true, "over": true, "over-errors": true,
-			"listgroup-range": true, "hdr": true, "newnews": true, "post": true}
+			"listgroup-range": true, "hdr": true, "newnews": true, "post": true, "command-syntax": true}
 		for _, r := range res {
 			want := Pass
 			if skipped[r.Name] {
@@ -259,6 +259,7 @@ func TestReaderChecksCatchMistakes(t *testing.T) {
 		fail     string // the check that must fail
 		detail   string // a substring of its Detail
 		skipRest bool   // every other check is skipped (no usable session)
+		also     string // a second check that sends the same broken command and fails with it
 	}{
 		{
 			// Handler mode: the greeting ends in a bare LF, then the store handler serves
@@ -292,7 +293,7 @@ func TestReaderChecksCatchMistakes(t *testing.T) {
 					DropInMultiline: map[string]int{"ARTICLE": 4},
 				}}
 			},
-			fail: "article", detail: "NoTerminator",
+			fail: "article", detail: "NoTerminator", also: "command-syntax", // sends ARTICLE once
 		},
 		{
 			// a NUL line after the 411 for the unknown group
@@ -376,6 +377,10 @@ func TestReaderChecksCatchMistakes(t *testing.T) {
 			res := runReader(t, Options{Addr: srv.Addr()}, readerChecks())
 			for _, r := range res {
 				switch {
+				case r.Name == tc.also:
+					if r.Status != Fail || !strings.Contains(r.Detail, tc.detail) {
+						t.Errorf("%s: %s %q, want FAIL naming %q", r.Name, r.Status, r.Detail, tc.detail)
+					}
 				case r.Name == tc.fail:
 					if r.Status != Fail || !strings.Contains(r.Detail, tc.detail) {
 						t.Errorf("%s: %s %q, want FAIL naming %q", r.Name, r.Status, r.Detail, tc.detail)
