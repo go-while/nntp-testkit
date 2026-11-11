@@ -21,7 +21,12 @@ import (
 // (compressReady): a server may list COMPRESS only after MODE READER or after AUTHINFO.
 // A check logs in with Options.User only when COMPRESS is not listed before it (or is answered
 // with 480): the capability list of an unauthenticated client is what RFC 8054 §2.2.2 makes
-// rules about, so the checks stay unauthenticated whenever the server lets them.
+// rules about, so the checks stay unauthenticated whenever the server lets them. A server that
+// then wants authentication for a reading command (INN's nnrpd answers 480 to LIST with a login
+// required, and AUTHINFO is 502 once compression is active, so the check cannot log in
+// afterwards) does not fail the check: that command is left out, named in the Detail of the
+// Pass, and when nothing at all could be checked the check is a Skip. Only a session that did
+// log in fails on a 480.
 //
 // The reply of the server to COMPRESS is judged strictly where the RFC says MUST: 206 for
 // DEFLATE, 503 for an algorithm the server does not know, 501 for a missing one, 502 for any
@@ -156,6 +161,39 @@ func (s *session) compressOn(c check) (Result, bool) {
 	return Result{}, true
 }
 
+// authGated reports whether code is the answer of a server that wants authentication (480, or
+// 483 when it wants encryption first) for a command, from a session that has not logged in.
+// RFC 3977 and RFC 4643 let a server gate any reading command: it is no mistake of the server,
+// and after COMPRESS the check cannot log in any more (AUTHINFO is 502 then, RFC 8054 2.2.2).
+// An authenticated session never has an excuse: its 480 is returned as the mistake it is.
+func (s *session) authGated(code int) bool {
+	return !s.authed && (code == 480 || code == 483)
+}
+
+// over sends cmd on the compressed session and expects the status code want (and for a
+// multi-line reply, a block), then silence. gated is true when the server answered that it
+// needs authentication (see authGated) and this client has none: the command is not checked.
+func (s *session) over(want int, block bool, cmd string) (gated bool, err error) {
+	code, line, err := s.cmd("%s", cmd)
+	if err != nil {
+		return false, fmt.Errorf("%s: %s", cmd, s.cerr(err))
+	}
+	switch {
+	case s.authGated(code):
+		gated = true
+	case code != want:
+		return false, fmt.Errorf("%s: got %q, want %d", cmd, line, want)
+	case block:
+		if _, err := s.block(); err != nil {
+			return false, fmt.Errorf("%s: block after %q: %s", cmd, line, s.cerr(err))
+		}
+	}
+	if err := s.quiet(quietWindow); err != nil {
+		return gated, fmt.Errorf("after %q to %s: %s", line, cmd, s.cerr(err))
+	}
+	return gated, nil
+}
+
 // stripped lists the capabilities RFC 8054 §2.2.2 (and RFC 4642 for MODE-READER, which both
 // RFCs treat alike) forbids once a compression layer is active.
 var stripped = []string{"COMPRESS", "STARTTLS", "MODE-READER"}
@@ -189,26 +227,43 @@ func checkCompress(s *session, c check) Result {
 		return c.failf("after CAPABILITIES over COMPRESS: %s", s.cerr(err))
 	}
 
-	// more replies: a single line, multi-line blocks
-	if _, _, err := s.single([]int{111}, "DATE"); err != nil {
-		return c.failf("over COMPRESS: %s", s.cerr(err))
+	// more replies: a single line, multi-line blocks. A server may want authentication for a
+	// command (INN's nnrpd for LIST, with a login required): that command is left out and named
+	// in the Detail, the rest is checked (see authGated).
+	var gated []string
+	checked := 0
+	type reply struct {
+		want  int
+		block bool
+		cmd   string
 	}
-	if _, _, err := s.multi(100, "HELP"); err != nil {
-		return c.failf("over COMPRESS: %s", s.cerr(err))
-	}
+	replies := []reply{{111, false, "DATE"}, {100, true, "HELP"}}
 	if overviewFmt {
-		if _, _, err := s.multi(215, "LIST OVERVIEW.FMT"); err != nil {
-			return c.failf("over COMPRESS: %s", s.cerr(err))
+		replies = append(replies, reply{215, true, "LIST OVERVIEW.FMT"})
+	}
+	for _, r := range replies {
+		g, err := s.over(r.want, r.block, r.cmd)
+		switch {
+		case err != nil:
+			return c.failf("over COMPRESS: %s", err)
+		case g:
+			gated = append(gated, r.cmd)
+		default:
+			checked++
 		}
 	}
 
 	// commands pipelined in one write (one compressed block with several commands), then the
-	// same in separate writes sent back to back (several compressed blocks in one segment)
-	if err := compressPipelined(s); err != nil {
-		return c.fail(err.Error())
-	}
-	if err := compressBackToBack(s); err != nil {
-		return c.fail(err.Error())
+	// same in separate writes sent back to back (several compressed blocks in one segment);
+	// both use DATE and HELP, so they are left out when one of them wants authentication
+	if !slices.Contains(gated, "DATE") && !slices.Contains(gated, "HELP") {
+		if err := compressPipelined(s); err != nil {
+			return c.fail(err.Error())
+		}
+		if err := compressBackToBack(s); err != nil {
+			return c.fail(err.Error())
+		}
+		checked += 2
 	}
 
 	// QUIT: 205, then the server closes (output it did not flush before closing is lost, so
@@ -221,12 +276,28 @@ func checkCompress(s *session, c check) Result {
 	case err == nil:
 		return c.failf("over COMPRESS: after 205 the byte %q came instead of the connection closing", b)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET), errors.Is(err, net.ErrClosed):
-		return c.pass()
 	case errors.Is(err, os.ErrDeadlineExceeded):
 		return c.failf("over COMPRESS: after 205 the server did not close the connection within the hang guard (%v)", s.o.deadline())
 	default:
 		return c.failf("over COMPRESS: after 205: %s", s.cerr(err))
 	}
+	if len(gated) == 0 {
+		return c.pass()
+	}
+	var skipped []string
+	for _, cmd := range gated {
+		skipped = append(skipped, cmd+" needs authentication on this server; not checked over COMPRESS")
+	}
+	if slices.Contains(gated, "DATE") || slices.Contains(gated, "HELP") {
+		skipped = append(skipped, "pipelined and back-to-back commands not checked (they use DATE and HELP)")
+	}
+	why := strings.Join(skipped, "; ")
+	if checked == 0 {
+		return c.skip("nothing could be checked over COMPRESS without authentication (AUTHINFO is 502 once compression is active): " + why)
+	}
+	r := c.pass()
+	r.Detail = why
+	return r
 }
 
 // compressPipelined sends DATE, HELP and DATE in one write, then a hundred DATEs in one
@@ -299,10 +370,15 @@ func checkCompressUnknown(s *session, c check) Result {
 	if _, _, err := s.single([]int{501}, "COMPRESS"); err != nil {
 		return c.failf("%v (RFC 8054 §2.2.2: 501 for a missing algorithm)", err)
 	}
-	if _, _, err := s.single([]int{111}, "DATE"); err != nil {
+	code, _, err := s.expect([]int{111}, "DATE")
+	if err != nil && !(s.authGated(code) && s.quiet(quietWindow) == nil) {
 		return c.failf("after the refused COMPRESS the connection is not plain and usable: %v", err)
 	}
-	return c.pass()
+	r := c.pass()
+	if err != nil {
+		r.Detail = "DATE needs authentication on this server; the connection after the refused COMPRESS was not checked with it"
+	}
+	return r
 }
 
 // checkCompressTwice: with compression active, a second COMPRESS DEFLATE is a 502, as are
@@ -399,7 +475,7 @@ func compressUpload(lineByLine bool) func(*session, check) Result {
 		if r, ok := s.compressOn(c); !ok {
 			return r
 		}
-		pcode, pline, err := s.expect([]int{340, 440, 480}, "POST")
+		pcode, pline, err := s.expect([]int{340, 440, 480, 483}, "POST")
 		if err != nil {
 			return c.failf("over COMPRESS: %s", s.cerr(err))
 		}

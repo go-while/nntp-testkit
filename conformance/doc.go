@@ -63,7 +63,8 @@
 //     SASL EXTERNAL without a client certificate is only noted). The certificate is verified
 //     only when Options.StartTLS asks for it; without it the handshake accepts TLS 1.0 and up.
 //   - RFC 8054 (COMPRESS DEFLATE advertised, also after MODE READER or AUTHINFO; the checks log
-//     in only when the capability needs it): compress (206 and both directions deflated,
+//     in only when the capability needs it; a command that answers 480 to the unauthenticated client
+//     over COMPRESS is left out and named in the Detail, see compress): compress (206 and both directions deflated,
 //     CAPABILITIES afterwards lists no COMPRESS, STARTTLS or MODE-READER and AUTHINFO without
 //     arguments, DATE, HELP and LIST OVERVIEW.FMT, commands pipelined in one write and in
 //     back-to-back writes, QUIT), compress-unknown (503 for an unknown algorithm, 501 for none,

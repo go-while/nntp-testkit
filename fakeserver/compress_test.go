@@ -180,6 +180,41 @@ func TestCompressReplies(t *testing.T) {
 	wantCode(t, c, "GROUP alt.test", 211)
 }
 
+// TestCompressBeforeAuth: INN's nnrpd with a login required: COMPRESS is listed and taken
+// before AUTHINFO, reading commands answer 480, and once compressed AUTHINFO is 502 and
+// CAPABILITIES lists it without arguments.
+func TestCompressBeforeAuth(t *testing.T) {
+	so := StoreOptions{Compress: true, CompressBeforeAuth: true, User: "u", Pass: "p"}
+	_, c := storeServer(t, testStore(), so, Faults{})
+	_, caps := wantBlock(t, c, "CAPABILITIES", 101)
+	if !hasCap(caps, "COMPRESS DEFLATE") || !hasCap(caps, "AUTHINFO USER") {
+		t.Errorf("CAPABILITIES before auth: %q, want COMPRESS DEFLATE and AUTHINFO USER", caps)
+	}
+	c.Compress()
+	_, caps = wantBlock(t, c, "CAPABILITIES", 101)
+	if hasCap(caps, "COMPRESS DEFLATE") || hasCap(caps, "AUTHINFO USER") || !hasCap(caps, "AUTHINFO") {
+		t.Errorf("CAPABILITIES compressed: %q, want AUTHINFO without arguments and no COMPRESS", caps)
+	}
+	wantCode(t, c, "DATE", 111)
+	wantBlock(t, c, "HELP", 100)
+	wantCode(t, c, "LIST OVERVIEW.FMT", 480)
+	wantCode(t, c, "GROUP alt.test", 480)
+	wantCode(t, c, "AUTHINFO USER u", 502)
+	wantCode(t, c, "COMPRESS DEFLATE", 502)
+	wantCode(t, c, "QUIT", 205)
+
+	// the other order still works: log in, then compress
+	_, c = storeServer(t, testStore(), so, Faults{})
+	wantCode(t, c, "AUTHINFO USER u", 381)
+	wantCode(t, c, "AUTHINFO PASS p", 281)
+	c.Compress()
+	wantCode(t, c, "GROUP alt.test", 211)
+
+	// without the option COMPRESS stays behind the login
+	_, c = storeServer(t, testStore(), StoreOptions{Compress: true, User: "u", Pass: "p"}, Faults{})
+	wantCode(t, c, "COMPRESS DEFLATE", 480)
+}
+
 // TestCompressFaults: the faults work on a compressed connection; each write is deflated
 // and flushed.
 func TestCompressFaults(t *testing.T) {

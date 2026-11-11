@@ -137,6 +137,15 @@ type StoreOptions struct {
 	// inflating it (Conn.StartCompressOutputOnly): a broken server, for client tests.
 	CompressOutputOnly bool
 
+	// CompressBeforeAuth makes a server with User or Pass set list "COMPRESS DEFLATE" before
+	// authentication and take COMPRESS then, as INN's nnrpd does (COMPRESS is not a reading
+	// command): the other commands but CAPABILITIES, MODE, HELP, AUTHINFO, DATE and QUIT still
+	// answer 480 until AUTHINFO succeeds, and a client that compressed before logging in cannot
+	// log in afterwards (AUTHINFO is 502 once compression is active, RFC 8054 2.2.2), so
+	// CAPABILITIES then lists AUTHINFO without arguments. Needs Compress or CompressOutputOnly;
+	// without User and Pass it changes nothing.
+	CompressBeforeAuth bool
+
 	// StartTLS offers STARTTLS (RFC 4642): "STARTTLS" in CAPABILITIES while the connection is
 	// plain, 382 and the upgrade, then 502 (see StartTLSOptions for the rules and test knobs).
 	// nil: STARTTLS is an unknown command (500).
