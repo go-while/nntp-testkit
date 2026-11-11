@@ -1,13 +1,67 @@
 # nntp-testkit
 
-Shared NNTP test tools in Go: a fake NNTP server (scripted, handler-driven or backed by a stateful
-store), a strict test client that reports wire-level mistakes, a runner for external server
-binaries, and yEnc-encoded test posts. Standard library only, Go 1.26 or later; CI tests the previous Go release and the
-latest on Linux and macOS (`proc` uses Unix signals, so Windows is not tested).
+Shared NNTP test tools in Go, for anyone who writes or runs an NNTP server, client, proxy or feeder:
 
-It is written for the test suites of go-pugleaf, nntp-server and nntp-proxy (Go tests import the
-packages), and for NewsCache's end-to-end tests (the C++ server runs under `proc`, the strict client
-and the fake upstream talk to it). The kit never contacts a host a test did not name.
+- `cmd/nntp-conformance`, a standalone black-box client that checks any server against RFC 3977, 4642,
+  4643, 4644 and 8054;
+- the packages the checks are built from, for writing your own tests: a strict client that reports
+  wire-level mistakes instead of hiding them, a fake server (scripted, handler-driven or backed by a
+  small article store, with faults), a fake transit peer to point a server's outgoing feed at, a runner
+  for external server binaries, test certificates, and builders for test articles (valid or
+  deliberately broken), yEnc posts, Cancel-Lock values and a stand-in sendmail.
+
+Standard library only, Go 1.26 or later; CI tests the previous Go release and the latest on Linux and
+macOS (`proc` uses Unix signals, so Windows is not tested). The kit never contacts a host a test did not
+name. MIT licensed.
+
+The e2e suites of INN, Diablo, NewsCache, go-pugleaf and OpenUsenetServer use it, and run
+`conformance` against their servers.
+
+## Test any server
+
+```bash
+go install github.com/go-while/nntp-testkit/cmd/nntp-conformance@latest
+nntp-conformance -addr news.example:119 [-group test.group] [-tls] [-user u -pass p]
+```
+
+Each check runs on its own connection. A capability the server does not advertise is a Skip, not a
+Fail, and nothing is posted unless `-group` names a group the checks may post into. The checks cover the
+reader commands (GROUP, LISTGROUP ranges, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, OVER, HDR, the LIST
+variants, NEWGROUPS, NEWNEWS, POST and the error codes), command syntax, AUTHINFO, streaming and IHAVE,
+STARTTLS (including commands pipelined behind it, CVE-2011-0411) and COMPRESS (including a large
+dot-stuffed upload). `-json` prints the report as JSON, `-allow check=substring` tolerates a known
+server bug; `nntp-conformance -h` lists the checks and flags, and [conformance](#conformance) has the
+details.
+
+## Write your own tests
+
+A test against your own server is a few lines:
+
+```go
+c := client.Dial(t, "127.0.0.1:1119")
+a := article.Minimal(t, "local.test")
+a.Set("Subject", "two  spaces,  kept?")
+c.ExpectPost(240, a.Bytes())
+c.ExpectCmd(220, "ARTICLE %s", a.MessageID())
+```
+
+and to check its outgoing feed, point the feed at a fake peer:
+
+```go
+peer := fakeserver.NewPeer(t, fakeserver.Options{}, &fakeserver.PeerOptions{})
+// feed to peer.Addr(), post an article, then look at
+// peer.Articles() (or ArticlesRaw() for the exact bytes)
+```
+
+`proc` starts your server binary for the test, stops it (with its whole process group) and dumps its
+logs when the test fails; the [Example](#example) section has a complete test.
+
+## What belongs in the kit
+
+NNTP and netnews behaviour that is not specific to one server: client steps, fake servers and peers,
+articles, protocol checks, and general test plumbing (processes, ports, logs). Configuration, storage
+formats and tools of one server stay in that project. A helper moves into the kit once a second project
+needs it, and the projects then drop their copies.
 
 ## Install
 
