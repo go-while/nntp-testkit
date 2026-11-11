@@ -372,3 +372,64 @@ func TestCompressTwiceUnknownAlgorithm(t *testing.T) {
 		}
 	}
 }
+
+// INN's nnrpd with a login required (readers.conf): COMPRESS DEFLATE and AUTHINFO USER are
+// listed before the login, COMPRESS works then, DATE, HELP, CAPABILITIES and QUIT are allowed
+// and everything else is 480. The unauthenticated check cannot log in after the 206 (AUTHINFO
+// is 502 then), so the commands that want authentication are left out and named in the Detail.
+func TestCompressAuthGated(t *testing.T) {
+	so := fakeserver.StoreOptions{Compress: true, CompressBeforeAuth: true, User: "u", Pass: "p"}
+	newOpts := func(t *testing.T, f fakeserver.Faults) (Options, *fakeserver.Server) {
+		srv := fakeserver.New(t, fakeserver.Options{Store: testStore(), StoreOpts: so, Faults: f})
+		return Options{Addr: srv.Addr(), User: "u", Pass: "p", PostGroup: "conf.test.b", Deadline: 2 * time.Second}, srv
+	}
+	const listGated = "LIST OVERVIEW.FMT needs authentication on this server; not checked over COMPRESS"
+
+	t.Run("LIST", func(t *testing.T) {
+		o, srv := newOpts(t, fakeserver.Faults{})
+		r := ctCheck(t, o, "compress")
+		ctWant(t, r, Pass, listGated)
+		if r.Detail != listGated {
+			t.Errorf("Detail %q, want exactly %q", r.Detail, listGated)
+		}
+		// the check stayed unauthenticated (RFC 8054 2.2.2 is about that client)
+		if n := srv.Count("AUTHINFO"); n != 0 {
+			t.Errorf("%d AUTHINFO sent, want none", n)
+		}
+		for _, n := range []string{"compress-unknown", "compress-twice", "compress-upload", "compress-upload-lines"} {
+			if r := ctCheck(t, o, n); r.Status != Pass {
+				t.Errorf("%s: %s %q", n, r.Status, r.Detail)
+			}
+		}
+	})
+	t.Run("DATE", func(t *testing.T) {
+		o, _ := newOpts(t, fakeserver.Faults{Override: map[string][]string{"DATE": {"480 Authentication required"}}})
+		r := ctCheck(t, o, "compress")
+		ctWant(t, r, Pass, "DATE needs authentication on this server; not checked over COMPRESS")
+		ctWant(t, r, Pass, "pipelined and back-to-back commands not checked")
+		r = ctCheck(t, o, "compress-unknown")
+		ctWant(t, r, Pass, "DATE needs authentication")
+	})
+	t.Run("nothing", func(t *testing.T) {
+		o, _ := newOpts(t, fakeserver.Faults{Override: map[string][]string{
+			"DATE": {"480 Authentication required"}, "HELP": {"480 Authentication required"}, "LIST": {"480 Authentication required"}}})
+		ctWant(t, ctCheck(t, o, "compress"), Skip, "nothing could be checked over COMPRESS without authentication")
+	})
+	t.Run("483", func(t *testing.T) {
+		o, _ := newOpts(t, fakeserver.Faults{Override: map[string][]string{"LIST": {"483 Encryption required"}}})
+		ctWant(t, ctCheck(t, o, "compress"), Pass, listGated)
+	})
+	t.Run("authenticated", func(t *testing.T) {
+		// COMPRESS is listed only after the login: the check logs in, so a 480 is a mistake
+		srv := fakeserver.New(t, fakeserver.Options{Store: testStore(),
+			StoreOpts: fakeserver.StoreOptions{Compress: true, User: "u", Pass: "p"},
+			Faults:    fakeserver.Faults{Override: map[string][]string{"LIST": {"480 Authentication required"}}}})
+		o := Options{Addr: srv.Addr(), User: "u", Pass: "p", Deadline: 2 * time.Second}
+		ctWant(t, ctCheck(t, o, "compress"), Fail, `LIST OVERVIEW.FMT: got "480 Authentication required", want 215`)
+	})
+	t.Run("other-code", func(t *testing.T) {
+		// only the authentication codes are excused
+		o, _ := newOpts(t, fakeserver.Faults{Override: map[string][]string{"LIST": {"502 no"}}})
+		ctWant(t, ctCheck(t, o, "compress"), Fail, `got "502 no", want 215`)
+	})
+}

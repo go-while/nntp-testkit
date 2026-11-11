@@ -31,7 +31,7 @@ func init() { storeHandler = StoreHandler }
 //
 // Commands and replies:
 //
-//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT (+ HEADERS, not NoHdr), NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done; plain AUTHINFO before TLS with StartTLS.AuthNeedsTLS), STARTTLS (StartTLS set, plain, not compressed, no AUTHINFO yet), COMPRESS DEFLATE (Compress or CompressOutputOnly, authenticated, compression off), IMPLEMENTATION fakeserver
+//	CAPABILITIES [kw]   101 VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT (+ HEADERS, not NoHdr), NEWNEWS (not NoNewnews), OVER MSGID (not NoOver), HDR (not NoHdr), POST (not ReaderOnly), AUTHINFO USER (auth required and not done; plain AUTHINFO before TLS with StartTLS.AuthNeedsTLS), STARTTLS (StartTLS set, plain, not compressed, no AUTHINFO yet), COMPRESS DEFLATE (Compress or CompressOutputOnly, compression off, and authenticated or CompressBeforeAuth; AUTHINFO without arguments once compressed), IMPLEMENTATION fakeserver
 //	MODE READER         200 (201 when ReaderOnly); other MODE 501
 //	HELP                100 command list (without the commands NoOver, NoXover and NoNewnews make unknown)
 //	AUTHINFO USER u     381 (281/481 at once when Pass is empty); AUTHINFO PASS p: 281 when User and Pass match, else 481 (482 without USER); 502 when no auth is configured or already done; other variants 501
@@ -48,7 +48,7 @@ func init() { storeHandler = StoreHandler }
 //	NEWNEWS wm d t [GMT] 230 message-ids of the articles in groups matching wm whose Arrived is at or after d t (date and time as NEWGROUPS); 501; 503 when a matching generated group spans more numbers than its limit
 //	DATE                111 yyyymmddhhmmss (UTC)
 //	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
-//	COMPRESS alg        only with Compress or CompressOutputOnly (else 500): 206, then both directions compressed (RFC 8054); 501 for a missing or invalid algorithm name; 502 when active; 503 for an algorithm other than DEFLATE
+//	COMPRESS alg        only with Compress or CompressOutputOnly (else 500; 480 before required auth unless CompressBeforeAuth): 206, then both directions compressed (RFC 8054); 501 for a missing or invalid algorithm name; 502 when active; 503 for an algorithm other than DEFLATE
 //	STARTTLS            only with StartTLS (else 500): 382 then the TLS handshake (RFC 4642); 502 when TLS or COMPRESS is active or AUTHINFO succeeded; 501 with arguments; StartTLSOptions.Refuse replaces the 382
 //	QUIT                205, then the connection is closed
 //
@@ -187,7 +187,7 @@ func (h *storeConn) dispatch(cmd string, args []string) ([]string, action) {
 	if !known || h.disabled(cmd) {
 		return []string{"500 Unknown command"}, actReply
 	}
-	if !h.authed && !authFree[cmd] {
+	if !h.authed && !authFree[cmd] && !(cmd == "COMPRESS" && h.o.CompressBeforeAuth) {
 		if h.o.StartTLS.needsTLS(h.c, true) {
 			return []string{"483 Encryption required"}, actReply
 		}
@@ -278,8 +278,8 @@ func (h *storeConn) capabilities() []string {
 		out = append(out, "POST")
 	}
 	if !h.authed {
-		if h.o.StartTLS.needsTLS(h.c, true) {
-			out = append(out, "AUTHINFO") // RFC 4643 2.2: no USER before TLS
+		if h.o.StartTLS.needsTLS(h.c, true) || h.c.Compressed() {
+			out = append(out, "AUTHINFO") // RFC 4643 2.2: no USER before TLS; RFC 8054 2.2.2: none once compressed
 		} else {
 			out = append(out, "AUTHINFO USER")
 		}
@@ -287,7 +287,7 @@ func (h *storeConn) capabilities() []string {
 	if h.o.StartTLS.advertised(h.c, h.loggedIn) {
 		out = append(out, "STARTTLS")
 	}
-	if h.authed && !h.disabled("COMPRESS") && !h.c.Compressed() {
+	if (h.authed || h.o.CompressBeforeAuth) && !h.disabled("COMPRESS") && !h.c.Compressed() {
 		out = append(out, "COMPRESS DEFLATE")
 	}
 	return append(out, "IMPLEMENTATION fakeserver", ".")
@@ -305,7 +305,7 @@ func (h *storeConn) help() []string {
 }
 
 func (h *storeConn) authinfo(args []string) []string {
-	if h.authed {
+	if h.authed || h.c.Compressed() { // RFC 8054 2.2.2: 502 once compression is active
 		return []string{"502 Command unavailable"}
 	}
 	val := strings.Join(args[1:], " ")

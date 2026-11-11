@@ -166,12 +166,13 @@
 //		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
 //		Compress           bool // offer COMPRESS DEFLATE (RFC 8054), see below
 //		CompressOutputOnly bool // offer it broken: after the 206 only the output is compressed, the client's input is read uncompressed
+//		CompressBeforeAuth bool // with User/Pass: list and take COMPRESS before AUTHINFO (INN's nnrpd); other commands still 480, AUTHINFO 502 once compressed
 //		StartTLS           *StartTLSOptions // offer STARTTLS, see below
 //	}
 //	func StoreHandler(st *Store, o StoreOptions) func(*Conn)
 //	// Serves CAPABILITIES (VERSION 2, READER, LIST ACTIVE ACTIVE.TIMES NEWSGROUPS OVERVIEW.FMT HEADERS, NEWNEWS, OVER MSGID, POST
 //	// unless ReaderOnly, AUTHINFO USER while auth is required, COMPRESS DEFLATE with Compress
-//	// once authenticated and while compression is off, IMPLEMENTATION fakeserver), MODE
+//	// once authenticated (before with CompressBeforeAuth) and while compression is off, AUTHINFO without arguments once compressed, IMPLEMENTATION fakeserver), MODE
 //	// READER (200/201), HELP, LIST [ACTIVE [wildmat]|ACTIVE.TIMES [wildmat]|NEWSGROUPS [wildmat]|OVERVIEW.FMT|HEADERS], GROUP,
 //	// LISTGROUP, ARTICLE/HEAD/BODY/STAT (by number, message-id or current; 412/420/423/430),
 //	// XOVER/OVER (range "n", "n-", "n-m" or message-id; 423 for an empty range), NEXT/LAST
@@ -182,7 +183,7 @@
 //	// ReaderOnly; 340 then 240/441: Newsgroups, Subject and From required, Message-ID must be
 //	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
 //	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone
-//	// answers 281/481 when Pass is empty; 502 when not configured or done), COMPRESS alg (with
+//	// answers 281/481 when Pass is empty; 502 when not configured, done or compression is active), COMPRESS alg (with
 //	// Compress or CompressOutputOnly, else 500; 480 before required auth; 501 missing or
 //	// invalid algorithm name, case-sensitive; 502 when active; 503 not DEFLATE; 206 and
 //	// compression from the CRLF of the 206 on), QUIT (205).

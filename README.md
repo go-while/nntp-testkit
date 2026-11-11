@@ -267,6 +267,7 @@ at its Date.
 | `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
 | `HdrLines func(conn int, group, field string, lines []string) []string` | change the `number value` lines of a HDR/XHDR reply before they are sent (XHDR by `<id>` gives the id instead of the number, an absent header `(none)`; HDR gives 0 and an empty value): header data out of step with the articles |
 | `Compress bool` | offer COMPRESS DEFLATE (RFC 8054): listed in CAPABILITIES while off (after authentication when required); COMPRESS answers 206 and compresses both directions; 501 missing or invalid algorithm name (case-sensitive), 502 once active (any valid algorithm), 503 another algorithm, 480 before required auth; AUTHINFO after it 502 |
+| `CompressBeforeAuth bool` | with `User`/`Pass`: list and take COMPRESS before AUTHINFO as INN's nnrpd does; other reading commands still 480, AUTHINFO 502 once compressed (CAPABILITIES then lists AUTHINFO without arguments) |
 | `CompressOutputOnly bool` | offer COMPRESS, but after the 206 compress only the server's output and read the client's commands uncompressed: a half implementation, for client tests |
 
 **Generated groups.** `st.AddGenerated(group, desc, fakeserver.Generator{Low: 1, High: 10_000_000})`
