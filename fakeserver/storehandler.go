@@ -497,16 +497,19 @@ func (h *storeConn) article(cmd string, args []string) []string {
 			}
 		}
 	default:
-		if h.group == "" {
-			return []string{"412 No newsgroup selected"}
-		}
+		// the argument is parsed before the group is looked at: "12x" or "<ctrl><id>" is
+		// neither a number nor a message-id, so 501 even without a selected group
 		n := h.cur
 		if len(args) == 1 {
 			var ok bool
 			if n, ok = parseNum(args[0]); !ok {
 				return []string{"501 Syntax error in article number"}
 			}
-		} else if n == 0 {
+		}
+		if h.group == "" {
+			return []string{"412 No newsgroup selected"}
+		}
+		if len(args) == 0 && n == 0 {
 			return []string{"420 Current article number is invalid"}
 		}
 		var ok bool
@@ -570,11 +573,21 @@ func (h *storeConn) nextLast(cmd string) []string {
 func (h *storeConn) over(args []string) []string {
 	const head = "224 Overview information follows"
 	if len(args) == 1 && strings.HasPrefix(args[0], "<") {
+		if !strings.HasSuffix(args[0], ">") {
+			return []string{"501 Syntax error in message-id"}
+		}
 		a, locs, ok := h.st.ByMessageID(args[0])
 		if !ok {
 			return []string{"430 No article with that message-id"}
 		}
 		return []string{head, h.overviewLine(a, 0, locs[0].Group), "."}
+	}
+	var r numRange
+	if len(args) == 1 { // parsed before the group is looked at, as in article
+		var ok bool
+		if r, ok = parseRange(args[0]); !ok {
+			return []string{"501 Syntax error in range"}
+		}
 	}
 	if h.group == "" {
 		return []string{"412 No newsgroup selected"}
@@ -587,10 +600,6 @@ func (h *storeConn) over(args []string) []string {
 		}
 		arts = []Article{a}
 	} else {
-		r, ok := parseRange(args[0])
-		if !ok {
-			return []string{"501 Syntax error in range"}
-		}
 		if r.open {
 			g, _ := h.st.Group(h.group)
 			r.to, r.open = max(g.High, 0), false

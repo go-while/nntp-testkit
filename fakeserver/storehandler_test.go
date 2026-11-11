@@ -777,3 +777,34 @@ func TestFaultLongLine(t *testing.T) {
 		t.Errorf("first lines: %d bytes, then %q", len(lines[0]), lines[1:2])
 	}
 }
+
+// TestStoreBadMessageIDOrNumber: an argument that is neither a number (range) nor a message-id
+// is 501 with and without a selected group, not 412/423/430 as if it had been parsed.
+func TestStoreBadMessageIDOrNumber(t *testing.T) {
+	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{})
+	bad := []string{"\x01<a1@x>", "<a1@x>\x01", "<a1@x", "12x", "x12", "-1", "\x01"}
+	check := func() {
+		for _, cmd := range []string{"ARTICLE", "HEAD", "BODY", "STAT"} {
+			for _, arg := range bad {
+				wantCode(t, c, cmd+" "+arg, 501)
+			}
+		}
+		for _, arg := range bad {
+			wantCode(t, c, "OVER "+arg, 501)
+			wantCode(t, c, "XOVER "+arg, 501)
+			wantCode(t, c, "HDR Subject "+arg, 501)
+			wantCode(t, c, "XHDR Subject "+arg, 501)
+		}
+	}
+	check()
+	// valid forms keep their codes without a group
+	wantCode(t, c, "STAT 1", 412)
+	wantCode(t, c, "STAT", 412)
+	wantCode(t, c, "OVER 1-2", 412)
+	wantCode(t, c, "STAT <nope@x>", 430)
+	wantCode(t, c, "STAT <a1@x>", 223)
+	wantCode(t, c, "GROUP alt.test", 211)
+	check()
+	wantCode(t, c, "STAT 2", 223)
+	wantCode(t, c, "STAT 99", 423)
+}
