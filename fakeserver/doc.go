@@ -47,7 +47,9 @@
 //	func (s *Server) Accepted() int                  // connections accepted so far
 //	func (s *Server) Open() int                      // connections not yet gone
 //	func (s *Server) MaxOpen() int                   // the most connections open at once (rejected ones do not count)
+//	func (s *Server) Closed() int                    // connections that ended on the server side (client closed or aborted, or the server dropped it); those that counted in Open and are gone from it, rejected (MaxConns) ones not
 //	func (s *Server) WaitOpen(tb testing.TB, n int, d time.Duration) // polls until Open()==n; fails tb after d
+//	func (s *Server) WaitClosed(tb testing.TB, n int, d time.Duration) // polls until Closed()>=n; fails tb after d (raised to the Deadline); unlike Open()==0 it cannot pass before the connection was accepted
 //	func (s *Server) WaitLines(tb testing.TB, want []string)         // polls until Lines()==want (within Deadline); fails tb
 //	func (s *Server) Count(cmd string) int           // commands seen: upper-cased first word of every client line
 //	func (s *Server) Counts() map[string]int
@@ -110,10 +112,11 @@
 //	func (c *Conn) Sleep(d time.Duration) bool   // false: server closed; d capped at Deadline
 //	func LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn) // f answers each client line, in any order; Faults apply as in Script mode
 //	func PeerHandler(o *PeerOptions) func(*Conn)      // transit peer: CAPABILITIES (VERSION 2, IHAVE, READER, STREAMING, COMPRESS DEFLATE), MODE STREAM/READER, AUTHINFO, CHECK, TAKETHIS, IHAVE, COMPRESS, QUIT; else 500
-//	// Faults apply to PeerHandler as to a LineHandler (also CloseAfter); for IHAVE they apply
-//	// to the 335 only (as to POST's 340): an overridden first reply that is not a 335 is
-//	// final and no article is read; the final 235/437 is written as it is (BeforeReply can
-//	// hold it). BeforeReply runs before the Faults. HoldGreeting/GreetingDelay: the handler
+//	// Faults apply to PeerHandler as to a LineHandler (also CloseAfter); IHAVE has two replies,
+//	// as POST: the first (335) takes every fault, an overridden first reply that is not a 335
+//	// is final and no article is read; the final 235/437 takes only OverrideFinal, DelayFinal,
+//	// Split, DropAfterBytes, Trailing and Abort (BeforeReply can hold it too). TAKETHIS has one
+//	// reply, which takes all faults. BeforeReply runs before the Faults. HoldGreeting/GreetingDelay: the handler
 //	// writes Options.Greeting itself, so Options.NoGreeting must be set: NewPeer/StartPeer
 //	// do that, with a manual Handler: PeerHandler(po) the test fails on the first connection.
 //	// IHAVE <id>: 480 before auth; 435 for an id not "<...>" (innd; not 501); 435 held; 436
@@ -197,7 +200,7 @@
 //	// its login, so AUTHINFO is taken again (a login that timed out). Unknown
 //	// command 500, bad arguments 501. Served headers: the stored Headers plus Message-ID,
 //	// Newsgroups (every group the article is filed in) and Date when missing. Faults apply to
-//	// every reply (for POST: to the 340).
+//	// every reply (for POST: every fault to the 340, the final-reply faults to the 240/441, see Faults).
 //
 //	type Faults struct {
 //		Delay           map[string]time.Duration // command → sleep before its reply
@@ -245,6 +248,28 @@
 //	// takes all faults, OverrideFinal over Override (and also on its 480 and 500 answers). DropInUpload counts the lines of the dot block
 //	// read after the command (0 = none), the terminator not included; the cut block is not recorded.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
+//
+// Reply corpus (replycorpus.go): named wrong and malformed server replies for the test suite of
+// an NNTP client. A case says which command it breaks, the lines to write instead and what is
+// wrong; Apply puts it into the Options of a fake server (a command case needs a mode that
+// applies Faults, e.g. a Store):
+//
+//	func ReplyCorpus() []ReplyCase                          // 112 cases
+//	func ReplyCaseByName(name string) (ReplyCase, bool)
+//	type ReplyCase struct {
+//		Name         string   // unique, fit for t.Run, e.g. "group-211-nofields"
+//		Family       Family   // FamilyCode, FamilyStatus, FamilyGreeting, FamilyBlock
+//		Cmd          string   // the Faults key (upper-cased command) whose reply is replaced; "" for a greeting case
+//		Line         string   // a sample client line ("GROUP g"); "" for a greeting case
+//		Lines        []string // written instead of the normal reply, each + CRLF (a block carries its own "." line); may hold NUL, 8-bit, a bare LF; for a greeting case the greeting
+//		Why          string   // what is wrong, with the RFC where there is one
+//		Want         Outcome  // WantError (fail cleanly), WantEither (strict fails, lenient may accept; no panic, hang or desync), WantAccept (odd but legal: must be accepted)
+//		NeedsTimeout bool     // the client waits for more data than the reply holds: the test needs a read timeout
+//	}
+//	func (rc ReplyCase) Apply(o *Options)                   // Faults.Override[Cmd]; Options.Greeting for a greeting case; adds to the maps already in o
+//	func (rc ReplyCase) ApplyLine(o *Options)               // Apply for Line only (Faults.OverrideLine[Line])
+//	func (rc ReplyCase) Bytes() []byte                      // exactly what the server writes: every line + CRLF
+//	func (rc ReplyCase) IsGreeting() bool
 //
 // StoreHandler splits a command line on any Unicode white space (strings.Fields: also VT, FF and NBSP, not only SP and TAB; lenient, the RFC allows it) and ignores the keyword's case; an ARTICLE/HEAD/BODY/STAT/OVER/HDR argument that is neither a number (range) nor a message-id (<...>) is 501, also without a selected group.
 //
