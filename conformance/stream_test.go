@@ -1,9 +1,12 @@
 package conformance
 
 import (
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-while/nntp-testkit/client"
 	"github.com/go-while/nntp-testkit/fakeserver"
@@ -300,5 +303,248 @@ func TestIhaveMalformed335(t *testing.T) {
 	r := asRunCheck(t, Options{Addr: s.Addr()}, asFind(t, streamChecks(), "ihave-malformed"))
 	if r.Status != Fail || !strings.Contains(r.Detail, `the empty article got "437 empty"`) {
 		t.Fatalf("got %v %q, want FAIL with the aborted transfer", r.Status, r.Detail)
+	}
+}
+
+func init() {
+	// short back-off in the tests; the production values are 100ms doubling up to 1s
+	asRetryStart, asRetryMax = 5*time.Millisecond, 20*time.Millisecond
+}
+
+// commitFake is a peer that takes an article (TAKETHIS or IHAVE) and then answers the
+// re-offer of its id as a server that commits asynchronously does: Defers answers of the
+// deferral code (431 to CHECK, 436 to IHAVE), then Final (438 / 238 to CHECK, 435 / 335 to
+// IHAVE). Offers counts the CHECK or IHAVE commands for the id taken before.
+type commitFake struct {
+	Defers int
+	Final  int
+	offers atomic.Int32
+}
+
+func (f *commitFake) handler(c *fakeserver.Conn) {
+	taken := map[string]bool{}
+	article := func() { // the lines of an article up to the terminator
+		for {
+			l, err := c.ReadLine()
+			if err != nil || l == "." {
+				return
+			}
+		}
+	}
+	for {
+		line, err := c.ReadLine()
+		if err != nil {
+			return
+		}
+		fs := strings.Fields(line)
+		if len(fs) == 0 {
+			continue
+		}
+		var reply []string
+		switch strings.ToUpper(fs[0]) {
+		case "CAPABILITIES":
+			reply = []string{"101 caps", "VERSION 2", "STREAMING", "IHAVE", "."}
+		case "MODE":
+			reply = []string{"203 streaming"}
+		case "TAKETHIS":
+			article()
+			taken[fs[1]] = true
+			reply = []string{"239 " + fs[1]}
+		case "CHECK":
+			switch n := int(f.offers.Add(1)); {
+			case !taken[fs[1]]:
+				reply = []string{"238 " + fs[1]}
+			case n <= f.Defers:
+				reply = []string{"431 " + fs[1]}
+			default:
+				reply = []string{fmt.Sprintf("%d %s", f.Final, fs[1])}
+			}
+		case "IHAVE":
+			switch seen := taken[fs[1]]; {
+			case !seen:
+				if err := c.WriteLines("335 send it"); err != nil {
+					return
+				}
+				article()
+				taken[fs[1]] = true
+				reply = []string{"235 ok"}
+			case int(f.offers.Add(1)) <= f.Defers:
+				reply = []string{"436 try later"}
+			case f.Final == 335:
+				if err := c.WriteLines("335 send it again"); err != nil {
+					return
+				}
+				article()
+				reply = []string{"437 no thanks"}
+			default:
+				reply = []string{"435 have it"}
+			}
+		default:
+			reply = []string{"500 what"}
+		}
+		if err := c.WriteLines(reply...); err != nil {
+			return
+		}
+	}
+}
+
+func commitCheck(t *testing.T, f *commitFake, name string, wait time.Duration) (Result, time.Duration) {
+	t.Helper()
+	s := fakeserver.New(t, fakeserver.Options{Handler: f.handler})
+	start := time.Now()
+	r := asRunCheck(t, Options{Addr: s.Addr(), PostGroup: "alt.test", CommitWait: wait}, asFind(t, streamChecks(), name))
+	took := time.Since(start)
+	t.Logf("%s %s (%v)", r.Status, r.Detail, took)
+	return r, took
+}
+
+// TestCheckHaveRetry: a 431 to the re-offer while the article is committed is retried; the
+// Pass names the retries.
+func TestCheckHaveRetry(t *testing.T) {
+	f := &commitFake{Defers: 2, Final: 438}
+	r, _ := commitCheck(t, f, "check-have", 5*time.Second)
+	if r.Status != Pass || !strings.Contains(r.Detail, "re-offered 2 times") {
+		t.Errorf("got %v %q, want PASS naming 2 re-offers", r.Status, r.Detail)
+	}
+	if n := f.offers.Load(); n != 3 {
+		t.Errorf("%d CHECKs for the taken id, want 3", n)
+	}
+	// no deferral: Pass without a note
+	if r, _ := commitCheck(t, &commitFake{Final: 438}, "check-have", 0); r.Status != Pass || r.Detail != "" {
+		t.Errorf("no deferral: %v %q, want a plain PASS", r.Status, r.Detail)
+	}
+}
+
+// TestCheckHaveDeferredForever: a server that always defers is a Skip when the window ends,
+// after more than one offer; CommitWait < 0 asks once.
+func TestCheckHaveDeferredForever(t *testing.T) {
+	f := &commitFake{Defers: 1 << 20, Final: 438}
+	r, took := commitCheck(t, f, "check-have", 200*time.Millisecond)
+	if r.Status != Skip || !strings.HasPrefix(r.Detail, "server deferred: 431 <") || !strings.Contains(r.Detail, "still deferred after") {
+		t.Errorf("got %v %q, want SKIP still deferred", r.Status, r.Detail)
+	}
+	if took < 200*time.Millisecond || took > 3*time.Second {
+		t.Errorf("took %v, want about the 200ms window", took)
+	}
+	if n := f.offers.Load(); n < 3 {
+		t.Errorf("%d offers within the window, want several", n)
+	}
+
+	f = &commitFake{Defers: 1 << 20, Final: 438}
+	r, _ = commitCheck(t, f, "check-have", -1)
+	if r.Status != Skip || strings.Contains(r.Detail, "still deferred") || !strings.HasPrefix(r.Detail, "server deferred: 431 <") {
+		t.Errorf("CommitWait -1: got %v %q, want the plain SKIP", r.Status, r.Detail)
+	}
+	if n := f.offers.Load(); n != 1 {
+		t.Errorf("CommitWait -1: %d offers, want 1", n)
+	}
+}
+
+// TestCheckHaveWants: a 238 for an article the server took (before or after deferrals) fails.
+func TestCheckHaveWants(t *testing.T) {
+	for _, defers := range []int{0, 2} {
+		r, _ := commitCheck(t, &commitFake{Defers: defers, Final: 238}, "check-have", 5*time.Second)
+		if r.Status != Fail || !strings.Contains(r.Detail, `got "238 <`) || !strings.Contains(r.Detail, "want 438") {
+			t.Errorf("%d deferrals: got %v %q, want FAIL 238", defers, r.Status, r.Detail)
+		}
+		if defers > 0 && !strings.Contains(r.Detail, "(after 2 re-offers)") {
+			t.Errorf("Detail %q lacks the re-offers", r.Detail)
+		}
+	}
+}
+
+// TestIhaveHaveRetry: as TestCheckHaveRetry for IHAVE and 436 / 435.
+func TestIhaveHaveRetry(t *testing.T) {
+	f := &commitFake{Defers: 2, Final: 435}
+	r, _ := commitCheck(t, f, "ihave-have", 5*time.Second)
+	if r.Status != Pass || !strings.Contains(r.Detail, "re-offered 2 times") {
+		t.Errorf("got %v %q, want PASS naming 2 re-offers", r.Status, r.Detail)
+	}
+	if n := f.offers.Load(); n != 3 {
+		t.Errorf("%d IHAVEs for the taken id, want 3", n)
+	}
+	if r, _ := commitCheck(t, &commitFake{Final: 435}, "ihave-have", 0); r.Status != Pass || r.Detail != "" {
+		t.Errorf("no deferral: %v %q, want a plain PASS", r.Status, r.Detail)
+	}
+}
+
+func TestIhaveHaveDeferredForever(t *testing.T) {
+	f := &commitFake{Defers: 1 << 20, Final: 435}
+	r, took := commitCheck(t, f, "ihave-have", 200*time.Millisecond)
+	if r.Status != Skip || !strings.HasPrefix(r.Detail, "server deferred: 436") || !strings.Contains(r.Detail, "still deferred after") {
+		t.Errorf("got %v %q, want SKIP still deferred", r.Status, r.Detail)
+	}
+	if took < 200*time.Millisecond || took > 3*time.Second {
+		t.Errorf("took %v, want about the 200ms window", took)
+	}
+	f = &commitFake{Defers: 1 << 20, Final: 435}
+	r, _ = commitCheck(t, f, "ihave-have", -1)
+	if r.Status != Skip || r.Detail != "server deferred: 436 try later" || f.offers.Load() != 1 {
+		t.Errorf("CommitWait -1: got %v %q after %d offers, want the plain SKIP after 1", r.Status, r.Detail, f.offers.Load())
+	}
+}
+
+// TestIhaveHaveWants335: a 335 to the re-offer (before or after deferrals) fails, the article
+// the server asks for is ended with an empty one and its reply read.
+func TestIhaveHaveWants335(t *testing.T) {
+	for _, defers := range []int{0, 2} {
+		r, _ := commitCheck(t, &commitFake{Defers: defers, Final: 335}, "ihave-have", 5*time.Second)
+		if r.Status != Fail || !strings.Contains(r.Detail, "want 435") || !strings.Contains(r.Detail, `the empty article got "437 no thanks"`) {
+			t.Errorf("%d deferrals: got %v %q, want FAIL 335 with the transfer aborted", defers, r.Status, r.Detail)
+		}
+		if defers > 0 && !strings.Contains(r.Detail, "after 2 re-offers") {
+			t.Errorf("Detail %q lacks the re-offers", r.Detail)
+		}
+	}
+}
+
+func TestCommitWaitDefault(t *testing.T) {
+	for in, want := range map[time.Duration]time.Duration{0: defaultCommitWait, -1: 0, time.Second: time.Second} {
+		if got := (Options{CommitWait: in}).commitWait(); got != want {
+			t.Errorf("CommitWait %v: window %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestAllowReplyIhave: the 335 of ihave-have is allowed by check, command and code, even
+// though the Fail went through the abort of the transfer.
+func TestAllowReplyIhave(t *testing.T) {
+	f := &commitFake{Defers: 1, Final: 335}
+	s := fakeserver.New(t, fakeserver.Options{Handler: f.handler})
+	c := asFind(t, streamChecks(), "ihave-have")
+	o := Options{Addr: s.Addr(), PostGroup: "alt.test", CommitWait: 5 * time.Second}
+	r := runOne(o, c)
+	if r.Status != Fail || r.Cmd != "IHAVE" || r.Code != 335 {
+		t.Fatalf("got %+v, want FAIL with Cmd IHAVE, Code 335", r)
+	}
+	o.AllowReply = []AllowReply{{"ihave-have", "IHAVE", 335}}
+	r = runOne(o, c)
+	if r.Status != Skip || !strings.HasPrefix(r.Detail, "allowed: IHAVE <") {
+		t.Errorf("allowed: got %+v, want SKIP allowed", r)
+	}
+}
+
+// TestAllowReplyWrongID: a legal negative reply that names another message-id fails without
+// a Cmd and Code, so no AllowReply can hide it; a really wrong code still has both.
+func TestAllowReplyWrongID(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "STREAMING", "."}},
+		{Expect: "MODE STREAM", Reply: []string{"203 streaming"}},
+		{Expect: "CHECK .*", Reply: []string{"431 <other@x>"}},
+	}})
+	c := asFind(t, streamChecks(), "check-new")
+	r := runOne(Options{Addr: s.Addr(), AllowReply: []AllowReply{{"check-new", "CHECK", 431}}}, c)
+	if r.Status != Fail || r.Cmd != "" || r.Code != 0 || !strings.Contains(r.Detail, "does not name") {
+		t.Errorf("wrong id: %+v, want FAIL without Cmd and Code", r)
+	}
+
+	s = fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "STREAMING", "."}},
+		{Expect: "MODE STREAM", Reply: []string{"203 streaming"}},
+		{Expect: "CHECK .*", Reply: []string{"500 what"}},
+	}})
+	r = runOne(Options{Addr: s.Addr()}, c)
+	if r.Status != Fail || r.Cmd != "CHECK" || r.Code != 500 {
+		t.Errorf("wrong code: %+v, want FAIL with Cmd CHECK, Code 500", r)
 	}
 }

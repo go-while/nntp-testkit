@@ -24,6 +24,17 @@
 // given substring becomes a Skip "allowed: <Detail>", the passing part of the check is kept.
 // Use a specific substring: a check stops at its first mistake, so everything after an allowed
 // Fail goes unseen.
+// Options.AllowReply tolerates the same kind of bug without the words of the Detail: an entry
+// {Check, Cmd, Code} allows a Fail of that check that is a wrong reply with that code to that
+// command ({"ihave-have", "IHAVE", 335}); Result.Cmd and Result.Code (shown by Report.String
+// as "[reply: IHAVE 335]", by -json as "cmd" and "code") tell what to write. A later
+// rewording of a Detail does not affect it; a Fail that is no wrong reply code (a wire
+// mistake, a stray byte) is allowed by Options.Allow only.
+// Options.CommitWait is the window in which check-have and ihave-have repeat an offer the
+// server deferred: a server that stores asynchronously answers the CHECK or IHAVE for the
+// article it was just given with 431 / 436 while it is in flight, the check offers again
+// (100ms, doubling up to 1s) until 438 / 435 (Pass, the Detail counts the re-offers), 238 /
+// 335 (Fail) or the end of the window (Skip). Default 5s, negative: ask once.
 // Options.StartTLS configures the STARTTLS handshake (nil: not verified, said in the Detail).
 // Options.StrictOverviewFmt additionally requires the RFC-preferred :bytes/:lines
 // metadata names; by default the RFC-permitted Bytes:/Lines: aliases remain accepted.
@@ -81,8 +92,8 @@
 // fails the greeting check ("service unavailable: <line>") and every other check is skipped.
 //
 // cmd/nntp-conformance is the command-line front end: -addr -user -pass -group -tls
-// -tls-insecure -ca -servername -starttls-verify -allow -deadline -workers -skip -json
-// -strict-overview-fmt; it prints the report and exits 1 on any Fail,
+// -tls-insecure -ca -servername -starttls-verify -allow -allow-reply -commit-wait -deadline
+// -workers -skip -json -strict-overview-fmt; it prints the report and exits 1 on any Fail,
 // 2 on a usage error or an unreachable server.
 //
 // Self-test: the kit's own fakeserver Store server passes every check (the handler's

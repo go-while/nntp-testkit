@@ -3,6 +3,7 @@
 //
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
 //	                 [-ca ca.pem] [-servername name] [-starttls-verify] [-allow name=substring]...
+//	                 [-allow-reply name:CMD=code]... [-commit-wait 5s]
 //	                 [-deadline 10s] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
 //
 // The STARTTLS checks (RFC 4642) handshake without verifying the certificate unless
@@ -24,6 +25,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +44,10 @@ type jsonResult struct {
 	Detail string `json:"detail,omitempty"`
 	// Missing is the capability whose absence skipped the check ("COMPRESS", "STARTTLS", ...)
 	Missing string `json:"missing,omitempty"`
+	// Cmd and Code: the command and the reply code of a Fail that is a wrong reply (the values
+	// -allow-reply matches; kept on an allowed Fail)
+	Cmd  string `json:"cmd,omitempty"`
+	Code int    `json:"code,omitempty"`
 }
 
 // jsonReport is the -json output.
@@ -75,6 +81,35 @@ func (a allowFlag) Set(v string) error {
 	return nil
 }
 
+// allowReplyFlag is the repeatable -allow-reply name:CMD=code flag (conformance.Options.AllowReply).
+type allowReplyFlag []conformance.AllowReply
+
+func (a *allowReplyFlag) String() string { return fmt.Sprint([]conformance.AllowReply(*a)) }
+
+// Set parses "name:CMD=code": CMD (the command's keywords, may hold spaces) and "=code" are each
+// optional but not both ("help:HELP", "ihave-have:IHAVE=335", "mode-stream:=502").
+func (a *allowReplyFlag) Set(v string) error {
+	name, rest, ok := strings.Cut(v, ":")
+	name = strings.TrimSpace(name)
+	if !ok || name == "" {
+		return fmt.Errorf("%q: want name:CMD=code (CMD or =code may be left out, not both)", v)
+	}
+	cmd, codeText, hasCode := strings.Cut(rest, "=")
+	e := conformance.AllowReply{Check: name, Cmd: strings.TrimSpace(cmd)}
+	if hasCode {
+		code, err := strconv.Atoi(strings.TrimSpace(codeText))
+		if err != nil || code < 100 || code > 599 {
+			return fmt.Errorf("%q: the code must be an NNTP reply code (100-599)", v)
+		}
+		e.Code = code
+	}
+	if e.Cmd == "" && e.Code == 0 {
+		return fmt.Errorf("%q: give a command, a code or both (an entry with neither allows nothing)", v)
+	}
+	*a = append(*a, e)
+	return nil
+}
+
 // run is main without os.Exit: it parses args, runs the checks, writes the report to stdout
 // and errors to stderr, and returns the exit status.
 func run(args []string, stdout, stderr io.Writer) int {
@@ -95,6 +130,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	asJSON := fs.Bool("json", false, "print the report as JSON")
 	allow := allowFlag{}
 	fs.Var(allow, "allow", "tolerate a known server bug: a Fail of check `name=substring` whose detail contains the substring becomes a Skip \"allowed: ...\"; repeatable")
+	var allowReply allowReplyFlag
+	fs.Var(&allowReply, "allow-reply", "tolerate a known server bug by what the server did, not by the detail text: a Fail of check `name:CMD=code` that is a wrong reply with that code to a command starting with CMD (words case-insensitive; CMD or =code may be left out) becomes a Skip \"allowed: ...\"; -json and the report show the cmd and code of a Fail; repeatable")
+	commitWait := fs.Duration("commit-wait", 0, "how long check-have and ihave-have re-offer an article the server deferred (431/436) while it commits it asynchronously; 0: 5s, negative: do not retry")
 	strictOverview := fs.Bool("strict-overview-fmt", false, "require preferred :bytes/:lines metadata names (legacy Bytes:/Lines: aliases allowed by default)")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: nntp-conformance -addr host:port [flags]\n\nflags:\n")
@@ -142,6 +180,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(allow) > 0 {
 		o.Allow = allow
 	}
+	for _, e := range allowReply {
+		if !slices.Contains(names, e.Check) {
+			return usage("-allow-reply: unknown check %q", e.Check)
+		}
+	}
+	o.AllowReply = allowReply
+	o.CommitWait = *commitWait
 	for _, n := range strings.Split(*skip, ",") {
 		if n = strings.TrimSpace(n); n == "" {
 			continue
@@ -193,7 +238,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			out.Capabilities = []string{}
 		}
 		for _, res := range r.Results {
-			out.Results = append(out.Results, jsonResult{Name: res.Name, Status: res.Status.String(), RFC: res.RFC, Detail: res.Detail, Missing: res.Missing})
+			out.Results = append(out.Results, jsonResult{Name: res.Name, Status: res.Status.String(), RFC: res.RFC, Detail: res.Detail, Missing: res.Missing, Cmd: res.Cmd, Code: res.Code})
 		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")

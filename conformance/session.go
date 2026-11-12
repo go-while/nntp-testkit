@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,10 +24,50 @@ type session struct {
 	o        Options
 	c        *client.Conn
 	greeting string
-	code     int      // greeting code (200/201; 400/502 when the server refused)
-	caps     []string // CAPABILITIES lines without the 101 line and the terminator; nil when CAPABILITIES failed
-	capsErr  error    // why caps is nil
-	authed   bool     // AUTHINFO succeeded on this session (see auth)
+	code     int         // greeting code (200/201; 400/502 when the server refused)
+	caps     []string    // CAPABILITIES lines without the 101 line and the terminator; nil when CAPABILITIES failed
+	capsErr  error       // why caps is nil
+	authed   bool        // AUTHINFO succeeded on this session (see auth)
+	bad      *wrongReply // the last exchange got a reply code the check did not accept (see mismatch)
+}
+
+// wrongReply is the command and reply code of an exchange whose code was a mistake.
+type wrongReply struct {
+	cmd  string
+	code int
+}
+
+// mismatch records that cmd (as shown in a Detail) got the reply code code, which the check
+// does not accept. runOne copies the last one into Result.Cmd and Result.Code when the check
+// fails, so Options.AllowReply can match the mistake without its Detail text. Any later
+// command (cmd) forgets it: only a mistake the check ended on counts.
+func (s *session) mismatch(cmd string, code int) {
+	s.bad = &wrongReply{cmd: cmdName(asShown("%s", cmd)), code: code}
+}
+
+// cmdSecond lists the commands whose second word is part of the command name and the words
+// that may follow (the other second words are arguments: groups, ids, ranges, user names).
+var cmdSecond = map[string][]string{
+	"AUTHINFO": {"USER", "PASS", "SASL", "GENERIC"},
+	"MODE":     {"READER", "STREAM"},
+	"COMPRESS": {"DEFLATE"},
+	"LIST":     {"ACTIVE", "ACTIVE.TIMES", "COUNTS", "DISTRIB.PATS", "HEADERS", "MODERATORS", "MOTD", "NEWSGROUPS", "OVERVIEW.FMT", "SUBSCRIPTIONS"},
+}
+
+// cmdName returns the name of a command as shown, upper-cased: its first word, plus the second
+// one for the commands of cmdSecond when it is one of the listed words ("IHAVE <id>" is
+// "IHAVE", "mode stream" is "MODE STREAM", "AUTHINFO PASS ***" is "AUTHINFO PASS", "GROUP
+// alt.test" is "GROUP", "LIST ACTIVE alt.*" is "LIST ACTIVE"). It never holds an argument.
+// A first word that is no command name (not letters, digits and '-') gives "".
+func cmdName(shown string) string {
+	f := strings.Fields(strings.ToUpper(shown))
+	if len(f) == 0 || strings.Trim(f[0], "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != "" {
+		return ""
+	}
+	if len(f) > 1 && slices.Contains(cmdSecond[f[0]], f[1]) {
+		return f[0] + " " + f[1]
+	}
+	return f[0]
 }
 
 // deadline is the hang guard of this run.
@@ -73,6 +114,7 @@ func dial(o Options) (*session, error) {
 // terminator). It is called once per session by Run before the check; a check may call it
 // again (e.g. after MODE READER or AUTHINFO) and gets the new list.
 func (s *session) capabilities() ([]string, error) {
+	s.bad = nil
 	code, line, err := s.c.TryCmd("CAPABILITIES")
 	if err != nil {
 		s.caps, s.capsErr = nil, err
@@ -105,16 +147,26 @@ func capArgs(caps []string, kw string) []string {
 
 // cmd sends one command and returns code and line; a strict-mode or I/O error is returned.
 func (s *session) cmd(format string, args ...any) (int, string, error) {
+	s.bad = nil
 	return s.c.TryCmd(format, args...)
+}
+
+// readStatus reads the status line of a command sent with s.c.Send; like cmd it forgets the
+// last wrong reply.
+func (s *session) readStatus() (int, string, error) {
+	s.bad = nil
+	return s.c.ReadStatus()
 }
 
 // block reads a dot block after a 2xx multi-line reply.
 func (s *session) block() ([]string, error) {
+	s.bad = nil
 	return s.c.TryReadDotLines()
 }
 
 // quiet fails when anything arrives within d (a stray byte, a second status line).
 func (s *session) quiet(d time.Duration) error {
+	s.bad = nil // a Fail from here is no wrong reply code
 	return s.c.ExpectNoPending(d)
 }
 

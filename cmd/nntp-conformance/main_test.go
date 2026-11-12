@@ -269,3 +269,59 @@ func TestRunAllow(t *testing.T) {
 		})
 	}
 }
+
+// TestRunAllowReply: -allow-reply name:CMD=code allows a wrong reply by command and code, the
+// JSON report carries cmd and code, and bad values are usage errors.
+func TestRunAllowReply(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: store(),
+		Faults: fakeserver.Faults{Override: map[string][]string{"HELP": {"500 nope"}}}})
+	base := []string{"-addr", srv.Addr(), "-deadline", "5s", "-skip", skipAllBut("help")}
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stdout string
+		stderr string
+	}{
+		{"fails-with-reply", nil, 1, "FAIL help", ""},
+		{"fails-shows-cmd-code", nil, 1, "[reply: HELP 500]", ""},
+		{"full", []string{"-allow-reply", "help:HELP=500"}, 0, "SKIP help", ""},
+		{"detail", []string{"-allow-reply", "help:HELP=500"}, 0, "allowed: HELP: got", ""},
+		{"lower-case", []string{"-allow-reply", "help:help=500"}, 0, "SKIP help", ""},
+		{"cmd-only", []string{"-allow-reply", "help:HELP"}, 0, "SKIP help", ""},
+		{"code-only", []string{"-allow-reply", "help:=500"}, 0, "SKIP help", ""},
+		{"repeated", []string{"-allow-reply", "date:DATE=111", "-allow-reply", "help:HELP=500"}, 0, "SKIP help", ""},
+		{"with-allow", []string{"-allow", "date=x", "-allow-reply", "help:HELP=500"}, 0, "SKIP help", ""},
+		{"other-code", []string{"-allow-reply", "help:HELP=501"}, 1, "FAIL help", ""},
+		{"other-cmd", []string{"-allow-reply", "help:DATE=500"}, 1, "FAIL help", ""},
+		{"no-colon", []string{"-allow-reply", "help"}, 2, "", "name:CMD=code"},
+		{"empty-entry", []string{"-allow-reply", "help:"}, 2, "", "allows nothing"},
+		{"bad-code", []string{"-allow-reply", "help:HELP=abc"}, 2, "", "reply code"},
+		{"code-range", []string{"-allow-reply", "help:HELP=42"}, 2, "", "reply code"},
+		{"code-range-high", []string{"-allow-reply", "help:HELP=600"}, 2, "", "reply code"},
+		{"unknown-check", []string{"-allow-reply", "nosuch:HELP=500"}, 2, "", `unknown check "nosuch"`},
+		{"commit-wait", []string{"-commit-wait", "-1s"}, 1, "FAIL help", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			code := run(append(append([]string{}, base...), tc.args...), &out, &errb)
+			if code != tc.code || !strings.Contains(out.String(), tc.stdout) || !strings.Contains(errb.String(), tc.stderr) {
+				t.Errorf("exit %d (want %d)\nstdout:\n%s\nstderr:\n%s", code, tc.code, out.String(), errb.String())
+			}
+		})
+	}
+	var out, errb bytes.Buffer
+	if code := run(append(append([]string{}, base...), "-json"), &out, &errb); code != 1 {
+		t.Fatalf("-json: exit %d, stderr %s", code, errb.String())
+	}
+	var r jsonReport
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range r.Results {
+		if res.Name == "help" && (res.Cmd != "HELP" || res.Code != 500) {
+			t.Errorf("help: %+v, want cmd HELP, code 500", res)
+		}
+	}
+}
