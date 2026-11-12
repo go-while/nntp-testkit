@@ -65,6 +65,7 @@
 //	func (c *Conn) ID() int                          // accept order from 1 (rejected connections count too)
 //
 //	func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) // self-signed ECDSA cert for 127.0.0.1 (package tlscert: a CA, leaf options, files)
+//	func NewTLSConfig() (server *tls.Config, roots *x509.CertPool, err error) // TLSConfig without tb, for a fake server program
 //
 //	type StartTLSOptions struct {   // StoreOptions.StartTLS, PeerOptions.StartTLS: STARTTLS (RFC 4642); nil = unknown command (500)
 //		Config              *tls.Config // server config of the upgraded connection; required
