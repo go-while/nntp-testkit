@@ -30,6 +30,9 @@ type PeerOptions struct {
 	// peer's output and reads the client's input uncompressed (Conn.StartCompressOutputOnly):
 	// a broken peer, for client tests.
 	CompressOutputOnly bool
+	// CompressShape shapes the compressed output stream after the 206 (flush kind, split
+	// writes, an empty flush with the 206, a final block); the zero value is the default.
+	CompressShape CompressShape
 
 	// Reject are the articles the peer refuses once it has read them, as a server whose
 	// filter refuses the content does: CHECK still answers 238 (the id alone is wanted),
@@ -130,6 +133,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 		dropReply = "400 Service temporarily unavailable"
 	}
 	return func(c *Conn) {
+		c.shape, c.shapeOn = o.CompressShape, offerCompress
 		if !o.greet(c) {
 			return
 		}

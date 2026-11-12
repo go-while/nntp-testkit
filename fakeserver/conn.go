@@ -36,6 +36,11 @@ type Conn struct {
 
 	cmd     string // command of the last client line read with ReadLine (the key of the byte-level faults)
 	faulted bool   // a fault closes the connection now (Faults.Abort decides how)
+
+	shape     CompressShape // the shape of the stream compressAfter starts (the handler's CompressShape)
+	shapeOn   bool          // Store/Peer: COMPRESS is offered, so a 206 to it starts compression
+	shapeStep bool          // Script: the step being served starts compression, whatever its command
+	enc       *encoder      // made when the 206 carried pipelined bytes; startCompress takes it over
 }
 
 // ID returns the connection's number in accept order, starting at 1 (connections rejected by
@@ -318,6 +323,7 @@ func (c *Conn) writeKind(line string, kind replyKind, lines []string) bool {
 	if len(lines) > 0 {
 		c.last = lines[0]
 	}
+	tail := c.pipeline206((cmd == "COMPRESS" && c.shapeOn) || c.shapeStep, c.last) // empty flush etc. in the 206's write
 	endless := normal && f.Endless[cmd]
 	if endless && len(lines) > 0 && lines[len(lines)-1] == "." {
 		lines = lines[:len(lines)-1]
@@ -343,11 +349,15 @@ func (c *Conn) writeKind(line string, kind replyKind, lines []string) bool {
 			if i > 0 && (time.Now().After(end) || !c.sleep(pause)) {
 				return c.cutIf(w)
 			}
-			if !w.write(joinCRLF([]string{l})) {
+			b := joinCRLF([]string{l})
+			if i == len(lines)-1 {
+				b = append(b, tail...)
+			}
+			if !w.write(b) {
 				return c.cutIf(w)
 			}
 		}
-	} else if len(lines) > 0 && !w.write(joinCRLF(lines)) {
+	} else if len(lines) > 0 && !w.write(append(joinCRLF(lines), tail...)) {
 		return c.cutIf(w)
 	}
 	if endless {
