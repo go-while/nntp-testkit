@@ -86,9 +86,11 @@
 // SplitGap ms between them. A line that does not match gets "500 unexpected ..." and is a
 // mismatch, as is every line after the last step. Pauses, reads of an expected line and
 // writes are bounded by Options.Deadline and end when the server closes (hang and the lines
-// after the script wait for the client without a limit); a line over 1 MiB, a dot block over 16
-// MiB or more than 64 MiB on one connection close the connection and add a note. The script writes the greeting itself (a first
-// step with Expect null).
+// after the script wait for the client without a limit): a client that stays silent longer than
+// the Deadline before an expected line is cut off, and a Sleep, Gap or SplitGap longer than the
+// Deadline is a config error. A line over 1 MiB, a dot block over 16 MiB or more than 64 MiB on
+// one connection close the connection and add a note. The script writes the greeting itself (a
+// first step with Expect null).
 //
 //	{"Mode": "raw", "Raw": [
 //	  {"Send": [{"Text": "200 raw ready\r\n"}]},
@@ -171,9 +173,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: nntp-fakeserver [flags] config.json\n\nflags:\n")
 		fs.PrintDefaults()
-		fmt.Fprintf(stderr, "\nprints {addr, host, port, ca} when listening, serves until stdin reaches end of file,\n"+
-			"then prints {lines, mismatches, articles, notes, accepted, counts, tls_handshakes, tls_failed,\n"+
-			"server_names} and exits; see the package documentation for the config\n")
+		fmt.Fprintf(stderr, "\nprints {addr, host, port, ca, ca_pem} when listening,\n"+
+			"serves until stdin reaches end of file,\n"+
+			"then prints {lines, lines_b64, mismatches, mismatches_b64, articles, articles_raw, notes,\n"+
+			"accepted, counts, tls_handshakes, tls_failed, server_names, max_open, closed} and exits;\n"+
+			"see the package documentation for the config\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

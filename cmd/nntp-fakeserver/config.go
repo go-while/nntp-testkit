@@ -147,7 +147,29 @@ func (cfg *config) check() error {
 	if cfg.Mode != "raw" {
 		return nil
 	}
+	deadline := cfg.Options.Deadline
+	if deadline <= 0 {
+		deadline = defaultDeadline
+	}
+	// Conn.Sleep ends every pause at the Deadline, so a longer one would be cut short silently
+	tooLong := func(field string, d time.Duration) error {
+		if d > deadline {
+			return fmt.Errorf("config.%s: %v is longer than Options.Deadline (%v), which ends every pause; raise Options.Deadline", field, d, deadline)
+		}
+		return nil
+	}
 	for i, st := range cfg.Raw {
+		if err := tooLong(fmt.Sprintf("Raw[%d].Sleep", i), st.Sleep); err != nil {
+			return err
+		}
+		for j, ch := range st.Send {
+			if err := errors.Join(
+				tooLong(fmt.Sprintf("Raw[%d].Send[%d].Gap", i, j), ch.Gap),
+				tooLong(fmt.Sprintf("Raw[%d].Send[%d].SplitGap", i, j), ch.SplitGap),
+			); err != nil {
+				return err
+			}
+		}
 		if st.Expect != nil {
 			if _, err := regexp.Compile("^(?:" + *st.Expect + ")$"); err != nil {
 				return fmt.Errorf("config.Raw[%d].Expect: %w", i, err)
@@ -244,13 +266,13 @@ func buildStore(sc storeConfig) (st *fakeserver.Store, err error) {
 		if a.Group == "" {
 			return nil, fmt.Errorf("config.Store.Articles[%d].Group is empty", i)
 		}
-		hdr, err := lines(a.Headers, a.HeadersB64)
+		hdr, err := lines("Headers", a.Headers, a.HeadersB64)
 		if err != nil {
-			return nil, fmt.Errorf("config.Store.Articles[%d].Headers: %w", i, err)
+			return nil, fmt.Errorf("config.Store.Articles[%d].%w", i, err)
 		}
-		body, err := lines(a.Body, a.BodyB64)
+		body, err := lines("Body", a.Body, a.BodyB64)
 		if err != nil {
-			return nil, fmt.Errorf("config.Store.Articles[%d].Body: %w", i, err)
+			return nil, fmt.Errorf("config.Store.Articles[%d].%w", i, err)
 		}
 		art := fakeserver.Article{Number: a.Number, MessageID: a.MessageID, Headers: hdr, Body: body, Date: a.Date, Arrived: a.Arrived}
 		if art.Date.IsZero() {
@@ -265,18 +287,18 @@ func buildStore(sc storeConfig) (st *fakeserver.Store, err error) {
 }
 
 // lines returns the text lines, or the lines of the base64 form (not both).
-func lines(text, b64 []string) ([]string, error) {
+func lines(name string, text, b64 []string) ([]string, error) {
 	if len(b64) == 0 {
 		return text, nil
 	}
 	if len(text) > 0 {
-		return nil, errors.New("the text form and the B64 form are both set")
+		return nil, fmt.Errorf("%s and %sB64 are both set", name, name)
 	}
 	out := make([]string, len(b64))
 	for i, l := range b64 {
 		b, err := base64.StdEncoding.DecodeString(l)
 		if err != nil {
-			return nil, fmt.Errorf("B64[%d]: %w", i, err)
+			return nil, fmt.Errorf("%sB64[%d]: %w", name, i, err)
 		}
 		out[i] = string(b)
 	}

@@ -597,8 +597,12 @@ func TestBadConfig(t *testing.T) {
 		{"wrong-type", `{"Mode": "store", "Options": {"Faults": {"CloseAfter": "x"}}}`, "config.Options.Faults.CloseAfter: want int"},
 		{"lower-case-command", `{"Mode": "store", "Options": {"Faults": {"Delay": {"date": 2000}}}}`, `config.Options.Faults.Delay["date"]: command names are upper case ("DATE")`},
 		{"lower-case-drop", `{"Mode": "store", "Options": {"Faults": {"DropInMultiline": {"Article": 1}}}}`, `DropInMultiline["Article"]`},
-		{"both-body-forms", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "Body": ["x"], "BodyB64": ["eA=="]}]}}`, "Articles[0].Body: the text form and the B64 form are both set"},
-		{"bad-body-b64", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "BodyB64": ["!"]}]}}`, "Articles[0].Body: B64[0]"},
+		{"both-body-forms", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "Body": ["x"], "BodyB64": ["eA=="]}]}}`, "Articles[0].Body and BodyB64 are both set"},
+		{"bad-body-b64", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "BodyB64": ["!"]}]}}`, "Articles[0].BodyB64[0]:"},
+		{"bad-headers-b64", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "HeadersB64": ["!!"]}]}}`, "config.Store.Articles[0].HeadersB64[0]:"},
+		{"sleep-over-deadline", `{"Mode": "raw", "Raw": [{"Sleep": 30000}]}`, "config.Raw[0].Sleep: 30s is longer than Options.Deadline (10s)"},
+		{"gap-over-deadline", `{"Mode": "raw", "Options": {"Deadline": 500}, "Raw": [{"Send": [{"Text": "x", "Gap": 600}]}]}`, "config.Raw[0].Send[0].Gap: 600ms is longer than Options.Deadline (500ms)"},
+		{"splitgap-over-deadline", `{"Mode": "raw", "Raw": [{"Send": [{"Text": "xy", "Split": 1, "SplitGap": 10001}]}]}`, "config.Raw[0].Send[0].SplitGap"},
 		{"handler", `{"Mode": "store", "Options": {"Handler": {}}}`, "config.Options.Handler: cannot be set from JSON"},
 		{"store-object", `{"Mode": "store", "Options": {"Store": {}}}`, "config.Options.Store: cannot be set from JSON"},
 		{"peer-in-store", `{"Mode": "store", "PeerOptions": {"User": "u"}}`, `config.PeerOptions is not used in mode "store"`},
@@ -639,6 +643,8 @@ func TestUsage(t *testing.T) {
 		{"missing-file", []string{filepath.Join(t.TempDir(), "nope.json")}, 2, "no such file"},
 		{"bad-flag", []string{"-nope"}, 2, "-nope"},
 		{"help", []string{"-h"}, 0, "serves until stdin reaches end of file"},
+		{"help-ready-keys", []string{"-h"}, 0, "{addr, host, port, ca, ca_pem}"},
+		{"help-summary-keys", []string{"-h"}, 0, "server_names, max_open, closed}"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
