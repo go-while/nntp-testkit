@@ -34,7 +34,13 @@ type Options struct {
 
 // New builds a minimal valid article: the mandatory headers of RFC 5536 section 3 in the order
 // Path, From, Newsgroups, Subject, Message-ID, Date, an empty line and a short body, all with
-// CRLF. tb only supplies the test name (for the Subject and Message-ID, unless given or
+// CRLF. The order is fixed, and Message-ID comes before Date (not Date first as many mail and
+// news programs write it): code that reproduces articles byte for byte, such as a migrated
+// fixture or a golden file with Date before Message-ID, must not rely on the default order; it
+// puts Message-ID and Date in Omit and writes them itself in Extra, which then follow
+// Subject in the order given ("Date: ...", "Message-ID: ..."), or moves a header with Del and
+// Insert. A header that Approved or Extra adds comes after Date (after Subject when Date is
+// omitted). tb only supplies the test name (for the Subject and Message-ID, unless given or
 // omitted). A caller that needs the article broken edits the result. A newsreader's POST,
 // which has no Path, Date or Message-ID, is
 //

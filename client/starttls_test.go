@@ -1,12 +1,17 @@
 package client
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
+	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	testkit "github.com/go-while/nntp-testkit"
 	"github.com/go-while/nntp-testkit/fakeserver"
@@ -359,4 +364,149 @@ func TestStartTLSAuthNeedsTLSWithoutAuth(t *testing.T) {
 	c := Dial(t, s.Addr())
 	c.ExpectCmd(502, "AUTHINFO USER u")
 	c.ExpectCmd(211, "GROUP alt.test")
+}
+
+// recorder wraps a net.Conn and keeps what is read and written through it.
+type recorder struct {
+	net.Conn
+	mu       sync.Mutex
+	in, out  []byte
+	deadline int // SetDeadline calls
+}
+
+func (r *recorder) Read(p []byte) (int, error) {
+	n, err := r.Conn.Read(p)
+	r.mu.Lock()
+	r.in = append(r.in, p[:n]...)
+	r.mu.Unlock()
+	return n, err
+}
+
+func (r *recorder) Write(p []byte) (int, error) {
+	n, err := r.Conn.Write(p)
+	r.mu.Lock()
+	r.out = append(r.out, p[:n]...)
+	r.mu.Unlock()
+	return n, err
+}
+
+func (r *recorder) SetDeadline(t time.Time) error {
+	r.mu.Lock()
+	r.deadline++
+	r.mu.Unlock()
+	return r.Conn.SetDeadline(t)
+}
+
+func (r *recorder) seen() (in, out []byte, deadlines int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]byte(nil), r.in...), append([]byte(nil), r.out...), r.deadline
+}
+
+// TestUpgradeTLS: the test sends STARTTLS itself, reads the 382 and upgrades over a recording
+// wrapper, which sees the TLS records and nothing of the plaintext before them.
+func TestUpgradeTLS(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	s := tlsServer(t, ca, tlscert.Options{CommonName: "news.test"}, fakeserver.StartTLSOptions{}, fakeserver.StoreOptions{})
+	c := Dial(t, s.Addr())
+	c.MustSend("STARTTLS\r\n")
+	c.ExpectStatus(382, "STARTTLS")
+
+	rec := &recorder{Conn: c.Conn}
+	tc := c.UpgradeTLS(rec, ca.ClientConfig("localhost"))
+	if !tc.IsTLS() || !tc.Strict || tc.Greeting != c.Greeting {
+		t.Errorf("new conn: tls=%v strict=%v greeting=%q", tc.IsTLS(), tc.Strict, tc.Greeting)
+	}
+	tc.ExpectCmd(211, "GROUP alt.test")
+	in, out, dl := rec.seen()
+	// a TLS handshake record starts with 0x16 0x03; the plaintext "STARTTLS" and "382" went through c.Conn
+	if len(out) < 5 || out[0] != 0x16 || out[1] != 0x03 || bytes.Contains(out, []byte("GROUP")) || bytes.Contains(in, []byte("211")) {
+		t.Errorf("recorder out %x in %x: not the raw TLS stream", out[:min(len(out), 8)], in[:min(len(in), 8)])
+	}
+	if len(in) < 5 || in[0] != 0x16 || dl == 0 {
+		t.Errorf("recorder in starts %x, %d deadline calls", in[:min(len(in), 8)], dl)
+	}
+	if s.TLSHandshakes() != 1 {
+		t.Errorf("server saw %d handshakes", s.TLSHandshakes())
+	}
+}
+
+// TestUpgradeTLSNilRaw: nil raw is c's own connection, TryUpgradeTLS(nil, cfg) after the 382
+// is what TryStartTLS does.
+func TestUpgradeTLSNilRaw(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	s := tlsServer(t, ca, tlscert.Options{}, fakeserver.StartTLSOptions{}, fakeserver.StoreOptions{})
+	c := Dial(t, s.Addr())
+	c.MustSend("STARTTLS\r\n")
+	c.ExpectStatus(382, "STARTTLS")
+	tc, err := c.TryUpgradeTLS(nil, &tls.Config{RootCAs: ca.Pool, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	if _, ok := tc.TLSState(); !ok {
+		t.Error("not TLS")
+	}
+	if code, _, err := tc.TryCmd("DATE"); err != nil || code != 111 {
+		t.Errorf("DATE over TLS = %d %v", code, err)
+	}
+}
+
+// TestUpgradeTLSPipelined: STARTTLS and another command in one write; the server answers 382 and
+// closes (it will not read plaintext as part of the handshake), so the upgrade fails with a
+// handshake error and c is closed.
+func TestUpgradeTLSPipelined(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	s := tlsServer(t, ca, tlscert.Options{}, fakeserver.StartTLSOptions{}, fakeserver.StoreOptions{})
+	c := Dial(t, s.Addr())
+	c.MustSend("STARTTLS\r\nCAPABILITIES\r\n")
+	c.ExpectStatus(382, "pipelined STARTTLS")
+	tc, err := c.TryUpgradeTLS(nil, ca.ClientConfig("localhost"))
+	if err == nil || tc != nil {
+		t.Fatalf("TryUpgradeTLS = %v, %v", tc, err)
+	}
+	if !strings.Contains(err.Error(), "handshake") {
+		t.Errorf("error %v", err)
+	}
+}
+
+// TestUpgradeTLSPending: plaintext buffered after the 382 fails the upgrade like StartTLS, over
+// a wrapper as well.
+func TestUpgradeTLSPending(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Handler: fakeserver.LineHandler(func(c *fakeserver.Conn, line string) ([]string, bool) {
+		_, _ = c.Raw().Write([]byte("382 go\r\n200 injected\r\n"))
+		return nil, false
+	})})
+	c := Dial(t, s.Addr())
+	c.MustSend("STARTTLS\r\n")
+	c.ExpectStatus(382, "STARTTLS")
+	// the injected line has to be in the reader's buffer: peek until it is
+	if _, err := c.R.Peek(1); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{Conn: c.Conn}
+	tc, err := c.TryUpgradeTLS(rec, &tls.Config{InsecureSkipVerify: true})
+	var se *StrictError
+	if tc != nil || !errors.As(err, &se) || se.Kind != Pending || string(se.Bytes) != "200 injected\r\n" {
+		t.Errorf("TryUpgradeTLS = %v, %v", tc, err)
+	}
+	if _, out, _ := rec.seen(); len(out) != 0 {
+		t.Errorf("a handshake began: %x", out)
+	}
+}
+
+// TestUpgradeTLSFailsTB: the plain form fails tb (and panics without one).
+func TestUpgradeTLSFailsTB(t *testing.T) {
+	p := newPeer(t, scriptedClose("200 hi\r\n"))
+	c, err := TryDial(p.addr(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	defer func() {
+		if v := recover(); v == nil || !strings.Contains(fmt.Sprint(v), "handshake") {
+			t.Fatalf("recover = %v", v)
+		}
+	}()
+	c.UpgradeTLS(nil, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 }

@@ -199,6 +199,10 @@ func TestOpenCount(t *testing.T) {
 	r.WaitOpen(t, 1, 2*time.Second)
 	rc.Close()
 	r.WaitOpen(t, 0, 2*time.Second)
+	r.WaitClosed(t, 1, 2*time.Second)
+	if n := r.Closed(); n != 1 {
+		t.Errorf("RawStall Closed() = %d after the client closed, want 1", n)
+	}
 	if got := r.Lines(); len(got) != 0 {
 		t.Errorf("RawStall recorded lines %q", got)
 	}
@@ -577,4 +581,48 @@ func TestFaultsScriptPerLine(t *testing.T) {
 	if lines := c.ReadDotLines(); len(lines) != 2 || lines[0] != strings.Repeat("x", 100) || lines[1] != "a 1 1 y" {
 		t.Errorf("LIST block %q", lines)
 	}
+}
+
+// TestRawStallClosed: a client that aborts its dial (here: closes the socket without writing)
+// closes the server side too, and Closed counts it, not before the connection was accepted.
+func TestRawStallClosed(t *testing.T) {
+	s := New(t, Options{RawStall: true})
+	if n := s.Closed(); n != 0 {
+		t.Fatalf("Closed() = %d before any connection", n)
+	}
+	a := rawDial(t, s)
+	b := rawDial(t, s)
+	s.WaitOpen(t, 2, 2*time.Second)
+	if n := s.Closed(); n != 0 {
+		t.Errorf("Closed() = %d with two connections open", n)
+	}
+	_ = a.Close()
+	s.WaitClosed(t, 1, 2*time.Second)
+	if n, o := s.Closed(), s.Open(); n != 1 || o != 1 {
+		t.Errorf("Closed() = %d, Open() = %d after one close, want 1 and 1", n, o)
+	}
+	_ = b.Close()
+	s.WaitClosed(t, 2, 2*time.Second)
+	if n := s.Accepted(); n != 2 {
+		t.Errorf("Accepted() = %d, want 2", n)
+	}
+}
+
+// TestClosedNotRejected: a connection above MaxConns is rejected, never counted in Open, and so
+// not in Closed either.
+func TestClosedNotRejected(t *testing.T) {
+	s := New(t, Options{MaxConns: 1})
+	c1 := client.Dial(t, s.Addr())
+	s.WaitOpen(t, 1, 2*time.Second)
+	c2 := client.Dial(t, s.Addr())
+	if !strings.HasPrefix(c2.Greeting, "502") {
+		t.Fatalf("second greeting %q", c2.Greeting)
+	}
+	c2.Close()
+	time.Sleep(50 * time.Millisecond) // negative check: the rejected conn must not show up
+	if n := s.Closed(); n != 0 {
+		t.Errorf("Closed() = %d with the first connection open", n)
+	}
+	c1.Close()
+	s.WaitClosed(t, 1, 2*time.Second)
 }

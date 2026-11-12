@@ -103,6 +103,8 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 |---|---|
 | `Deadline() time.Duration`, `DefaultDeadline`, `EnvDeadline` | the hang guard (above) |
 | `WaitFor(tb, d, what, cond func() bool)` | poll `cond` every 50 ms until it holds; `tb.Fatalf("timed out after <d> waiting for <what>")` after `d` (0 = `Deadline()`) |
+| `WaitForErr(tb, d, what, check func() error)` | `WaitFor` for a check that says why not yet: polls until it returns nil, `tb.Fatalf("timed out after <d> waiting for <what>: <last error>")` after `d` |
+| `Poll(d, cond func() bool) bool` / `PollErr(d, check func() error) error` | the same without a tb (no failing: usable in `t.Cleanup` and other goroutines); `PollErr` returns `timed out after <d>: <last error>` wrapping the last error (`errors.Is/As` work) |
 | `FreePort(tb) int` | a TCP port of 127.0.0.1 that was free a moment ago, and not in use on 0.0.0.0 or [::] either, for a server that must be told its port (another process may take it first) |
 | `Listening(addr) bool` | a TCP dial to `addr` succeeds within a second (closed at once, nothing written): a server is up, or with `WaitFor` it has stopped |
 | `ShortTempDir(tb) string` | a fresh 0700 directory under a short base (`os.TempDir()` if at most 32 bytes, else `/tmp`), named `nt<hash of tb.Name()>-<random>` (about 25 bytes), removed by `tb.Cleanup` (call it before starting servers that use it: cleanups run last-in first-out); for unix-domain sockets, whose path is limited (`MaxSocketPath` = 107 on Linux, 103 elsewhere: `sun_path` is 108 / 104 bytes with the NUL) and which `t.TempDir()` (`$TMPDIR/<test name><random>/001`, `$TMPDIR` is about 50 bytes on macOS) overflows with a long test name |
@@ -116,6 +118,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `Dial(tb, addr) *Conn` / `DialWith(tb, addr, deadline) *Conn` | dial, read the greeting, `tb.Cleanup(Close)`; fail tb on error |
 | `TryDial(addr, deadline) (*Conn, error)` | the same without `testing`; the caller closes |
 | `New(tb, net.Conn) *Conn` | wrap an open conn (net.Pipe, TLS); no greeting read |
+| `NewConn(net.Conn) *Conn` | `New` without tb: nothing read or registered, for a conn whose greeting the caller read already; plain forms (`Cmd`, ...) panic with a `client: ...` message on failure, so use `Try*` or `WithTB` |
 | `(*Conn) WithTB(tb) *Conn` | attach a tb to a `TryDial` Conn |
 | `ReadGreeting`, `Send(raw)`, `ReadLine`, `ReadStatus` | raw I/O; `Send` appends nothing (pipelining) |
 | `TryCmd(format, args...)` / `Cmd(...)` | send one line + CRLF, read the status: `(code, line[, err])` |
@@ -125,6 +128,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryCompress() (int, string, error)` / `Compress()` | send `COMPRESS DEFLATE`; on 206 compress both directions (`StartCompress`), else the code, the line and an error (403, 500, 501, 502, 503), still plain |
 | `StartCompress() error`, `Compressed() bool` | compress from now on without sending a command (the test sent COMPRESS and read the 206) |
 | `TryStartTLS(cfg) (*Conn, error)` / `StartTLS(cfg) *Conn` | send `STARTTLS` (RFC 4642), expect 382, fail when any byte is already buffered after the 382 (plaintext injection, CVE-2011-0411), handshake within the deadline; a new strict `Conn` over the `*tls.Conn` (no greeting read; `cfg` is cloned, `ServerName` defaults to the remote host). A reply other than 382 is a `*StartTLSError{Code, Line}` and `c` stays plain; the injection is a `*StrictError` of Kind `Pending`; verification errors are crypto/tls's (`x509.HostnameError`, `x509.CertificateInvalidError` with `Reason` `Expired`, `x509.UnknownAuthorityError`). `StartTLS` fails tb and registers the cleanup |
+| `TryUpgradeTLS(raw net.Conn, cfg) (*Conn, error)` / `UpgradeTLS(raw, cfg) *Conn` | the handshake half of `StartTLS` for a test that sent `STARTTLS` itself (alone, or pipelined with another command in one write) and read the 382; `raw` is the conn the TLS client runs over (nil = `c`'s own; or a recording wrapper around `c.Conn`); the same buffered-plaintext rule |
 | `TLSState() (tls.ConnectionState, bool)`, `IsTLS() bool` | peer certificates, version, server name of a TLS `Conn` |
 | `Close()` | idempotent, nil-safe |
 | `ExpectCmd(want, format, args...) string` | `Cmd`, and fail tb unless the code is `want`; returns the status line |
@@ -189,7 +193,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
 | `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
-| `Accepted`, `Open`, `MaxOpen`, `WaitOpen(tb, n, d)`, `WaitLines(tb, want)` | connection counts (`MaxOpen`: the most open at once, e.g. a client's parallel-connection limit) and polling waits |
+| `Accepted`, `Open`, `MaxOpen`, `Closed`, `WaitOpen(tb, n, d)`, `WaitClosed(tb, n, d)`, `WaitLines(tb, want)` | connection counts (`MaxOpen`: the most open at once, e.g. a client's parallel-connection limit; `Closed`: connections that ended on the server side, e.g. a `RawStall` conn whose dial the client aborted) and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
@@ -533,7 +537,7 @@ terminating `.`; `client.Stuff` (or the client's send) adds both.
 | API | what |
 |---|---|
 | `MsgID(tb) string` / `MsgIDAt(tb, domain)` / `NewMsgID(name, domain)` | a unique Message-ID `<TestName.time.nonce.seq@testkit.invalid>`: the test name reduced to letters, digits, `-` and `_`, the time, a per-process nonce, a process-wide sequence; `ValidMsgID(id)` checks the form (RFC 5536) |
-| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra, Omit` (more raw header lines; generated headers to leave out, e.g. `Path`, `Date`, `Message-ID` for a newsreader's POST); `NewArticle(Options) (*Article, error)` is `New` without a tb (needs Subject and MessageID, or their Omit) |
+| `New(tb, Options) *Article` / `Minimal(tb, group)` | a minimal valid article: Path, From, Newsgroups, Subject, Message-ID, Date (in that order: Message-ID before Date; for Date first omit both and write them in `Extra`) and a short body; `Options` sets `Newsgroups, Subject, From, PathHost, MessageID, Domain, Date, Body, Approved, Extra, Omit` (more raw header lines; generated headers to leave out, e.g. `Path`, `Date`, `Message-ID` for a newsreader's POST); `NewArticle(Options) (*Article, error)` is `New` without a tb (needs Subject and MessageID, or their Omit) |
 | `type Article struct { Fields []Field; Sep string; Body []byte }`, `type Field struct { Raw, EOL string }` | the raw form: a field is its exact text (folds included) and its line end (`""` = CRLF, `"\n"`, `NoEOL`); `Sep` is what separates head and body (`NoEOL`: no empty line) |
 | `Add(name, value)`, `AddRaw(raw)`, `Insert(i, raw)`, `PrependPath(host)`, `Set(name, value)`, `SetRaw(name, raw)`, `Del(name)` | edit, chainable; `AddRaw("Path:")` is an empty Path (`SetRaw("Path", "Path:")` empties it in place), `AddRaw("Path: a\r\n !b")` a folded one, `AddRaw("no colon")` a line without colon; `Set` replaces in place keeping the old spelling of the name and drops duplicates; `PrependPath` puts `host!` in front of the Path keeping its folds |
 | `SetBody([]byte)`, `SetBodyLines(lines...)` | the body as bytes, or lines each plus CRLF (a leading `.` is not doubled) |

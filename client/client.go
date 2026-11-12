@@ -93,12 +93,28 @@ func TryDial(addr string, deadline time.Duration) (*Conn, error) {
 }
 
 // New wraps an open connection (for example one end of net.Pipe or a TLS client). It does
-// not read a greeting (call ReadGreeting) and registers tb.Cleanup(Close). Strict mode is on.
+// not read a greeting (call ReadGreeting; a connection whose greeting was read already is used
+// as it is) and registers tb.Cleanup(Close). Strict mode is on. NewConn is the form without tb.
 func New(tb testing.TB, nc net.Conn) *Conn {
 	tb.Helper()
 	c := &Conn{Conn: nc, R: bufio.NewReaderSize(nc, readerSize), Strict: true, tb: tb}
 	tb.Cleanup(c.Close)
 	return c
+}
+
+// NewConn wraps an open connection without a testing dependency and without reading anything:
+// for a connection whose greeting (and more) the caller has read already, or that has none,
+// such as a TLS client after the handshake, one end of net.Pipe or a conn from a custom dialer.
+// The Conn is strict, has the default hang guard and an empty Greeting (set c.Greeting
+// yourself if the caller read it); the caller closes it, nothing is registered. Bytes the
+// caller buffered while reading before (a bufio.Reader of its own) are not carried over: read
+// the rest through the Conn from then on.
+//
+// Like TryDial's it has no tb: Cmd, ReadDotLines, RawUntilDot and the other plain forms panic
+// with a "client: ..." message on a failure, so use the Try* forms, or call WithTB (which also
+// registers the Close) or For to give it one.
+func NewConn(nc net.Conn) *Conn {
+	return &Conn{Conn: nc, R: bufio.NewReaderSize(nc, readerSize), Strict: true}
 }
 
 // deadline is the effective hang guard: c.Deadline, or testkit.Deadline() when it is 0.

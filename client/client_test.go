@@ -304,6 +304,71 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestNewConn: a tb-less Conn over an open connection whose greeting the caller read already.
+func TestNewConn(t *testing.T) {
+	p := newPeer(t, func(p *peer, c net.Conn, r *bufio.Reader) {
+		write(c, "200 hello\r\n")
+		for {
+			line, ok := p.readLine(r)
+			if !ok {
+				return
+			}
+			if line == "DATE" {
+				write(c, "111 20261017000000\r\n")
+			}
+		}
+	})
+	nc, err := net.Dial("tcp", p.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the caller reads the greeting itself, byte by byte (no buffer to lose)
+	var greeting []byte
+	for one := make([]byte, 1); !bytes.HasSuffix(greeting, []byte("\r\n")); {
+		_ = nc.SetReadDeadline(time.Now().Add(testkit.Deadline()))
+		if _, err := io.ReadFull(nc, one); err != nil {
+			t.Fatal(err)
+		}
+		greeting = append(greeting, one...)
+	}
+	_ = nc.SetReadDeadline(time.Time{})
+	c := NewConn(nc)
+	defer c.Close()
+	if c.Greeting != "" || !c.Strict || c.tb != nil || c.Deadline != 0 {
+		t.Fatalf("NewConn: greeting %q strict %v tb %v deadline %v", c.Greeting, c.Strict, c.tb, c.Deadline)
+	}
+	c.Greeting = strings.TrimRight(string(greeting), "\r\n")
+	if code, _, err := c.TryCmd("DATE"); err != nil || code != 111 {
+		t.Fatalf("TryCmd(DATE) = %d, %v", code, err)
+	}
+	if code, line := c.Cmd("DATE"); code != 111 {
+		t.Errorf("Cmd on success = %d %q", code, line)
+	}
+	// the plain forms panic with a client: message on a failure, as TryDial's do
+	c.Deadline = 100 * time.Millisecond
+	func() {
+		defer func() {
+			if v := recover(); v == nil || !strings.HasPrefix(fmt.Sprint(v), "client: cmd") {
+				t.Errorf("recover = %v", v)
+			}
+		}()
+		c.Cmd("NOPE") // the peer answers nothing
+	}()
+}
+
+// TestNewConnWithTB: WithTB turns a NewConn Conn into one that fails tb and cleans up.
+func TestNewConnWithTB(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	c := NewConn(a)
+	c.Deadline = 50 * time.Millisecond
+	rec := &recordTB{TB: t}
+	rec.run(func(tb testing.TB) { c.WithTB(tb).Cmd("DATE") })
+	if !rec.failed || !strings.Contains(rec.msg, "cmd") {
+		t.Errorf("Cmd with a tb: failed %v msg %q", rec.failed, rec.msg)
+	}
+}
+
 func TestParseCode(t *testing.T) {
 	cases := []struct {
 		line string
