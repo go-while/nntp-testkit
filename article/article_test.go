@@ -1085,3 +1085,29 @@ func TestParseDotBlockUnstuffsEveryDottedLine(t *testing.T) {
 		t.Errorf("body %q, want %q", got, want)
 	}
 }
+
+// TestHeaderOrder pins the order New writes (Message-ID before Date) and the recipe the docs
+// give for an article with Date first.
+func TestHeaderOrder(t *testing.T) {
+	when := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	names := func(a *article.Article) []string {
+		var out []string
+		for _, f := range a.Fields {
+			out = append(out, f.Name())
+		}
+		return out
+	}
+	a := article.New(t, article.Options{MessageID: "<o@x.invalid>", Date: when, Approved: "m@x.invalid", Extra: []string{"X-A: 1"}})
+	want := []string{"Path", "From", "Newsgroups", "Subject", "Message-ID", "Date", "Approved", "X-A"}
+	if got := names(a); !reflect.DeepEqual(got, want) {
+		t.Errorf("New header order %v, want %v", got, want)
+	}
+
+	// Date first: both omitted, written by the caller in Extra (which follows Subject then).
+	b := article.New(t, article.Options{Omit: []string{"Message-ID", "Date"}, Date: when,
+		Extra: []string{"Date: Thu, 12 Nov 2026 10:00:00 +0000", "Message-ID: <o@x.invalid>", "X-A: 1"}})
+	want = []string{"Path", "From", "Newsgroups", "Subject", "Date", "Message-ID", "X-A"}
+	if got := names(b); !reflect.DeepEqual(got, want) {
+		t.Errorf("Omit+Extra header order %v, want %v", got, want)
+	}
+}

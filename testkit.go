@@ -4,7 +4,8 @@
 //
 // The sub-packages are client, fakeserver, proc, conformance, yenc, canlock and mailrec. This
 // package holds what they share, the hang guard (Deadline), and small helpers for any test:
-// WaitFor polls a condition within a deadline, FreePort picks a TCP port for a server that must
+// WaitFor polls a condition within a deadline (WaitForErr one that gives a reason, Poll and
+// PollErr without failing a tb, for t.Cleanup), FreePort picks a TCP port for a server that must
 // be told one, Listening probes whether something accepts connections on an address, and
 // ShortTempDir makes a temporary directory whose path is short enough for a unix-domain socket
 // (MaxSocketPath, SocketPathFits; t.TempDir() often is not).

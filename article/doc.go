@@ -64,7 +64,9 @@
 //	const DefaultGroup, DefaultPathHost, DefaultFrom, DateLayout
 //
 // New writes Path ("<PathHost>!not-for-mail"), From, Newsgroups, Subject, Message-ID and Date
-// (RFC 5536 section 3, UTC, to the second) in that order, CRLF line ends, the empty line and a
+// (RFC 5536 section 3, UTC, to the second) in exactly that order (Message-ID comes before Date:
+// for a byte-exact migration of an article that has Date first, put both in Omit and write them
+// in Extra, whose fields follow Subject then, or reorder with Del and Insert), CRLF line ends, the empty line and a
 // short body (Options.Body lines, each plus CRLF); Approved and Extra fields follow Date. Every zero Options field takes its default
 // (group "test", subject "test article <sanitized test name>", a generated Message-ID, now).
 // tb is used for its name only (the default Subject and Message-ID). Omit leaves generated

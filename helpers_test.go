@@ -1,6 +1,7 @@
 package testkit
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"runtime"
@@ -64,6 +65,89 @@ func TestWaitFor(t *testing.T) {
 	})
 	if !strings.Contains(msg, "timed out after 100ms") {
 		t.Errorf("d=0 with %s=100ms: Fatalf %q", EnvDeadline, msg)
+	}
+}
+
+func TestWaitForErr(t *testing.T) {
+	n := 0
+	WaitForErr(t, time.Second, "the third call", func() error {
+		n++
+		if n < 3 {
+			return fmt.Errorf("call %d", n)
+		}
+		return nil
+	})
+	if n != 3 {
+		t.Errorf("check called %d times, want 3", n)
+	}
+
+	// the last error is named
+	n = 0
+	msg := (&fatalTB{TB: t}).run(func(tb testing.TB) {
+		WaitForErr(tb, 120*time.Millisecond, "never", func() error { n++; return fmt.Errorf("attempt %d", n) })
+	})
+	want := fmt.Sprintf("timed out after 120ms waiting for never: attempt %d", n)
+	if msg != want || n < 2 {
+		t.Errorf("Fatalf %q (%d calls), want %q", msg, n, want)
+	}
+
+	// d <= 0 is Deadline()
+	t.Setenv(EnvDeadline, "100ms")
+	msg = (&fatalTB{TB: t}).run(func(tb testing.TB) {
+		WaitForErr(tb, 0, "the env deadline", func() error { return errors.New("still no") })
+	})
+	if msg != "timed out after 100ms waiting for the env deadline: still no" {
+		t.Errorf("d=0: Fatalf %q", msg)
+	}
+}
+
+func TestPoll(t *testing.T) {
+	n := 0
+	if !Poll(time.Second, func() bool { n++; return n == 3 }) || n != 3 {
+		t.Errorf("Poll: n = %d, want true after 3 calls", n)
+	}
+	start := time.Now()
+	if Poll(120*time.Millisecond, func() bool { return false }) {
+		t.Error("Poll of a false cond returned true")
+	}
+	if el := time.Since(start); el < 120*time.Millisecond || el > 5*time.Second {
+		t.Errorf("Poll gave up after %v, want about 120ms", el)
+	}
+	t.Setenv(EnvDeadline, "100ms")
+	start = time.Now()
+	if Poll(0, func() bool { return false }) || time.Since(start) < 100*time.Millisecond {
+		t.Error("Poll(0) did not wait for the env deadline")
+	}
+	// usable inside t.Cleanup: fails nothing, reports with Errorf
+	ok := false
+	t.Run("cleanup", func(t *testing.T) {
+		t.Cleanup(func() { ok = Poll(time.Second, func() bool { return true }) })
+	})
+	if !ok {
+		t.Error("Poll in a Cleanup returned false")
+	}
+}
+
+func TestPollErr(t *testing.T) {
+	n := 0
+	if err := PollErr(time.Second, func() error {
+		n++
+		if n < 3 {
+			return errors.New("not yet")
+		}
+		return nil
+	}); err != nil || n != 3 {
+		t.Errorf("PollErr = %v after %d calls", err, n)
+	}
+
+	sentinel := errors.New("sentinel")
+	err := PollErr(120*time.Millisecond, func() error { return fmt.Errorf("wrapped: %w", sentinel) })
+	if err == nil || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "timed out after 120ms: wrapped: sentinel") {
+		t.Errorf("PollErr timeout error = %v", err)
+	}
+	var pe *pollTimeout
+	if !errors.As(err, &pe) {
+		t.Errorf("error %T is not a *pollTimeout", err)
 	}
 }
 

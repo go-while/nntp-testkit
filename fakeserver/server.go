@@ -307,6 +307,7 @@ type Server struct {
 	accepted    int
 	open        int
 	maxOpen     int                         // the most connections open at once (Open's peak)
+	served      int                         // connections that counted in Open (not rejected by MaxConns)
 	tlsNames    []string                    // SNI of every ClientHello (TLSServerNames)
 	tlsOK       int                         // completed TLS handshakes
 	tlsFailed   int                         // failed TLS handshakes
@@ -458,6 +459,7 @@ func (s *Server) acceptLoop() {
 		}
 		s.conns[c] = struct{}{}
 		s.open++
+		s.served++
 		s.maxOpen = max(s.maxOpen, s.open)
 		s.wg.Add(1)
 		s.mu.Unlock()
@@ -640,6 +642,36 @@ func (s *Server) Open() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.open
+}
+
+// Closed returns how many connections have ended on the server side: the client closed (or
+// aborted) and the server read EOF or an error, or the server dropped it. It is the connections
+// that counted in Open and are gone from it, so a test that waits for Closed() == n cannot pass
+// before the connection was accepted, as Open() == 0 can right after a dial. Connections
+// rejected by MaxConns are not counted. With RawStall this tells that a client which gave up
+// (a cancelled dial, a timed-out TLS handshake or SOCKS exchange) closed its socket.
+func (s *Server) Closed() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.served - s.open
+}
+
+// WaitClosed polls Closed every 10 ms until it is at least n; tb.Fatalf after d (raised to the
+// server's Deadline, as for WaitOpen).
+func (s *Server) WaitClosed(tb testing.TB, n int, d time.Duration) {
+	tb.Helper()
+	d = max(d, s.deadline)
+	deadline := time.Now().Add(d)
+	for {
+		got := s.Closed()
+		if got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			tb.Fatalf("fakeserver: Closed() = %d, want at least %d within %v", got, n, d)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // MaxOpen returns the most connections that were open at the same time (the peak of Open since

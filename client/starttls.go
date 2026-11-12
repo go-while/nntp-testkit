@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"time"
 )
 
 // StartTLSError is a STARTTLS that the server did not answer with 382: the connection is still
@@ -31,7 +32,8 @@ func (e *StartTLSError) Error() string {
 // part of the TLS session (the STARTTLS command injection of CVE-2011-0411, RFC 4642 2.2.2),
 // and c is closed; a handshake error (verification: *tls.CertificateVerificationError, with
 // x509.HostnameError, x509.CertificateInvalidError, x509.UnknownAuthorityError inside, or a
-// timeout) closes c. The handshake is bounded by the hang guard like every step.
+// timeout) closes c. The handshake is bounded by the hang guard like every step. The part
+// after the 382 is TryUpgradeTLS, which a test can call itself after sending STARTTLS its own way.
 //
 // cfg is cloned; when it has no ServerName and does not skip verification, ServerName is the
 // host of the remote address of c. TLSState returns the negotiated connection state of the new Conn.
@@ -46,6 +48,30 @@ func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) {
 	if code != 382 {
 		return nil, &StartTLSError{Code: code, Line: line}
 	}
+	return c.TryUpgradeTLS(nil, cfg)
+}
+
+// TryUpgradeTLS is the second half of TryStartTLS: the TLS handshake and the new Conn, for a
+// test that sent STARTTLS itself and read the 382 (c.ReadStatus or c.ExpectStatus(382, ...)).
+// Two uses: STARTTLS and a following command in one write (c.Send("STARTTLS\r\nCAPABILITIES\r\n"),
+// read the 382, upgrade: the server must not answer the second command in plaintext), and
+// recording the encrypted stream between the 382 and the handshake.
+//
+// raw is the net.Conn the TLS client runs over: nil means c's own connection (c.Conn), which
+// is what TryStartTLS passes. A test that wants to see the bytes passes a wrapper around
+// c.Conn that records what it reads and writes; the wrapper must read from and write to the
+// same socket as c.Conn (the bytes c has buffered are not given to it, so it is only for
+// what comes after the 382), and the new Conn's Conn is the *tls.Conn over raw, so
+// closing it closes raw. c must not be used afterwards (it shares the socket); the errors,
+// the bytes-buffered rule (a *StrictError of Kind Pending: no byte may follow the 382 line
+// in c's reader, the server's plaintext injection of CVE-2011-0411; c is closed), the cfg
+// cloning and ServerName default (the host of raw's remote address) and the hang guard are
+// those of TryStartTLS. Nothing is sent or read before the handshake, so calling it
+// without a 382 first is the caller's mistake: the handshake then fails.
+func (c *Conn) TryUpgradeTLS(raw net.Conn, cfg *tls.Config) (*Conn, error) {
+	if raw == nil {
+		raw = c.Conn
+	}
 	if n := c.R.Buffered(); n > 0 {
 		b, _ := c.R.Peek(n)
 		c.Close()
@@ -55,18 +81,40 @@ func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) {
 	}
 	cfg = cfg.Clone()
 	if cfg.ServerName == "" && !cfg.InsecureSkipVerify {
-		if host, _, err := net.SplitHostPort(c.Conn.RemoteAddr().String()); err == nil {
-			cfg.ServerName = host
+		if ra := raw.RemoteAddr(); ra != nil {
+			if host, _, err := net.SplitHostPort(ra.String()); err == nil {
+				cfg.ServerName = host
+			}
 		}
 	}
-	tc := tls.Client(c.Conn, cfg)
+	tc := tls.Client(raw, cfg)
 	c.bump()
+	// also on raw (a no-op repeat when raw is c.Conn); no interface comparison, which
+	// panics for a non-comparable wrapper type
+	_ = raw.SetDeadline(time.Now().Add(c.deadline()))
 	if err := tc.Handshake(); err != nil {
 		c.Close()
+		_ = raw.Close() // a wrapper may hold its own resources; closing twice is harmless
 		return nil, fmt.Errorf("STARTTLS handshake: %w", err)
 	}
 	return &Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Greeting: c.Greeting,
 		Deadline: c.Deadline, Strict: c.Strict, tb: c.tb}, nil
+}
+
+// UpgradeTLS is TryUpgradeTLS that fails tb on any error and registers tb.Cleanup(Close) for
+// the returned Conn, like StartTLS.
+func (c *Conn) UpgradeTLS(raw net.Conn, cfg *tls.Config) *Conn {
+	if c.tb != nil {
+		c.tb.Helper()
+	}
+	n, err := c.TryUpgradeTLS(raw, cfg)
+	if err != nil {
+		c.fatalf("%v", err)
+	}
+	if c.tb != nil {
+		c.tb.Cleanup(n.Close)
+	}
+	return n
 }
 
 // StartTLS is TryStartTLS that fails tb on any error and registers tb.Cleanup(Close) for the

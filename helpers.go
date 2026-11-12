@@ -2,6 +2,7 @@ package testkit
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"syscall"
@@ -15,20 +16,77 @@ const waitPoll = 50 * time.Millisecond
 // WaitFor polls cond every 50 ms until it returns true; when d has passed without that it
 // fails tb with tb.Fatalf, naming what ("timed out after 10s waiting for <what>"). d <= 0 is
 // Deadline(). cond runs at once and on the test's goroutine, so it may use tb, send commands
-// on a client connection or read files; it runs once more after d before the failure.
+// on a client connection or read files; it runs once more after d before the failure. Use
+// WaitForErr when cond has a reason to give, Poll where tb.Fatalf is wrong (t.Cleanup).
 func WaitFor(tb testing.TB, d time.Duration, what string, cond func() bool) {
 	tb.Helper()
-	if d <= 0 {
-		d = Deadline()
+	if !Poll(d, cond) {
+		tb.Fatalf("timed out after %v waiting for %s", pollLimit(d), what)
 	}
+}
+
+// WaitForErr is WaitFor for a condition that says why it does not hold yet: it polls check
+// every 50 ms until it returns nil; when d has passed without that it fails tb with the last
+// error ("timed out after 10s waiting for <what>: <last error>"). d <= 0 is Deadline().
+func WaitForErr(tb testing.TB, d time.Duration, what string, check func() error) {
+	tb.Helper()
+	if err := PollErr(d, check); err != nil {
+		tb.Fatalf("timed out after %v waiting for %s: %v", pollLimit(d), what, errors.Unwrap(err))
+	}
+}
+
+// Poll is WaitFor without a tb: it evaluates cond at once and then every 50 ms, and reports
+// whether cond returned true within d (d <= 0 is Deadline()); it runs cond once more after d
+// before it gives up. Nothing fails, so it works where t.Fatal must not be called, such as a
+// t.Cleanup function (which may not stop the test but can report with t.Errorf), and in
+// goroutines other than the test's.
+func Poll(d time.Duration, cond func() bool) bool {
+	return PollErr(d, func() error {
+		if cond() {
+			return nil
+		}
+		return errNotYet
+	}) == nil
+}
+
+// PollErr is Poll for a condition that gives a reason: it evaluates check at once and every
+// 50 ms until it returns nil (then PollErr returns nil), or until d has passed (d <= 0 is
+// Deadline()) and check, run once more, still fails. The error then is "timed out after <d>"
+// wrapping the last error of check, so errors.Is and errors.As see it.
+func PollErr(d time.Duration, check func() error) error {
+	d = pollLimit(d)
 	limit := time.Now().Add(d)
-	for !cond() {
+	for {
+		err := check()
+		if err == nil {
+			return nil
+		}
 		if time.Now().After(limit) {
-			tb.Fatalf("timed out after %v waiting for %s", d, what)
+			return &pollTimeout{d: d, err: err}
 		}
 		time.Sleep(waitPoll)
 	}
 }
+
+// errNotYet is the error Poll gives PollErr for a false condition.
+var errNotYet = errors.New("condition not met")
+
+// pollLimit is d, or Deadline() when d <= 0.
+func pollLimit(d time.Duration) time.Duration {
+	if d <= 0 {
+		return Deadline()
+	}
+	return d
+}
+
+// pollTimeout is the error of PollErr: the last error of the check, and how long it was tried.
+type pollTimeout struct {
+	d   time.Duration
+	err error
+}
+
+func (e *pollTimeout) Error() string { return fmt.Sprintf("timed out after %v: %v", e.d, e.err) }
+func (e *pollTimeout) Unwrap() error { return e.err }
 
 // FreePort returns a TCP port of 127.0.0.1 that was free a moment ago: it listens on port 0
 // and closes the listener. Another process may take the port before the test uses it, so

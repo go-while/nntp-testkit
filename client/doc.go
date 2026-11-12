@@ -14,6 +14,7 @@
 //	func DialWith(tb testing.TB, addr string, deadline time.Duration) *Conn // dial + greeting within deadline (0 = testkit.Deadline()), sets Conn.Deadline, tb.Cleanup(Close); Strict; fails tb on error
 //	func TryDial(addr string, deadline time.Duration) (*Conn, error) // no testing dependency; Strict; reads the greeting; its tb-failing methods panic until WithTB
 //	func New(tb testing.TB, c net.Conn) *Conn               // wrap an open conn; no greeting read; tb.Cleanup(Close); Strict
+//	func NewConn(nc net.Conn) *Conn                         // New without tb: nothing read (the caller's greeting is not in Greeting unless it sets it), nothing registered, Strict; the plain forms panic on failure like TryDial's, WithTB/For give it a tb
 //	func (c *Conn) WithTB(tb testing.TB) *Conn              // attach a tb to a TryDial/raw Conn (registers tb.Cleanup(Close))
 //	func (c *Conn) For(tb testing.TB) *Conn                 // a view of c that fails tb instead (shared stream, no cleanup): for subtests sharing a parent's conn
 //	func (c *Conn) ReadGreeting() (string, error)          // reads one line into c.Greeting
@@ -39,6 +40,8 @@
 //	func (c *Conn) Compressed() bool
 //	func (c *Conn) TryStartTLS(cfg *tls.Config) (*Conn, error) // STARTTLS (RFC 4642): 382, no byte may be buffered after it, handshake within the deadline; a new strict Conn over the *tls.Conn (no greeting read); errors: *StartTLSError (not 382; c stays plain), *StrictError{Pending} (plaintext after the 382), handshake/verification errors
 //	func (c *Conn) StartTLS(cfg *tls.Config) *Conn             // TryStartTLS; fails tb; tb.Cleanup(Close) for the new Conn
+//	func (c *Conn) TryUpgradeTLS(raw net.Conn, cfg *tls.Config) (*Conn, error) // the handshake half of TryStartTLS, for a test that sent STARTTLS itself and read the 382 (pipelined "STARTTLS\r\nCAPABILITIES\r\n", or a recording wrapper as raw); raw nil = c.Conn; bytes buffered after the 382 fail it (Pending) as for TryStartTLS
+//	func (c *Conn) UpgradeTLS(raw net.Conn, cfg *tls.Config) *Conn             // TryUpgradeTLS; fails tb; tb.Cleanup(Close) for the new Conn
 //	func (c *Conn) TLSState() (tls.ConnectionState, bool)      // peer certificates, version, ...; false when c is not TLS
 //	func (c *Conn) IsTLS() bool
 //	type StartTLSError struct { Code int; Line string }       // the server did not answer 382
@@ -139,7 +142,11 @@
 // back as the crypto/tls ones (*tls.CertificateVerificationError wrapping x509.HostnameError,
 // x509.CertificateInvalidError with Reason x509.Expired, x509.UnknownAuthorityError). The new Conn
 // keeps Deadline, Strict, Greeting and tb; c must not be used afterwards, except after a
-// *StartTLSError, which leaves it plain. The server forgets the session state on the upgrade,
+// *StartTLSError, which leaves it plain. TryUpgradeTLS(raw, cfg) is the part after the 382 for
+// a test that sent STARTTLS itself (alone, or pipelined with a following command in one write)
+// and read the 382: raw is the net.Conn the TLS client runs over, nil for c's own, or a
+// wrapper around c.Conn (a recorder of the encrypted stream); it applies the same
+// buffered-plaintext rule. The server forgets the session state on the upgrade,
 // so send CAPABILITIES again.
 //
 // The kit never contacts any host a test did not name; the deadline only stops a hung test.
