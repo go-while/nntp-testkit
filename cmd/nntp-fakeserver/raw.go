@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"compress/flate"
 	"crypto/tls"
+	"errors"
 	"fmt"
-	"io"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ type recorder struct {
 	lines      []string
 	mismatches []string
 	articles   [][]string
+	articleRaw [][]byte // the blocks as read, without the "." line (articles_raw)
 	notes      []string
 	counts     map[string]int
 }
@@ -52,37 +54,121 @@ func (r *recorder) note(format string, a ...any) {
 	r.notes = append(r.notes, fmt.Sprintf(format, a...))
 }
 
-func (r *recorder) article(block []string) {
+func (r *recorder) article(block []string, wire []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.articles = append(r.articles, block)
+	r.articleRaw = append(r.articleRaw, wire)
 }
 
-func readLine(r *bufio.Reader) (string, error) {
-	s, err := r.ReadString('\n')
+// The limits of what a raw connection reads (a client or a DEFLATE bomb cannot fill the memory):
+// one line, one dot block, and everything read on one connection. A connection that goes over
+// one is closed and a note says so.
+const (
+	maxLine  = 1 << 20
+	maxBlock = 16 << 20
+	maxConn  = 64 << 20
+)
+
+var errTooLong = errors.New("line longer than the limit")
+
+// rawConn is one connection of mode raw.
+type rawConn struct {
+	c        *fakeserver.Conn
+	rec      *recorder
+	deadline time.Duration // Options.Deadline: bounds every wait, read and write
+	conn     net.Conn
+	r        *bufio.Reader
+	total    int // bytes read so far
+}
+
+func (rc *rawConn) tcp() *net.TCPConn {
+	nc := rc.conn
+	if t, ok := nc.(*tls.Conn); ok {
+		nc = t.NetConn()
+	}
+	t, _ := nc.(*net.TCPConn)
+	return t
+}
+
+// readWire reads one line with its line end. A timed read waits at most the Deadline for it
+// (the read of a line the script expects); an untimed one waits for the client (hang, the lines
+// after the script) and ends with the connection. A line over maxLine or a connection over
+// maxConn ends the read with a note.
+func (rc *rawConn) readWire(timed bool) ([]byte, error) {
+	if timed {
+		_ = rc.conn.SetReadDeadline(time.Now().Add(rc.deadline))
+	} else {
+		_ = rc.conn.SetReadDeadline(time.Time{})
+	}
+	var line []byte
+	for {
+		part, err := rc.r.ReadSlice('\n')
+		line = append(line, part...)
+		rc.total += len(part)
+		switch {
+		case err == nil:
+			if rc.total > maxConn {
+				rc.rec.note("read: over %d bytes on one connection, closed", maxConn)
+				return line, errTooLong
+			}
+			return line, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			rc.rec.note("read: nothing from the client within the Deadline (%v)", rc.deadline)
+			return line, err
+		default:
+			var ce flate.CorruptInputError
+			if errors.As(err, &ce) {
+				rc.rec.note("read: %v", err)
+			}
+			return line, err
+		}
+		if len(line) > maxLine {
+			rc.rec.note("read: a line over %d bytes, connection closed", maxLine)
+			return line, errTooLong
+		}
+		if rc.total > maxConn {
+			rc.rec.note("read: over %d bytes on one connection, closed", maxConn)
+			return line, errTooLong
+		}
+	}
+}
+
+// readLine is readWire without the line end.
+func (rc *rawConn) readLine(timed bool) (string, error) {
+	w, err := rc.readWire(timed)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(s, "\r\n"), nil
+	return strings.TrimRight(string(w), "\r\n"), nil
 }
 
-// writeChunk writes data after the chunk's Gap, in one write or in pieces of Split bytes with
-// SplitGap between them.
-func writeChunk(w io.Writer, ch rawChunk) error {
+// write writes data within the Deadline.
+func (rc *rawConn) write(data []byte) error {
+	_ = rc.conn.SetWriteDeadline(time.Now().Add(rc.deadline))
+	_, err := rc.conn.Write(data)
+	return err
+}
+
+// writeChunk writes the chunk after its Gap, in one write or in pieces of Split bytes with
+// SplitGap between them. The pauses end when the server closes or at the Deadline.
+func (rc *rawConn) writeChunk(ch rawChunk) error {
 	data, err := ch.bytes()
 	if err != nil {
 		return err
 	}
-	time.Sleep(ch.Gap)
+	if ch.Gap > 0 && !rc.c.Sleep(ch.Gap) {
+		return errors.New("server closed")
+	}
 	if ch.Split <= 0 {
-		_, err = w.Write(data)
-		return err
+		return rc.write(data)
 	}
 	for i := 0; i < len(data); i += ch.Split {
-		if i > 0 {
-			time.Sleep(ch.SplitGap)
+		if i > 0 && ch.SplitGap > 0 && !rc.c.Sleep(ch.SplitGap) {
+			return errors.New("server closed")
 		}
-		if _, err = w.Write(data[i:min(i+ch.Split, len(data))]); err != nil {
+		if err := rc.write(data[i:min(i+ch.Split, len(data))]); err != nil {
 			return err
 		}
 	}
@@ -92,7 +178,7 @@ func writeChunk(w io.Writer, ch rawChunk) error {
 // rawHandler runs the steps on every connection, on Conn.Raw(). After the last step it records
 // every line and answers it with a 500, so a client that sends more than the script expects
 // shows up in mismatches.
-func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config) func(*fakeserver.Conn) {
+func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline time.Duration) func(*fakeserver.Conn) {
 	res := make([]*regexp.Regexp, len(steps))
 	for i, st := range steps {
 		if st.Expect != nil {
@@ -100,24 +186,15 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config) func(*fakese
 		}
 	}
 	return func(c *fakeserver.Conn) {
-		conn := c.Raw()
-		tcp := func() *net.TCPConn {
-			nc := conn
-			if t, ok := nc.(*tls.Conn); ok {
-				nc = t.NetConn()
-			}
-			t, _ := nc.(*net.TCPConn)
-			return t
-		}
-		if t := tcp(); t != nil {
+		rc := &rawConn{c: c, rec: rec, deadline: deadline, conn: c.Raw()}
+		if t := rc.tcp(); t != nil {
 			_ = t.SetNoDelay(true)
 		}
-		r := bufio.NewReader(conn)
-		var w io.Writer = conn
+		rc.r = bufio.NewReader(rc.conn)
 		for i, st := range steps {
 			if res[i] != nil {
 				for {
-					line, err := readLine(r)
+					line, err := rc.readLine(true)
 					if err != nil {
 						return
 					}
@@ -126,49 +203,62 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config) func(*fakese
 						break
 					}
 					rec.mismatch(line)
-					fmt.Fprintf(w, "500 unexpected %s\r\n", line)
+					_ = rc.write([]byte("500 unexpected " + line + "\r\n"))
 				}
 			}
 			if st.ReadDot {
 				var block []string
+				var wire []byte
 				for {
-					line, err := readLine(r)
+					w, err := rc.readWire(true)
 					if err != nil {
-						rec.note("dot block read: %v after %d lines", err, len(block))
+						if !errors.Is(err, errTooLong) && !errors.Is(err, os.ErrDeadlineExceeded) {
+							rec.note("dot block read: %v after %d lines", err, len(block))
+						}
 						return
 					}
+					line := strings.TrimRight(string(w), "\r\n")
 					block = append(block, line)
+					if line != "." {
+						wire = append(wire, w...)
+					}
+					if len(wire) > maxBlock {
+						rec.note("dot block: over %d bytes, connection closed", maxBlock)
+						return
+					}
 					if line == "." || (st.DotMax > 0 && len(block) >= st.DotMax) {
 						break
 					}
 				}
-				rec.article(block)
+				rec.article(block, wire)
 			}
 			for _, ch := range st.Send {
-				if err := writeChunk(w, ch); err != nil {
+				if err := rc.writeChunk(ch); err != nil {
 					rec.note("write: %v", err)
 					return
 				}
 			}
-			time.Sleep(st.Sleep)
+			if st.Sleep > 0 && !c.Sleep(st.Sleep) {
+				return
+			}
 			switch st.Then {
 			case "close":
 				return
 			case "rst":
-				if t := tcp(); t != nil {
+				if t := rc.tcp(); t != nil {
 					_ = t.SetLinger(0)
 				}
 				return
 			case "hang":
-				for {
-					line, err := readLine(r)
+				for { // holds the connection: no read deadline
+					line, err := rc.readLine(false)
 					if err != nil {
 						return
 					}
 					rec.line(line)
 				}
 			case "starttls":
-				if n := r.Buffered(); n > 0 {
+				if n := rc.r.Buffered(); n > 0 {
 					rec.note("starttls: %d bytes of plaintext pipelined after the STARTTLS line", n)
 					return
 				}
@@ -177,21 +267,20 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config) func(*fakese
 					rec.note("starttls handshake: %v", err)
 					return
 				}
-				conn = c.Raw()
-				r = bufio.NewReader(conn)
-				w = conn
+				rc.conn = c.Raw()
+				rc.r = bufio.NewReader(rc.conn)
 			case "inflate":
-				r = bufio.NewReader(flate.NewReader(r))
+				rc.r = bufio.NewReader(flate.NewReader(rc.r))
 			}
 		}
-		for {
-			line, err := readLine(r)
+		for { // the lines after the script: no read deadline either
+			line, err := rc.readLine(false)
 			if err != nil {
 				return
 			}
 			rec.line(line)
 			rec.mismatch(line)
-			fmt.Fprintf(w, "500 unexpected %s\r\n", line)
+			_ = rc.write([]byte("500 unexpected " + line + "\r\n"))
 		}
 	}
 }

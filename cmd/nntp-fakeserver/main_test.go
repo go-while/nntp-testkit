@@ -7,11 +7,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -554,7 +556,8 @@ func TestSummaryShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{"lines": "[]", "mismatches": "[]", "articles": "[]", "notes": "[]", "accepted": "0",
-		"counts": "{}", "tls_handshakes": "0", "tls_failed": "0", "server_names": "[]"}
+		"counts": "{}", "tls_handshakes": "0", "tls_failed": "0", "server_names": "[]",
+		"lines_b64": "[]", "mismatches_b64": "[]", "articles_raw": "[]", "max_open": "0", "closed": "0"}
 	for k, v := range want {
 		if string(m[k]) != v {
 			t.Errorf("%s = %s, want %s", k, m[k], v)
@@ -592,6 +595,10 @@ func TestBadConfig(t *testing.T) {
 		{"trailing", `{"Mode": "store"} {}`, "invalid character"},
 		{"duration-string", `{"Mode": "store", "Options": {"Faults": {"Delay": {"DATE": "2s"}}}}`, `config.Options.Faults.Delay["DATE"]: want a number of milliseconds`},
 		{"wrong-type", `{"Mode": "store", "Options": {"Faults": {"CloseAfter": "x"}}}`, "config.Options.Faults.CloseAfter: want int"},
+		{"lower-case-command", `{"Mode": "store", "Options": {"Faults": {"Delay": {"date": 2000}}}}`, `config.Options.Faults.Delay["date"]: command names are upper case ("DATE")`},
+		{"lower-case-drop", `{"Mode": "store", "Options": {"Faults": {"DropInMultiline": {"Article": 1}}}}`, `DropInMultiline["Article"]`},
+		{"both-body-forms", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "Body": ["x"], "BodyB64": ["eA=="]}]}}`, "Articles[0].Body: the text form and the B64 form are both set"},
+		{"bad-body-b64", `{"Mode": "store", "Store": {"Articles": [{"Group": "a", "BodyB64": ["!"]}]}}`, "Articles[0].Body: B64[0]"},
 		{"handler", `{"Mode": "store", "Options": {"Handler": {}}}`, "config.Options.Handler: cannot be set from JSON"},
 		{"store-object", `{"Mode": "store", "Options": {"Store": {}}}`, "config.Options.Store: cannot be set from JSON"},
 		{"peer-in-store", `{"Mode": "store", "PeerOptions": {"User": "u"}}`, `config.PeerOptions is not used in mode "store"`},
@@ -660,12 +667,18 @@ func sample(t reflect.Type) (string, bool) {
 		return "true", true
 	case reflect.String:
 		return `"x"`, true
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return "1", true
+	case reflect.Float32, reflect.Float64:
+		return "1.5", true
 	case reflect.Map:
 		v, ok := sample(t.Elem())
 		return `{"K": ` + v + `}`, ok && t.Key().Kind() == reflect.String
 	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return `"AAE="`, true // []byte is base64
+		}
 		v, ok := sample(t.Elem())
 		return `[` + v + `]`, ok
 	case reflect.Pointer:
@@ -731,5 +744,245 @@ func TestDurations(t *testing.T) {
 	}
 	if f.Delay["A"] != 2500*time.Millisecond || f.Delay["B"] != 500*time.Microsecond || f.Drip["C"] != time.Millisecond {
 		t.Errorf("%v %v", f.Delay, f.Drip)
+	}
+}
+
+func b64(t *testing.T, s string) string {
+	t.Helper()
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestBinarySafe: bytes that are not UTF-8 come back exactly in lines_b64 and articles_raw (the
+// plain fields hold U+FFFD), and a Store serves them from HeadersB64 and BodyB64.
+func TestBinarySafe(t *testing.T) {
+	const art = "Subject: caf\xe9\r\n\r\n\xff\xfe\r\n..dot\r\n"
+	p := startProc(t, `{"Mode": "peer"}`)
+	c := p.dial()
+	cmd(t, c, 335, "IHAVE <bin@x>")
+	if err := c.Send(art + ".\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, err := c.ReadStatus(); err != nil || code != 235 {
+		t.Fatalf("%d %v", code, err)
+	}
+	c.Send("XYZ caf\xe9\r\n")
+	cmd(t, c, 500, "DATE")
+	s, _ := p.finish()
+	if len(s.ArticlesRaw) != 1 || b64(t, s.ArticlesRaw[0]) != art {
+		t.Errorf("articles_raw %q", s.ArticlesRaw)
+	}
+	if !strings.Contains(s.Articles[0][0], "\ufffd") {
+		t.Errorf("the plain form is lossy by nature: %q", s.Articles[0])
+	}
+	if len(s.LinesB64) != len(s.Lines) || b64(t, s.LinesB64[2]) != "XYZ caf\xe9" {
+		t.Errorf("lines_b64 %q lines %q", s.LinesB64, s.Lines)
+	}
+
+	// Store: bytes in, bytes out.
+	p = startProc(t, `{"Mode": "store", "Store": {"Articles": [{"Group": "a.b", "Number": 1, "MessageID": "<s@x>",
+	  "HeadersB64": ["`+base64.StdEncoding.EncodeToString([]byte("Subject: caf\xe9"))+`"],
+	  "BodyB64": ["`+base64.StdEncoding.EncodeToString([]byte("\xff\xfe"))+`"]}]}}`)
+	c = p.dial()
+	cmd(t, c, 222, "BODY <s@x>")
+	lines, err := c.TryReadDotLines()
+	if err != nil || len(lines) != 1 || lines[0] != "\xff\xfe" {
+		t.Errorf("BODY: %q %v", lines, err)
+	}
+	cmd(t, c, 221, "HEAD <s@x>")
+	lines, _ = c.TryReadDotLines()
+	if !slices.Contains(lines, "Subject: caf\xe9") {
+		t.Errorf("HEAD: %q", lines)
+	}
+	p.finish()
+
+	// Raw mode: the dot block as the bytes were sent.
+	p = startProc(t, `{"Mode": "raw", "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "POST", "ReadDot": true, "Send": [{"Text": "240 ok\r\n"}]}]}`)
+	c = p.dial()
+	c.Send("POST\r\n\xe9\xff\r\n.\r\n")
+	if code, _, err := c.ReadStatus(); err != nil || code != 240 {
+		t.Fatalf("%d %v", code, err)
+	}
+	s, _ = p.finish()
+	if len(s.ArticlesRaw) != 1 || b64(t, s.ArticlesRaw[0]) != "\xe9\xff\r\n" {
+		t.Errorf("raw articles_raw %q", s.ArticlesRaw)
+	}
+}
+
+// TestRawBoundedByDeadline: a raw step that sleeps for a minute ends with the server, and a
+// client that says nothing is let go after the Deadline.
+func TestRawBoundedByDeadline(t *testing.T) {
+	p := startProc(t, `{"Mode": "raw", "Options": {"Deadline": 600000}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]},
+	  {"Expect": "X", "Sleep": 60000, "Send": [{"Text": "1 a", "Gap": 60000, "Split": 1, "SplitGap": 60000}]}]}`)
+	c := p.dial()
+	c.Send("X\r\n")
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	p.finish()
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("shutdown took %v while a step slept", d)
+	}
+
+	p = startProc(t, `{"Mode": "raw", "Options": {"Deadline": 200}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X"}]}`)
+	c = p.dial()
+	if _, err := c.ReadLine(); !errors.Is(err, io.EOF) {
+		t.Errorf("a silent client was not let go: %v", err)
+	}
+	s, _ := p.finish()
+	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "within the Deadline") {
+		t.Errorf("notes %q", s.Notes)
+	}
+}
+
+// TestRawLineLimit: a line over 1 MiB closes the connection and is noted, not held in memory.
+func TestRawLineLimit(t *testing.T) {
+	p := startProc(t, `{"Mode": "raw", "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X"}]}`)
+	c := p.dial()
+	go c.Send(strings.Repeat("a", maxLine+1<<16)) // the write may fail when the server closes
+	if _, err := c.ReadLine(); err == nil {
+		t.Error("the connection stayed open")
+	}
+	s, _ := p.finish()
+	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over") || len(s.Lines) != 0 {
+		t.Errorf("notes %q lines %d", s.Notes, len(s.Lines))
+	}
+}
+
+// TestEmptySections: sections that a caller writes empty are fine in any mode.
+func TestEmptySections(t *testing.T) {
+	for _, cfg := range []string{
+		`{"Mode": "raw", "Options": {"Faults": {"Delay": {}}}}`,
+		`{"Mode": "store", "Raw": [], "PeerOptions": {"Have": {}}, "Options": {"Script": []}}`,
+		`{"Mode": "peer", "Store": {"Groups": [], "Articles": []}, "Options": {"StoreOpts": {"OverviewFmt": []}}}`,
+		`{"Mode": "store", "Options": {"Faults": {"OverrideLine": {"article 2": ["430 no"]}}}}`, // the kit normalises
+	} {
+		if _, err := parseConfig([]byte(cfg), &tls.Config{}); err != nil {
+			t.Errorf("%s: %v", cfg, err)
+		}
+	}
+	for _, cfg := range []string{
+		`{"Mode": "store", "Options": {"StoreOpts": {"StartTLS": {}}}, "Raw": [{}]}`,
+		`{"Mode": "raw", "Options": {"StoreOpts": {"StartTLS": {}}}}`, // a StartTLS object is not empty
+	} {
+		if _, err := parseConfig([]byte(cfg), &tls.Config{}); err == nil {
+			t.Errorf("%s: accepted", cfg)
+		}
+	}
+}
+
+// TestStartTLSConfigOff: StartTLS {} offers STARTTLS, "Config": false does not, and the
+// certificate of the program is the default only when Config is not named.
+func TestStartTLSConfigOff(t *testing.T) {
+	for cfg, want := range map[string]int{
+		`{"Mode": "store", "Options": {"StoreOpts": {"StartTLS": {}}}}`:                     382,
+		`{"Mode": "store", "Options": {"StoreOpts": {"StartTLS": {"Config": true}}}}`:       382,
+		`{"Mode": "store", "Options": {"StoreOpts": {"StartTLS": {"Config": false}}}}`:      500,
+		`{"Mode": "peer", "PeerOptions": {"StartTLS": {"Config": false, "Refuse": "502"}}}`: 500,
+	} {
+		p := startProc(t, cfg)
+		c := p.dial()
+		if code, line, err := c.TryCmd("STARTTLS"); err != nil || code != want {
+			t.Errorf("%s: STARTTLS %d %q %v, want %d", cfg, code, line, err, want)
+		}
+		p.finish()
+	}
+}
+
+// TestCounters: max_open and closed, and ca_pem in the ready line.
+func TestCounters(t *testing.T) {
+	p := startProc(t, `{"Mode": "store"}`)
+	pem, err := os.ReadFile(p.ready.CA)
+	if err != nil || p.ready.CAPEM == "" || p.ready.CAPEM != string(pem) {
+		t.Errorf("ca_pem %q, file %q, %v", p.ready.CAPEM, pem, err)
+	}
+	a, b := p.dial(), p.dial()
+	cmd(t, a, 111, "DATE")
+	cmd(t, b, 111, "DATE")
+	a.Close()
+	b.Close()
+	s, _ := p.finish()
+	if s.MaxOpen != 2 || s.Closed != 2 || s.Accepted != 2 {
+		t.Errorf("max_open %d closed %d accepted %d", s.MaxOpen, s.Closed, s.Accepted)
+	}
+}
+
+// TestIsEmpty: what counts as an empty section.
+func TestIsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		v    any
+		want bool
+	}{
+		{fakeserver.Faults{}, true},
+		{fakeserver.Faults{Delay: map[string]time.Duration{}}, true},
+		{fakeserver.Faults{Delay: map[string]time.Duration{"A": 0}}, false},
+		{fakeserver.StoreOptions{StartTLS: &fakeserver.StartTLSOptions{}}, false},
+		{[]rawStep{}, true},
+		{[]rawStep{{}}, false},
+	} {
+		if got := isEmpty(reflect.ValueOf(tc.v)); got != tc.want {
+			t.Errorf("isEmpty(%#v) = %v", tc.v, got)
+		}
+	}
+}
+
+// TestBytesAreBase64: a []byte field takes a base64 string, as in encoding/json.
+func TestBytesAreBase64(t *testing.T) {
+	var v struct{ B []byte }
+	d := &decoder{}
+	if err := d.decode(reflect.ValueOf(&v).Elem(), json.RawMessage(`{"B": "AAEC"}`), "v"); err != nil || !bytes.Equal(v.B, []byte{0, 1, 2}) {
+		t.Errorf("%v %v", v.B, err)
+	}
+	if err := d.decode(reflect.ValueOf(&v).Elem(), json.RawMessage(`{"B": [0, 1]}`), "v"); err == nil {
+		t.Error("an array was taken for bytes")
+	}
+}
+
+// TestMain lets TestSignal run the real main in a child process.
+func TestMain(m *testing.M) {
+	if cfg := os.Getenv("NNTP_FAKESERVER_TEST_CONFIG"); cfg != "" {
+		os.Args = []string{"nntp-fakeserver", cfg}
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// TestMainSignal: the real main, as a process: SIGTERM ends the server with its summary and exit
+// status 0, and so does EOF on stdin.
+func TestMainSignal(t *testing.T) {
+	for _, how := range []string{"SIGTERM", "SIGINT", "EOF"} {
+		t.Run(how, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0])
+			cmd.Env = append(os.Environ(), "NNTP_FAKESERVER_TEST_CONFIG="+writeConfig(t, `{"Mode": "store", "Options": {"RawStall": true}}`))
+			in, _ := cmd.StdinPipe()
+			out, _ := cmd.StdoutPipe()
+			var errb bytes.Buffer
+			cmd.Stderr = &errb
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			br := bufio.NewReader(out)
+			if _, err := br.ReadString('\n'); err != nil {
+				t.Fatalf("%v: %s", err, errb.String())
+			}
+			switch how {
+			case "SIGTERM":
+				cmd.Process.Signal(syscall.SIGTERM)
+			case "SIGINT":
+				cmd.Process.Signal(syscall.SIGINT)
+			default:
+				in.Close()
+			}
+			line, err := br.ReadString('\n')
+			if err != nil || !strings.Contains(line, `"accepted":0`) {
+				t.Errorf("summary %q %v", line, err)
+			}
+			if err := cmd.Wait(); err != nil {
+				t.Errorf("exit: %v %s", err, errb.String())
+			}
+		})
 	}
 }

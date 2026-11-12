@@ -19,9 +19,11 @@ import (
 )
 
 // config is the JSON document the program reads. Every key is the Go field name of the kit type
-// (or of the types below), matched exactly; an unknown key is an error. A field of a kit type
-// that is added later can be used from JSON at once, because the decoder walks the types
-// (decodeValue), it does not mirror them.
+// (or of the types below), matched exactly; an unknown key is an error. A field added later to
+// Options, StoreOptions, PeerOptions, Faults or StartTLSOptions can be used from JSON at once,
+// because the decoder walks those types (decodeValue) and does not mirror them. The types
+// below (storeConfig, groupConfig, articleConfig, rawStep) are written by hand: a new field of
+// fakeserver.Article or Group needs a line there.
 type config struct {
 	Mode string // "store", "peer", "script" or "raw"
 
@@ -51,13 +53,15 @@ type groupConfig struct {
 // articleConfig is one fakeserver.Article filed in Group; a zero Date and Arrived default to
 // 2020-01-02T03:04:05Z (so that replies are the same on every run).
 type articleConfig struct {
-	Group     string
-	Number    int64
-	MessageID string
-	Headers   []string
-	Body      []string
-	Date      time.Time // RFC 3339
-	Arrived   time.Time
+	Group      string
+	Number     int64
+	MessageID  string
+	Headers    []string
+	Body       []string
+	HeadersB64 []string  // instead of Headers: each line in base64, for bytes that are not UTF-8
+	BodyB64    []string  // instead of Body, the same
+	Date       time.Time // RFC 3339
+	Arrived    time.Time
 }
 
 // rawStep is one step of mode raw: read one client line (unless Expect is null or absent) that
@@ -104,11 +108,6 @@ func parseConfig(data []byte, tlsCfg *tls.Config) (*config, error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
-	for _, p := range []*fakeserver.StartTLSOptions{cfg.Options.StoreOpts.StartTLS, cfg.PeerOptions.StartTLS} {
-		if p != nil && p.Config == nil {
-			p.Config = tlsCfg
-		}
-	}
 	return &cfg, nil
 }
 
@@ -130,9 +129,15 @@ func (cfg *config) check() error {
 		{"Raw", reflect.ValueOf(&cfg.Raw).Elem(), "raw"},
 	}
 	for _, p := range parts {
-		if !p.v.IsZero() && !strings.Contains(p.in, cfg.Mode) {
+		if !p.v.IsValid() { // a kit field was renamed or removed: this program needs the change
+			return fmt.Errorf("internal error: config.%s no longer exists in the kit", p.name)
+		}
+		if !isEmpty(p.v) && !strings.Contains(p.in, cfg.Mode) {
 			return fmt.Errorf("config.%s is not used in mode %q (only in %s)", p.name, cfg.Mode, p.in)
 		}
+	}
+	if err := checkFaults(cfg.Options.Faults); err != nil {
+		return err
 	}
 	for i, st := range cfg.Options.Script {
 		if _, err := regexp.Compile("^(?:" + st.Expect + ")$"); err != nil {
@@ -154,6 +159,43 @@ func (cfg *config) check() error {
 		for j, ch := range st.Send {
 			if _, err := ch.bytes(); err != nil {
 				return fmt.Errorf("config.Raw[%d].Send[%d]: %w", i, j, err)
+			}
+		}
+	}
+	return nil
+}
+
+// isEmpty reports whether v holds nothing a section would use: zero values, nil pointers, and
+// maps and slices without elements (an empty section that a caller always writes is fine). A
+// non-nil pointer is not empty, whatever it points to: "StartTLS": {} turns STARTTLS on.
+func isEmpty(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Map, reflect.Slice:
+		return v.Len() == 0
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if !isEmpty(v.Field(i)) {
+				return false
+			}
+		}
+		return true
+	}
+	return v.IsZero()
+}
+
+// checkFaults rejects a command key of Faults that is not upper case: the kit looks commands up
+// upper-cased, so {"Delay": {"date": 100}} would never fire. OverrideLine is exempt, the kit
+// normalises its keys (whole client lines, "article 2" is fine).
+func checkFaults(f fakeserver.Faults) error {
+	v := reflect.ValueOf(f)
+	for i := range v.NumField() {
+		name := v.Type().Field(i).Name
+		if v.Field(i).Kind() != reflect.Map || name == "OverrideLine" || v.Type().Field(i).Type.Key().Kind() != reflect.String {
+			continue
+		}
+		for _, k := range v.Field(i).MapKeys() {
+			if key := k.String(); key != strings.ToUpper(key) {
+				return fmt.Errorf("config.Options.Faults.%s[%q]: command names are upper case (%q)", name, key, strings.ToUpper(key))
 			}
 		}
 	}
@@ -202,7 +244,15 @@ func buildStore(sc storeConfig) (st *fakeserver.Store, err error) {
 		if a.Group == "" {
 			return nil, fmt.Errorf("config.Store.Articles[%d].Group is empty", i)
 		}
-		art := fakeserver.Article{Number: a.Number, MessageID: a.MessageID, Headers: a.Headers, Body: a.Body, Date: a.Date, Arrived: a.Arrived}
+		hdr, err := lines(a.Headers, a.HeadersB64)
+		if err != nil {
+			return nil, fmt.Errorf("config.Store.Articles[%d].Headers: %w", i, err)
+		}
+		body, err := lines(a.Body, a.BodyB64)
+		if err != nil {
+			return nil, fmt.Errorf("config.Store.Articles[%d].Body: %w", i, err)
+		}
+		art := fakeserver.Article{Number: a.Number, MessageID: a.MessageID, Headers: hdr, Body: body, Date: a.Date, Arrived: a.Arrived}
 		if art.Date.IsZero() {
 			art.Date = day(3, 4, 5, 2)
 		}
@@ -212,6 +262,25 @@ func buildStore(sc storeConfig) (st *fakeserver.Store, err error) {
 		st.AddArticle(a.Group, art)
 	}
 	return st, nil
+}
+
+// lines returns the text lines, or the lines of the base64 form (not both).
+func lines(text, b64 []string) ([]string, error) {
+	if len(b64) == 0 {
+		return text, nil
+	}
+	if len(text) > 0 {
+		return nil, errors.New("the text form and the B64 form are both set")
+	}
+	out := make([]string, len(b64))
+	for i, l := range b64 {
+		b, err := base64.StdEncoding.DecodeString(l)
+		if err != nil {
+			return nil, fmt.Errorf("B64[%d]: %w", i, err)
+		}
+		out[i] = string(b)
+	}
+	return out, nil
 }
 
 // decoder fills Go values from JSON by walking their types.
@@ -229,6 +298,7 @@ type decoder struct {
 var (
 	durationType    = reflect.TypeFor[time.Duration]()
 	tlsConfigType   = reflect.TypeFor[tls.Config]()
+	startTLSType    = reflect.TypeFor[fakeserver.StartTLSOptions]()
 	unmarshalerType = reflect.TypeFor[json.Unmarshaler]()
 )
 
@@ -310,6 +380,12 @@ func (d *decoder) decodeValue(dst reflect.Value, raw json.RawMessage, path strin
 		}
 		dst.Set(out)
 	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 { // []byte is a base64 string, as in encoding/json
+			if err := json.Unmarshal(raw, dst.Addr().Interface()); err != nil {
+				return fmt.Errorf("want a base64 string")
+			}
+			return nil
+		}
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err != nil {
 			return fmt.Errorf("want an array")
@@ -347,6 +423,12 @@ func (d *decoder) decodeStruct(dst reflect.Value, raw json.RawMessage, path stri
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return fmt.Errorf("want an object")
+	}
+	if t == startTLSType {
+		// STARTTLS needs a config: this program's, unless "Config": false switches it off.
+		if _, set := m["Config"]; !set {
+			dst.FieldByName("Config").Set(reflect.ValueOf(d.tls))
+		}
 	}
 	for _, k := range sortedKeys(m) {
 		f, ok := t.FieldByName(k)

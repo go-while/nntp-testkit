@@ -5,15 +5,17 @@
 //
 // Protocol with the caller: once the server listens, one line of JSON goes to stdout,
 //
-//	{"addr":"127.0.0.1:41233","host":"127.0.0.1","port":41233,"ca":"/tmp/nntp-fakeserver-1/ca.pem"}
+//	{"addr":"127.0.0.1:41233","host":"127.0.0.1","port":41233,"ca":"/tmp/nntp-fakeserver-1/ca.pem","ca_pem":"-----BEGIN CERTIFICATE-----\n..."}
 //
 // ca is a PEM file that holds the certificate of the server (it is self-signed, valid for
-// localhost, 127.0.0.1 and ::1): a client verifies implicit TLS and STARTTLS against it. The
+// localhost, 127.0.0.1 and ::1), ca_pem its text: a client verifies implicit TLS and STARTTLS
+// against it. The
 // server then runs until stdin reaches end of file (or the process gets SIGINT or SIGTERM). It
 // prints one more line of JSON, the summary, removes its temporary directory and exits 0:
 //
 //	{"lines":[...],"mismatches":[...],"articles":[[...]],"notes":[...],"accepted":1,
-//	 "counts":{"GROUP":1},"tls_handshakes":0,"tls_failed":0,"server_names":[]}
+//	 "counts":{"GROUP":1},"tls_handshakes":0,"tls_failed":0,"server_names":[],
+//	 "lines_b64":[...],"mismatches_b64":[...],"articles_raw":[...],"max_open":1,"closed":1}
 //
 // lines are the client lines of all connections, mismatches those that did not fit (raw mode,
 // script mode), articles the dot blocks received (POST, IHAVE, TAKETHIS, raw ReadDot), notes
@@ -21,6 +23,11 @@
 // lines per upper-cased command, tls_handshakes and tls_failed the TLS handshakes (implicit and
 // STARTTLS) and server_names the SNI of every ClientHello ("" when none). Exit status 2 and a
 // message on stderr for a bad config or flag, 1 for another failure.
+//
+// A JSON string is UTF-8, so lines, mismatches and articles show any other byte (8-bit text,
+// yEnc) as U+FFFD. lines_b64 and mismatches_b64 hold the same lines, articles_raw the blocks
+// (the exact bytes up to the "." line, still dot-stuffed, one entry per block), all in base64
+// and exact. max_open is the most connections open at once, closed the number that ended.
 //
 // The config is one JSON object. Its keys are the Go field names of the kit types, matched
 // exactly, and a key that does not exist is an error (a typo fails at once). Durations are
@@ -37,7 +44,9 @@
 // MaxConnsGreeting. A StartTLS that is {} (or has only the knobs Refuse, HideCapability,
 // AuthNeedsTLS, CloseAfterHandshake) offers STARTTLS with the same certificate. Functions,
 // channels and the Store itself cannot be set from JSON. A part that the mode does not use is
-// an error.
+// an error, unless it is empty ({} or []). "StartTLS": {"Config": false} switches STARTTLS off
+// again. The command names that key the maps of Faults are upper case (a lower case key is an
+// error: it would never fire), except OverrideLine, which takes whole client lines.
 //
 // Store mode, with a fault and STARTTLS:
 //
@@ -53,7 +62,10 @@
 //
 // Groups take Name, Description, Created (RFC 3339, default 2020-01-01) and NoPosting;
 // Articles take Group, Number, MessageID, Headers, Body (lines, no CRLF, not dot-stuffed), Date
-// and Arrived (RFC 3339, default 2020-01-02T03:04:05Z).
+// and Arrived (RFC 3339, default 2020-01-02T03:04:05Z). HeadersB64 and BodyB64 are Headers and
+// Body with every line in base64, for bytes that are not UTF-8 (use one form of each). The
+// replies of Faults (Override and so on) are UTF-8 only; raw mode with B64 chunks writes any
+// bytes.
 //
 // Peer mode:
 //
@@ -72,7 +84,10 @@
 // through raw DEFLATE from now on; the compressed replies are in the script). A chunk is Text
 // (UTF-8) or B64 (base64), written after Gap ms, in one write or in pieces of Split bytes with
 // SplitGap ms between them. A line that does not match gets "500 unexpected ..." and is a
-// mismatch, as is every line after the last step. The script writes the greeting itself (a first
+// mismatch, as is every line after the last step. Pauses, reads of an expected line and
+// writes are bounded by Options.Deadline and end when the server closes (hang and the lines
+// after the script wait for the client without a limit); a line over 1 MiB, a dot block over 16
+// MiB or more than 64 MiB on one connection close the connection and add a note. The script writes the greeting itself (a first
 // step with Expect null).
 //
 //	{"Mode": "raw", "Raw": [
@@ -88,6 +103,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -107,10 +123,11 @@ const defaultDeadline = 10 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
-	stop()
-	os.Exit(code)
+	go func() { // after the first signal the next one kills the process, as it should while shutting down
+		<-ctx.Done()
+		stop()
+	}()
+	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // ready is the line on stdout when the server listens.
@@ -119,6 +136,8 @@ type ready struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
 	CA   string `json:"ca"`
+	// CAPEM is the text of the CA file, for a caller that wants the certificate in memory.
+	CAPEM string `json:"ca_pem"`
 }
 
 // summary is the line on stdout when the server has stopped.
@@ -132,6 +151,15 @@ type summary struct {
 	TLSHandshakes int            `json:"tls_handshakes"`
 	TLSFailed     int            `json:"tls_failed"`
 	ServerNames   []string       `json:"server_names"`
+
+	// The lossless forms: JSON strings are UTF-8, so lines, mismatches and articles hold U+FFFD
+	// for any other byte. These hold the bytes as sent, in base64.
+	LinesB64      []string `json:"lines_b64"`      // lines, one base64 string per line
+	MismatchesB64 []string `json:"mismatches_b64"` // mismatches
+	ArticlesRaw   []string `json:"articles_raw"`   // per block: the exact bytes up to the "." line, still dot-stuffed
+
+	MaxOpen int `json:"max_open"` // the most connections open at once
+	Closed  int `json:"closed"`   // connections that have ended
 }
 
 // run is main without os.Exit: it serves until stdin reaches end of file or ctx is done, and
@@ -200,7 +228,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	out := json.NewEncoder(stdout)
 	out.SetEscapeHTML(false)
-	if err := out.Encode(ready{Addr: srv.Addr(), Host: srv.Host(), Port: srv.Port(), CA: files.CA}); err != nil {
+	if err := out.Encode(ready{Addr: srv.Addr(), Host: srv.Host(), Port: srv.Port(), CA: files.CA, CAPEM: string(leaf.CAPEM)}); err != nil {
 		return fail(1, "stdout: %v", err)
 	}
 
@@ -221,9 +249,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		Lines: srv.Lines(), Mismatches: srv.Mismatches(), Articles: srv.Articles(), Notes: rec.notes,
 		Accepted: srv.Accepted(), Counts: srv.Counts(),
 		TLSHandshakes: srv.TLSHandshakes(), TLSFailed: srv.TLSFailed(), ServerNames: srv.TLSServerNames(),
+		MaxOpen: srv.MaxOpen(), Closed: srv.Closed(),
 	}
+	raws := srv.ArticlesRaw()
 	if cfg.Mode == "raw" {
 		s.Lines, s.Mismatches, s.Articles, s.Counts = rec.lines, rec.mismatches, rec.articles, rec.counts
+		raws = rec.articleRaw
+	}
+	s.LinesB64, s.MismatchesB64, s.ArticlesRaw = b64s(s.Lines), b64s(s.Mismatches), []string{}
+	for _, b := range raws {
+		s.ArticlesRaw = append(s.ArticlesRaw, base64.StdEncoding.EncodeToString(b))
 	}
 	s.Lines, s.Mismatches, s.Notes, s.ServerNames = nz(s.Lines), nz(s.Mismatches), nz(s.Notes), nz(s.ServerNames)
 	if s.Articles == nil {
@@ -262,10 +297,19 @@ func start(cfg *config, store *fakeserver.Store, listen string, tlsCfg *tls.Conf
 		srv, err = fakeserver.Start(o)
 	case "raw":
 		o.NoGreeting = true // the script writes the greeting
-		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg)
+		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg, o.Deadline)
 		srv, err = fakeserver.Start(o)
 	}
 	return srv, rec, err
+}
+
+// b64s returns the strings in base64 (never nil).
+func b64s(s []string) []string {
+	out := make([]string, len(s))
+	for i, l := range s {
+		out[i] = base64.StdEncoding.EncodeToString([]byte(l))
+	}
+	return out
 }
 
 func nz(s []string) []string {
