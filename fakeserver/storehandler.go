@@ -744,7 +744,7 @@ func (h *storeConn) post(line string) bool {
 	if err != nil {
 		return false
 	}
-	return h.c.WriteLines(h.file(wire)) == nil
+	return h.c.writeFinal(line, h.file(wire))
 }
 
 // file stores a posted article (raw wire lines) and returns the final POST reply.

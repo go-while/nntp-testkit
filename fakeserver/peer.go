@@ -151,7 +151,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				verb = "" // unknown: no article is read
 			}
 			var reply []string
-			drop, silent, plain := false, false, false
+			drop, silent, final := false, false, false
 			switch verb {
 			case "CAPABILITIES":
 				reply = []string{"101 capability list follows", "VERSION 2", "IHAVE"}
@@ -326,7 +326,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 				}
 				if take(arg) {
 					reply = []string{"437 Rejected " + arg}
-					plain = true
+					final = true
 					break
 				}
 				if o.OnArticle != nil {
@@ -336,7 +336,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					o.OnArticleRaw(arg, raw)
 				}
 				reply = []string{"235 Article transferred OK"}
-				plain = true // Faults apply to the 335 only, as to POST's 340 in StoreHandler
+				final = true // the 235 is the final reply: OverrideFinal etc., as POST's 240 in StoreHandler
 			case "QUIT":
 				_ = o.send(c, line, []string{"205 bye"}, false)
 				return
@@ -346,7 +346,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			if o.StartTLS.needsTLS(c, needAuth) && len(reply) > 0 && strings.HasPrefix(reply[0], "480") {
 				reply[0] = "483 Encryption required" // authentication is not possible before TLS
 			}
-			if !o.send(c, line, reply, plain) {
+			if !o.send(c, line, reply, final) {
 				return
 			}
 			if drop {
