@@ -176,3 +176,61 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("ClientAuth: %v", c.Cert.ExtKeyUsage)
 	}
 }
+
+// The tb-less twins give the same certificates and files as the testing.TB forms.
+func TestGenerate(t *testing.T) {
+	ca, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := ca.GenerateLeaf(Options{DNSNames: []string{"news.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handshake(t, l, ca.ClientConfig("news.test")); err != nil {
+		t.Errorf("leaf of GenerateCA: %v", err)
+	}
+	self, err := GenerateSelfSigned(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handshake(t, self, self.ClientConfig("localhost")); err != nil {
+		t.Errorf("GenerateSelfSigned: %v", err)
+	}
+	if string(self.CAPEM) != string(self.CertPEM) {
+		t.Error("a self-signed leaf is its own trust anchor")
+	}
+	if _, err := ca.GenerateLeaf(Options{KeyType: KeyType(99)}); err == nil {
+		t.Error("GenerateLeaf with an unknown key type: no error")
+	}
+
+	dir := filepath.Join(t.TempDir(), "new")
+	f, err := l.WriteFiles(dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(f.Key); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("WriteFiles key: %v %v", fi, err)
+	}
+	if _, err := tls.LoadX509KeyPair(f.Cert, f.Key); err != nil {
+		t.Errorf("LoadX509KeyPair: %v", err)
+	}
+	p, err := ca.WriteCAFile(dir)
+	if err != nil || p != filepath.Join(dir, "ca.pem") {
+		t.Errorf("WriteCAFile: %q %v", p, err)
+	}
+	if _, err := l.WriteFiles("", 0o600); err == nil {
+		t.Error("WriteFiles without a directory: no error")
+	}
+	if _, err := ca.WriteCAFile(""); err == nil {
+		t.Error("WriteCAFile without a directory: no error")
+	}
+	// a file where the directory should be: the error is returned, not a test failure
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.WriteFiles(filepath.Join(file, "sub"), 0o600); err == nil {
+		t.Error("WriteFiles under a file: no error")
+	}
+}
