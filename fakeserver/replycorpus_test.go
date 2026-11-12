@@ -87,7 +87,7 @@ func TestReplyCorpusShape(t *testing.T) {
 		if len(rc.Lines) == 0 {
 			t.Errorf("%s: no Lines", rc.Name)
 		}
-		if rc.Want != WantError && rc.Want != WantEither {
+		if rc.Want != WantError && rc.Want != WantEither && rc.Want != WantAccept {
 			t.Errorf("%s: Want %q", rc.Name, rc.Want)
 		}
 		if rc.NeedsTimeout && rc.Want != WantError {

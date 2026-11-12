@@ -21,7 +21,8 @@ import "strings"
 //
 // The corpus states the cases, not the verdicts of one client: rc.Want is a generic class
 // (WantError: the call must fail cleanly; WantEither: a strict client fails and a lenient one
-// may accept, but neither may panic, hang or desynchronise), and the details (error types,
+// may accept, but neither may panic, hang or desynchronise; WantAccept: odd but legal, the
+// client must accept it), and the details (error types,
 // whether the connection is reusable afterwards) are for each client suite to agree on.
 //
 // The cases are facts about NNTP replies (RFC 3977 and friends), written from scratch; the
@@ -34,7 +35,8 @@ import "strings"
 //	                8-bit or NUL text, an overlong line
 //	FamilyGreeting  a bad greeting: 400, 502, no code, empty, a stray second line
 //	FamilyBlock     a multi-line reply whose rows are bad (OVER, HDR, LIST ACTIVE, LISTGROUP,
-//	                NEWNEWS, CAPABILITIES, article and body lines), or whose end is
+//	                NEWNEWS, CAPABILITIES, article and body lines), or whose terminator
+//	                is wrong
 //
 // (An empty greeting line is not a case: an empty Options.Greeting means the default.)
 // A missing "." terminator is Faults.Endless, an overlong block line Faults.LongLine, a reply
@@ -64,6 +66,10 @@ const (
 	// client reports an error, a lenient one accepts and may keep the odd bytes; neither may
 	// panic, hang, or leave the connection out of sync without closing it.
 	WantEither Outcome = "either"
+	// WantAccept: the reply is odd but legal; a client must accept it and hand the data back
+	// (high below low for an empty group, extra overview fields, 281 to AUTHINFO USER). It
+	// guards against clients that are stricter than the RFC.
+	WantAccept Outcome = "accept"
 )
 
 // ReplyCase is one wrong or malformed reply.
@@ -214,7 +220,7 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(c, "quit-200", "QUIT", WantError, "QUIT answers 205 (5.4)", "200 hm"),
 		rcCase(c, "authinfo-user-250", "AUTHINFO USER u", WantError, "AUTHINFO USER answers 381, 281 or 481 (RFC 4643 2.3)", "250 hm"),
 		rcCase(c, "authinfo-user-215-block", "AUTHINFO USER u", WantError, "a 215 block where AUTHINFO USER answers one line (RFC 4643 2.3)", rcBlock("215 what", "111 19990101000000")...),
-		rcCase(c, "authinfo-user-281", "AUTHINFO USER u", WantEither, "281 to USER with no PASS asked: legal when the server needs no password (RFC 4643 2.3.1); a client must not send PASS", "281 ok"),
+		rcCase(c, "authinfo-user-281", "AUTHINFO USER u", WantAccept, "281 to USER with no PASS asked: legal when the server needs no password (RFC 4643 2.3.1); a client must not send PASS", "281 ok"),
 
 		// status: a malformed status line
 		rcCase(s, "status-code-600", "BODY 1", WantError, "a first digit of 6 is no reply class (3.2)", "600 what"),
@@ -243,7 +249,7 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(s, "group-211-negative", "GROUP g", WantError, "negative numbers (6.1.1: numbers are non-negative)", "211 -5 -3 -9 g"),
 		rcCase(s, "group-211-overflow", "GROUP g", WantError, "numbers over 64 bits", "211 99999999999999999999999999 1 99999999999999999999999999 g"),
 		rcCase(s, "group-211-high-below-low", "GROUP g", WantEither, "high below low with articles reported (6.1.1 allows it only for an empty group)", "211 3 9 1 g"),
-		rcCase(s, "group-211-count-over-range", "GROUP g", WantEither, "a count larger than low..high holds (6.1.1 calls the count an estimate)", "211 100 1 2 g"),
+		rcCase(s, "group-211-count-over-range", "GROUP g", WantAccept, "a count larger than low..high holds (6.1.1 calls the count an estimate)", "211 100 1 2 g"),
 		rcCase(s, "group-211-extra-fields", "GROUP g", WantEither, "text after the group name (6.1.1)", "211 2 1 2 g extra stuff"),
 		rcCase(s, "stat-223-no-msgid", "STAT 1", WantError, "223 with the article number but no message-id (6.2.4)", "223 1"),
 		rcCase(s, "stat-223-nonnumeric", "STAT 1", WantError, "a word for the article number (6.2.4)", "223 abc <a@b>"),
@@ -272,7 +278,7 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(b, "over-negative-number", "OVER 1-2", WantError, "a negative article number in an overview row (8.3.2)", rcBlock("224 overview follows", "-1\tsubj\ta@b\td\t<1@x>\t\t1\t1")...),
 		rcCase(b, "over-too-few-fields", "OVER 1-2", WantError, "an overview row of 2 fields where the format has 8 (8.3.2)", rcBlock("224 overview follows", "1\tsubj")...),
 		rcCase(b, "over-no-tabs", "OVER 1-2", WantError, "an overview row separated by spaces, not TABs (8.3.2)", rcBlock("224 overview follows", "1 subj a@b d <1@x> 1 1")...),
-		rcCase(b, "over-extra-fields", "OVER 1-2", WantEither, "overview rows may carry more fields than the 8 standard ones (8.3.2, 'Xref: ...')", rcBlock("224 overview follows", ovHead+"\tXref: h g:1\textra\tmore")...),
+		rcCase(b, "over-extra-fields", "OVER 1-2", WantAccept, "overview rows may carry more fields than the 8 standard ones (8.3.2, 'Xref: ...')", rcBlock("224 overview follows", ovHead+"\tXref: h g:1\textra\tmore")...),
 		rcCase(b, "over-nonnumeric-bytes", "OVER 1-2", WantEither, "a word in the :bytes and :lines fields (8.3.2)", rcBlock("224 overview follows", "1\tsubj\ta@b\td\t<1@x>\t\tbytes\tlines")...),
 		rcCase(b, "over-msgid-no-brackets", "OVER 1-2", WantEither, "a message-id field without angle brackets (8.3.2)", rcBlock("224 overview follows", "1\tsubj\ta@b\td\tabc\t\t1\t1")...),
 		rcCase(b, "over-empty-row", "OVER 1-2", WantEither, "an empty row inside the block (8.3.2)", rcBlock("224 overview follows", "", ovHead)...),
@@ -281,7 +287,7 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(b, "hdr-row-no-space", "HDR Subject 1", WantEither, "an HDR row of the number only, no value and no space (8.5)", rcBlock("225 hdr", "1")...),
 		rcCase(b, "list-active-too-few-fields", "LIST ACTIVE", WantError, "a LIST ACTIVE row without the status field (7.6.3)", rcBlock("215 list", "alt.test 5 1")...),
 		rcCase(b, "list-active-nonnumeric", "LIST ACTIVE", WantError, "letters for high and low (7.6.3)", rcBlock("215 list", "alt.test x y y")...),
-		rcCase(b, "list-active-empty-group", "LIST ACTIVE", WantEither, "high below low is how an empty group reads (7.6.3): not an error", rcBlock("215 list", "alt.test 0 1 y")...),
+		rcCase(b, "list-active-empty-group", "LIST ACTIVE", WantAccept, "high below low is how an empty group reads (7.6.3): not an error", rcBlock("215 list", "alt.test 0 1 y")...),
 		rcCase(b, "list-active-bad-flag", "LIST ACTIVE", WantEither, "an unknown status flag 'q' (7.6.3 allows y, n, m and others)", rcBlock("215 list", "alt.test 5 1 q")...),
 		rcCase(b, "list-active-empty-row", "LIST ACTIVE", WantEither, "an empty row inside the block (7.6.3)", rcBlock("215 list", "", "alt.test 5 1 y")...),
 		rcCase(b, "listgroup-invalid-211-line", "LISTGROUP g", WantEither, "a 211 line with letters for the numbers; the rows are fine (6.1.2)", rcBlock("211 x y z g", "1", "2")...),
