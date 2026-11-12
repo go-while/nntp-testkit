@@ -25,11 +25,12 @@
 //	// NoGreeting; then Handler when set, else Store when set, else Script (with NoGreeting and
 //	// no Handler the Script/Store is not run: lines are only recorded).
 //
-//	type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }
+//	type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool; CompressShape CompressShape }
 //	// Semantics as go-pugleaf's cliFakeStep: Expect is an anchored regexp ("" = any line); a
 //	// non-matching line gets "500 fakeserver: unexpected <line>" and is recorded in Mismatches();
 //	// after the last step the connection keeps reading and recording until EOF. Compress
-//	// switches the connection to COMPRESS DEFLATE after the step's reply (Conn.StartCompress).
+//	// switches the connection to COMPRESS DEFLATE after the step's reply (Conn.StartCompress),
+//	// CompressShape shapes its output stream.
 //
 //	type Server struct { ... }
 //	func New(tb testing.TB, o Options) *Server       // listens, serves, tb.Cleanup(Close); fails tb on listen error
@@ -59,6 +60,7 @@
 //	func (c *Conn) ReadDotBlockRaw() ([]string, []byte, error) // the same, also the exact bytes of the block (not the "." line)
 //	func (c *Conn) Raw() net.Conn                    // the TLS conn when TLS, else the TCP conn; after StartCompress the compressing conn on top
 //	func (c *Conn) StartCompress() error             // RFC 8054 COMPRESS DEFLATE from now on, both directions; call it after writing the 206; error when already on
+//	func (c *Conn) StartCompressShaped(s CompressShape) error // StartCompress with the output stream shaped, see CompressShape below
 //	func (c *Conn) StartCompressOutputOnly() error   // broken COMPRESS: deflate only the server's output, read the client's bytes uncompressed
 //	func (c *Conn) Compressed() bool
 //	func (c *Conn) Server() *Server
@@ -93,6 +95,7 @@
 //		OnArticleRaw    func(msgID string, raw []byte)    // right after OnArticle: the article's exact stuffed bytes, no terminator (article.ParseDotBlock)
 //		Compress           bool // offer COMPRESS DEFLATE as StoreOptions.Compress; AUTHINFO answers 502 once active
 //		CompressOutputOnly bool // offer it, but after the 206 compress only the output (Conn.StartCompressOutputOnly)
+//		CompressShape      CompressShape // shape the compressed output stream, see below
 //		HoldGreeting       <-chan struct{} // greeting waits for close/receive; needs Options.NoGreeting (NewPeer sets it); the hold ends at Deadline (60 s default) and then the connection is dropped without a greeting, as on Close; the conn counts as open
 //		GreetingDelay      time.Duration   // sleep before the greeting (after HoldGreeting), capped at Deadline; needs Options.NoGreeting (NewPeer sets it)
 //		BeforeReply        func(c *Conn, cmd, line, status string) // before every reply (IHAVE: 335 and the final one); may block, e.g. c.Wait(ch)
@@ -167,6 +170,7 @@
 //		OverviewFields    func(conn int, group string, fields []string) []string // rewrite the fields of every OVER line (overview out of step with the articles)
 //		Compress           bool // offer COMPRESS DEFLATE (RFC 8054), see below
 //		CompressOutputOnly bool // offer it broken: after the 206 only the output is compressed, the client's input is read uncompressed
+//		CompressShape      CompressShape // shape the compressed output stream, see below
 //		CompressBeforeAuth bool // with User/Pass: list and take COMPRESS before AUTHINFO (INN's nnrpd); other commands still 480, AUTHINFO 502 once compressed
 //		StartTLS           *StartTLSOptions // offer STARTTLS, see below
 //	}
@@ -269,4 +273,19 @@
 // client tests: the 206 and everything after it is compressed, but the client's compressed
 // commands are read as they are, so a client that follows the RFC gets no answer or "500"
 // answers to binary lines.
+//
+// CompressShape (StoreOptions, PeerOptions, Step, Conn.StartCompressShaped) shapes the output
+// stream for client tests; the zero value is the behaviour above:
+//
+//	type CompressShape struct {
+//		Flush             CompressFlush // FlushSync (default); FlushPartial: zlib's Z_PARTIAL_FLUSH like INN's nnrpd (an empty fixed-Huffman block, no 00 00 FF FF marker, the last 0-7 bits unsent); FlushFinish: the first write after the 206 ends the stream, later writes are plain
+//		Split             Split         // cut the compressed bytes of each write into socket writes: At (negative = from the end, -1..-3 inside the sync marker), Size, Gap (bounded by Deadline)
+//		EmptyFlushWith206 bool          // the 206 line and an empty flush block in one socket write (Store, Peer, Script; not a Handler's own 206)
+//		With206           []byte        // deflated and flushed into the 206's socket write (compressed payload pipelined behind the 206)
+//		AfterEnd          []byte        // with FlushFinish: bytes after the final block, in its socket write
+//	}
+//
+// FlushPartial writes literals in fixed-Huffman blocks (no matches) with a small bit writer,
+// since compress/flate cannot do a partial flush; compress/flate's reader cannot read such a
+// stream before the end either (it holds data until a stored block), the kit's inflater can.
 package fakeserver

@@ -68,6 +68,9 @@ type Step struct {
 	Hang       bool          // after the match (and ReadDot, Delay, Reply), never reply again; held until Close
 	CloseAfter bool          // close the connection after the reply
 	Compress   bool          // after the reply (e.g. "206 Compression active"), compress both directions (Conn.StartCompress)
+	// CompressShape shapes the compressed output stream of a Compress step (see CompressShape);
+	// EmptyFlushWith206 and With206 go with the step's reply when that is a 206.
+	CompressShape CompressShape
 }
 
 // StoreOptions configures the store handler (Options.StoreOpts, StoreHandler).
@@ -136,6 +139,13 @@ type StoreOptions struct {
 	// the 206 only the server's output is deflated and the client's input is read without
 	// inflating it (Conn.StartCompressOutputOnly): a broken server, for client tests.
 	CompressOutputOnly bool
+
+	// CompressShape shapes the compressed output stream after the 206: the flush (sync, zlib's
+	// partial flush like INN's nnrpd, or a final block with trailing bytes), the compressed
+	// bytes cut into several socket writes, an empty flush in the packet of the 206 line. The
+	// zero value is the default: every write sync-flushed and sent in one socket write. It
+	// applies to Compress and CompressOutputOnly (see CompressShape).
+	CompressShape CompressShape
 
 	// CompressBeforeAuth makes a server with User or Pass set list "COMPRESS DEFLATE" before
 	// authentication and take COMPRESS then, as INN's nnrpd does (COMPRESS is not a reading
@@ -647,10 +657,13 @@ func (s *Server) runScript(c *Conn) {
 		if st.Delay > 0 && !c.sleep(st.Delay) {
 			return
 		}
-		if !c.writeReply(line, st.Reply...) {
+		c.shape, c.shapeStep = st.CompressShape, st.Compress
+		ok := c.writeReply(line, st.Reply...)
+		c.shapeStep = false
+		if !ok {
 			return
 		}
-		if st.Compress && !c.Compressed() && c.StartCompress() != nil {
+		if st.Compress && !c.Compressed() && c.startCompress(false, st.CompressShape) != nil {
 			return
 		}
 		if st.Hang {
