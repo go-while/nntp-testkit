@@ -166,8 +166,9 @@ type StoreOptions struct {
 // no longer apply after its reply.
 //
 // The faults apply in this order: Delay; OverrideLine, else Override; LongLine;
-// DropInMultiline; then the reply is written, through Drip when set, and Endless goes on from
-// there. OverrideLine is keyed by the whole client line, normalised as the command upper-cased
+// DropInMultiline; then the reply is written, through Drip when set (else Split; DropAfterBytes
+// cuts the bytes at any rate), and Endless goes on from there; Trailing follows a reply that
+// was written whole. OverrideLine is keyed by the whole client line, normalised as the command upper-cased
 // and the arguments as sent, joined by single spaces ("ARTICLE 2", "OVER 11-20",
 // "ARTICLE <a@b>"); New and Start normalise its keys the same way. Drip and Endless are bounded
 // by Options.Deadline like every server-side wait: after it the connection is closed.
@@ -176,6 +177,27 @@ type StoreOptions struct {
 // without compression: each write is deflated, sync-flushed and sent in one socket write, so a
 // Drip byte or a LineDelay line reaches the client on its own, and a reply cut by
 // DropInMultiline or CloseAfter ends at a flush.
+//
+// Byte-level faults (Split, DropAfterBytes, Trailing, Abort, DropInUpload) are nil by default.
+// Split and DropAfterBytes work on the bytes of the whole reply after the other faults, so
+// they combine with Override, LongLine and LineDelay (the offsets count from the first byte of
+// the reply, status line included); Drip is the one-byte case of Split and wins over it. A
+// close by a fault (DropAfterBytes, DropInMultiline, DropInUpload, CloseAfter) is a normal
+// close unless Abort is set for the command that was running; note that a normal close with
+// unread client data in the server's receive buffer makes the OS send an RST too, as with a
+// pipelined or large upload.
+//
+// POST and IHAVE have two replies. The first (340, 335) takes every fault above; the final one
+// (240/441, 235/437) is written by Conn.writeFinal and takes only OverrideFinal,
+// DelayFinal, Split, DropAfterBytes, Trailing and Abort (keyed by the command like for the
+// first reply, so Split["POST"] splits both; Split offsets and DropAfterBytes count per
+// reply, so they cannot target only the final one: use OverrideFinal and DelayFinal for that).
+// Trailing["POST"] and Trailing["IHAVE"] also follow the first reply (after the 340 or 335,
+// while the client is about to upload) and the 435, 436 and 480 that end IHAVE without an
+// article. Delay, Override, OverrideLine, Drip, LineDelay, Endless, LongLine, DropInMultiline
+// and OverrideFrom/OverrideTimes do not touch the final reply, as before. TAKETHIS has one reply, which takes all faults, and OverrideFinal and DelayFinal on
+// top (OverrideFinal wins over Override; they also hit its 480 and 500 answers). In StoreHandler the article of POST is filed before
+// the final reply is built, so an overridden final reply does not undo that.
 type Faults struct {
 	Delay           map[string]time.Duration // command → sleep before its reply
 	CloseAfter      int                      // >0: close the connection after this many commands
@@ -207,6 +229,59 @@ type Faults struct {
 	// (counted from OverrideFrom on); after them the command gets its normal reply again: e.g.
 	// one 480 that a client answers with AUTHINFO and then retries.
 	OverrideTimes map[string]int
+
+	// Split writes the reply in pieces (see Split), with a pause between them: a CR and its LF,
+	// or "." and its CRLF, in different packets.
+	Split map[string]Split
+	// DropAfterBytes closes the connection after writing that many bytes of the reply (0 =
+	// before writing anything), also inside a status line or a line; a reply of that length or
+	// less is written whole. Abort decides how the connection is closed.
+	DropAfterBytes map[string]int
+	// Abort makes a close caused by a fault of that command abrupt: on plain TCP the
+	// connection is reset (SO_LINGER 0, the client reads ECONNRESET), on TLS (also after
+	// STARTTLS) the TCP connection is closed without a close_notify alert, so the client sees a
+	// truncated stream, not a clean end. The key is the command that was running when
+	// DropAfterBytes, DropInMultiline, DropInUpload or CloseAfter closed the connection (for
+	// CloseAfter the N-th command); a close by the client or by Close is not affected.
+	Abort map[string]bool
+	// OverrideFinal replaces the reply that follows the article of POST (240/441), IHAVE
+	// (235/437) and TAKETHIS (239/439), with Override for the first reply (340, 335, and the
+	// 435/436/480 that ends IHAVE before an article) untouched; empty: the final reply is not
+	// sent. For TAKETHIS, whose only reply this is, it also replaces the 480 (not
+	// authenticated) and 500 (NoStream) answers. DelayFinal sleeps before it (bounded by the
+	// Deadline), after the article was read, with the same TAKETHIS rule. The article is read
+	// and handled as usual.
+	OverrideFinal map[string][]string
+	DelayFinal    map[string]time.Duration
+	// DropInUpload closes the connection after the server read that many lines of the incoming
+	// dot block of POST, IHAVE or TAKETHIS (0 = before the first), however long the block is;
+	// the cut block is not recorded. It applies to every dot block read after the command,
+	// also a Script step's ReadDot.
+	DropInUpload map[string]int
+	// Trailing writes more lines after the reply in a separate write after Gap: data that
+	// reaches the client in the next packet, e.g. behind a STARTTLS 382, before the handshake
+	// (StoreHandler and PeerHandler write the 382 through the same path). A cut or Endless
+	// reply gets none.
+	Trailing map[string]Trailing
+}
+
+// Split cuts a reply into separate writes.
+type Split struct {
+	// At are the byte offsets in the reply (status line first, CRLFs included) where a piece
+	// ends: {1, 5} writes bytes 0-0, 1-4 and the rest. Offsets outside the reply and repeats
+	// are ignored.
+	At []int
+	// Size, used when At is empty, cuts a piece every Size bytes.
+	Size int
+	// Gap is the pause after each piece but the last (0: none), bounded by the Deadline like
+	// Drip; a client that reads between the pieces sees them as separate reads.
+	Gap time.Duration
+}
+
+// Trailing is extra data after a reply.
+type Trailing struct {
+	Lines []string      // written with CRLF in one write
+	Gap   time.Duration // pause before it (0: written at once, but as its own write)
 }
 
 // clone returns a deep copy of f (nil maps stay nil).
@@ -271,6 +346,25 @@ func (f Faults) clone() Faults {
 		for k, v := range f.DropInMultiline {
 			out.DropInMultiline[k] = v
 		}
+	}
+	out.Split = cloneMap(f.Split, func(v Split) Split { v.At = append([]int(nil), v.At...); return v })
+	out.DropAfterBytes = cloneMap(f.DropAfterBytes, func(v int) int { return v })
+	out.Abort = cloneMap(f.Abort, func(v bool) bool { return v })
+	out.OverrideFinal = cloneMap(f.OverrideFinal, func(v []string) []string { return append([]string(nil), v...) })
+	out.DelayFinal = cloneMap(f.DelayFinal, func(v time.Duration) time.Duration { return v })
+	out.DropInUpload = cloneMap(f.DropInUpload, func(v int) int { return v })
+	out.Trailing = cloneMap(f.Trailing, func(v Trailing) Trailing { v.Lines = append([]string(nil), v.Lines...); return v })
+	return out
+}
+
+// cloneMap copies m (nil stays nil), each value through cp.
+func cloneMap[V any](m map[string]V, cp func(V) V) map[string]V {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]V, len(m))
+	for k, v := range m {
+		out[k] = cp(v)
 	}
 	return out
 }
