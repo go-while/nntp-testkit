@@ -34,6 +34,29 @@ func streamChecks() []check {
 	}
 }
 
+// The back-off of the re-offer after a commit (asCommitted): the first pause and its cap, the
+// pause doubles each time (variables so the tests can shorten them).
+var (
+	asRetryStart = 100 * time.Millisecond
+	asRetryMax   = time.Second
+)
+
+// defaultCommitWait is how long check-have and ihave-have re-offer an article the server
+// deferred (431, 436) when Options.CommitWait is 0.
+const defaultCommitWait = 5 * time.Second
+
+// commitWait is the re-offer window of check-have and ihave-have: Options.CommitWait, the
+// default when it is 0, none (a single offer) when it is negative.
+func (o Options) commitWait() time.Duration {
+	switch {
+	case o.CommitWait < 0:
+		return 0
+	case o.CommitWait == 0:
+		return defaultCommitWait
+	}
+	return o.CommitWait
+}
+
 // asNewID returns the Message-ID of an article or offer of a check (msgID; tests replace it
 // with a deterministic one).
 var asNewID = msgID
@@ -171,7 +194,9 @@ func asSend(s *session, c check, id string, want []int, soft map[int]string, for
 		r := c.failf("%s: %v", shown, err)
 		return code, line, &r
 	}
-	return code, line, asJudge(c, shown, code, line, id, want, soft)
+	r := asJudge(c, shown, code, line, id, want, soft)
+	s.judged(shown, code, want, r)
+	return code, line, r
 }
 
 // asReply reads the status line of cmd (already sent) and scores it with asJudge.
@@ -181,7 +206,17 @@ func asReply(s *session, c check, cmd, id string, want []int, soft map[int]strin
 		r := c.failf("%s: %v", cmd, err)
 		return code, line, &r
 	}
-	return code, line, asJudge(c, cmd, code, line, id, want, soft)
+	r := asJudge(c, cmd, code, line, id, want, soft)
+	s.judged(cmd, code, want, r)
+	return code, line, r
+}
+
+// judged records the wrong reply code behind a Fail that asJudge returned (not the Fail of a
+// reply that names another message-id).
+func (s *session) judged(cmd string, code int, want []int, r *Result) {
+	if r != nil && r.Status == Fail && !asIntIn(code, want) {
+		s.mismatch(cmd, code)
+	}
 }
 
 // asStream sends MODE STREAM, which must answer 203.
@@ -231,6 +266,44 @@ func asAbortIhave(s *session, c check, fail Result) Result {
 	return fail
 }
 
+// asCommitted offers an article the server took a moment ago again, until it answers with
+// something else than the deferral code retry (431 to CHECK, 436 to IHAVE) or the window
+// Options.CommitWait ends. Servers that store articles asynchronously (go-pugleaf) defer the
+// immediate re-offer while the article is in flight; the pauses between the offers start at
+// asRetryStart and double up to asRetryMax. offer sends one offer and scores the reply like
+// asSend with the deferral as the only soft reply. It returns the code and result of the last
+// offer (nil result: the wanted reply), the number of re-offers and the time they took. A
+// result that is still the deferral when the window ends is a Skip whose Detail says how long
+// the server was asked.
+func asCommitted(s *session, c check, retry int, offer func() (int, *Result)) (code int, r *Result, retries int, took time.Duration) {
+	start := time.Now()
+	wait, pause := s.o.commitWait(), asRetryStart
+	for {
+		code, r = offer()
+		if r == nil || r.Status != Skip || code != retry {
+			return code, r, retries, time.Since(start)
+		}
+		left := wait - time.Since(start)
+		if left <= 0 {
+			if wait > 0 {
+				r.Detail += fmt.Sprintf(" (still deferred after %d re-offers in %s)", retries, time.Since(start).Round(time.Millisecond))
+			}
+			return code, r, retries, time.Since(start)
+		}
+		time.Sleep(min(pause, left))
+		pause = min(2*pause, asRetryMax)
+		retries++
+	}
+}
+
+// asRetried is the note of a pass that needed re-offers ("" for none).
+func asRetried(retries int, took time.Duration) string {
+	if retries == 0 {
+		return ""
+	}
+	return fmt.Sprintf("re-offered %d times (the server deferred it), answered after %s", retries, took.Round(time.Millisecond))
+}
+
 // checkModeStream: MODE STREAM → 203 when STREAMING is advertised.
 func checkModeStream(s *session, c check) Result {
 	if r := asStream(s, c); r != nil {
@@ -255,10 +328,12 @@ func checkModeStreamCap(s *session, c check) Result {
 		detail = fmt.Sprintf("STREAMING advertised, MODE STREAM got %q (see mode-stream)", line)
 	case adv:
 	case code == 203:
+		s.mismatch("MODE STREAM", code)
 		return c.failf("MODE STREAM got %q, but CAPABILITIES does not list STREAMING", line)
 	case code == 500 || code == 501:
 		detail = fmt.Sprintf("no streaming: MODE STREAM got %q", line)
 	default:
+		s.mismatch("MODE STREAM", code)
 		return c.failf("MODE STREAM without STREAMING advertised: got %q, want 500 or 501", line)
 	}
 	return asDetail(asSettle(s, c), detail)
@@ -321,7 +396,9 @@ func checkTakethis(s *session, c check) Result {
 }
 
 // checkCheckHave: CHECK of an id the server took by TAKETHIS → 438 <id>. A refused TAKETHIS
-// (439) or a deferred CHECK (431) is a Skip.
+// (439) is a Skip. A server that commits asynchronously defers the CHECK (431) while the
+// article is in flight: the CHECK is repeated for Options.CommitWait (asCommitted), the Pass
+// Detail names the retries, and a 431 at the end of the window is a Skip. 238 fails.
 func checkCheckHave(s *session, c check) Result {
 	if r := asStream(s, c); r != nil {
 		return *r
@@ -330,10 +407,14 @@ func checkCheckHave(s *session, c check) Result {
 	if r := asTakethis(s, c, id, 239); r != nil {
 		return *r
 	}
-	if _, _, r := asSend(s, c, id, []int{438}, map[int]string{431: "server deferred"}, "CHECK %s", id); r != nil {
+	_, r, retries, took := asCommitted(s, c, 431, func() (int, *Result) {
+		code, _, r := asSend(s, c, id, []int{438}, map[int]string{431: "server deferred"}, "CHECK %s", id)
+		return code, r
+	})
+	if r != nil {
 		return *r
 	}
-	return asSettle(s, c)
+	return asDetail(asSettle(s, c), asRetried(retries, took))
 }
 
 // checkTakethisDup: TAKETHIS of an id the server took already → 439 <id>. A refused first
@@ -360,21 +441,30 @@ func checkIhave(s *session, c check) Result {
 	return asSettle(s, c)
 }
 
-// checkIhaveHave: IHAVE of an id the server took by IHAVE → 435 (436: Skip). An unexpected
-// 335 fails after the transfer is aborted.
+// checkIhaveHave: IHAVE of an id the server took by IHAVE → 435. A server that commits
+// asynchronously answers 436 while the article is in flight: the IHAVE is repeated for
+// Options.CommitWait (asCommitted), the Pass Detail names the retries, and a 436 at the end
+// of the window is a Skip. An unexpected 335 (the server wants the article it was just
+// given) fails after the transfer is aborted.
 func checkIhaveHave(s *session, c check) Result {
 	id := asNewID(c.Name)
 	if r := asIhave(s, c, id); r != nil {
 		return *r
 	}
-	code, _, r := asSend(s, c, "", []int{435}, map[int]string{436: "server deferred"}, "IHAVE %s", id)
+	code, r, retries, took := asCommitted(s, c, 436, func() (int, *Result) {
+		code, _, r := asSend(s, c, "", []int{435}, map[int]string{436: "server deferred"}, "IHAVE %s", id)
+		return code, r
+	})
 	if r != nil {
 		if code == 335 {
+			if retries > 0 {
+				r.Detail += fmt.Sprintf(" (after %d re-offers)", retries)
+			}
 			return asAbortIhave(s, c, *r)
 		}
 		return *r
 	}
-	return asSettle(s, c)
+	return asDetail(asSettle(s, c), asRetried(retries, took))
 }
 
 // checkIhaveMalformed: IHAVE with an argument that is no message-id → 435 (innd) or 501

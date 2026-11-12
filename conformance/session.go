@@ -23,10 +23,39 @@ type session struct {
 	o        Options
 	c        *client.Conn
 	greeting string
-	code     int      // greeting code (200/201; 400/502 when the server refused)
-	caps     []string // CAPABILITIES lines without the 101 line and the terminator; nil when CAPABILITIES failed
-	capsErr  error    // why caps is nil
-	authed   bool     // AUTHINFO succeeded on this session (see auth)
+	code     int         // greeting code (200/201; 400/502 when the server refused)
+	caps     []string    // CAPABILITIES lines without the 101 line and the terminator; nil when CAPABILITIES failed
+	capsErr  error       // why caps is nil
+	authed   bool        // AUTHINFO succeeded on this session (see auth)
+	bad      *wrongReply // the last exchange got a reply code the check did not accept (see mismatch)
+}
+
+// wrongReply is the command and reply code of an exchange whose code was a mistake.
+type wrongReply struct {
+	cmd  string
+	code int
+}
+
+// mismatch records that cmd (as shown in a Detail) got the reply code code, which the check
+// does not accept. runOne copies the last one into Result.Cmd and Result.Code when the check
+// fails, so Options.AllowReply can match the mistake without its Detail text. Any later
+// command (cmd) forgets it: only a mistake the check ended on counts.
+func (s *session) mismatch(cmd string, code int) {
+	s.bad = &wrongReply{cmd: cmdName(asShown("%s", cmd)), code: code}
+}
+
+// cmdName returns the keywords at the start of a command as shown: the leading words made of
+// upper-case letters, digits-free, '-' and '.' ("IHAVE <id>" is "IHAVE", "AUTHINFO PASS ***"
+// is "AUTHINFO PASS", "LIST OVERVIEW.FMT" is itself, "GROUP alt.test" is "GROUP").
+func cmdName(shown string) string {
+	var words []string
+	for _, w := range strings.Fields(shown) {
+		if strings.Trim(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZ-.") != "" {
+			break
+		}
+		words = append(words, w)
+	}
+	return strings.Join(words, " ")
 }
 
 // deadline is the hang guard of this run.
@@ -105,6 +134,7 @@ func capArgs(caps []string, kw string) []string {
 
 // cmd sends one command and returns code and line; a strict-mode or I/O error is returned.
 func (s *session) cmd(format string, args ...any) (int, string, error) {
+	s.bad = nil
 	return s.c.TryCmd(format, args...)
 }
 

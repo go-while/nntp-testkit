@@ -114,6 +114,7 @@ func (s *session) upgrade(c check) (r Result, note string, refused, ok bool) {
 	case errors.As(err, &se) && se.Code == 580:
 		return c.pass(), "", true, false
 	case errors.As(err, &se):
+		s.mismatch("STARTTLS", se.Code)
 		return c.failf("STARTTLS: got %q, want 382: the server lists STARTTLS on a plain connection that has not authenticated (RFC 4642 §2.2.1: 502 only when TLS is active or authentication has occurred)", se.Line), "", false, false
 	case errors.As(err, &sterr) && sterr.Kind == client.Pending:
 		return c.fail(describe(err)), "", false, false

@@ -150,6 +150,7 @@ func (s *session) compressOn(c check) (Result, bool) {
 	case code == 480:
 		return c.skipf("COMPRESS DEFLATE: %q, and no Options.User to authenticate with", line), false
 	default:
+		s.mismatch("COMPRESS DEFLATE", code)
 		return c.failf("COMPRESS DEFLATE: got %q, want 206 (COMPRESS DEFLATE is advertised)", line), false
 	}
 	if err := s.c.StartCompress(); err != nil {
@@ -182,6 +183,7 @@ func (s *session) over(want int, block bool, cmd string) (gated bool, err error)
 	case s.authGated(code):
 		gated = true
 	case code != want:
+		s.mismatch(cmd, code)
 		return false, fmt.Errorf("%s: got %q, want %d", cmd, line, want)
 	case block:
 		if _, err := s.block(); err != nil {
@@ -309,6 +311,7 @@ func compressPipelined(s *session) error {
 	}
 	for i, want := range []int{111, 100, 111} {
 		if replies[i].Code != want {
+			s.mismatch(replies[i].Cmd, replies[i].Code)
 			return fmt.Errorf("over COMPRESS: pipelined %s: got %q, want %d", replies[i].Cmd, replies[i].Line, want)
 		}
 	}
@@ -322,6 +325,7 @@ func compressPipelined(s *session) error {
 	}
 	for i, r := range replies {
 		if r.Code != 111 {
+			s.mismatch("DATE", r.Code)
 			return fmt.Errorf("over COMPRESS: pipelined DATE %d of %d: got %q, want 111", i+1, len(cmds), r.Line)
 		}
 	}
@@ -344,6 +348,7 @@ func compressBackToBack(s *session) error {
 			return fmt.Errorf("over COMPRESS: reply %d of 3 commands sent in separate writes: %s", i+1, s.cerr(err))
 		}
 		if code != want {
+			s.mismatch([]string{"DATE", "HELP", "DATE"}[i], code)
 			return fmt.Errorf("over COMPRESS: reply %d of 3 commands sent in separate writes: got %q, want %d", i+1, line, want)
 		}
 		if want == 100 {
@@ -516,6 +521,7 @@ func compressUpload(lineByLine bool) func(*session, check) Result {
 		case code == 441:
 			return c.skipf("server refused the article (%d lines, %d bytes) with %q: this may be a size or policy limit, or the server's inflate may have corrupted the article (not told apart: see check compress for the compression itself)", len(body), len(wire), line)
 		case code != 240:
+			s.mismatch("POST", code)
 			return c.failf("POST over COMPRESS: article sent %s: got %q, want 240", sent, line)
 		}
 		if err := s.quiet(quietWindow); err != nil {

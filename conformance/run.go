@@ -151,7 +151,12 @@ func (o Options) allowed(r Result) Result {
 	if r.Status != Fail {
 		return r
 	}
+	allowed := false
 	if sub := o.Allow[r.Name]; sub != "" && strings.Contains(r.Detail, sub) {
+		allowed = true
+	}
+	allowed = allowed || slices.ContainsFunc(o.AllowReply, func(a AllowReply) bool { return a.matches(r) })
+	if allowed {
 		r.Status, r.Detail, r.Missing = Skip, "allowed: "+r.Detail, ""
 	}
 	return r
@@ -229,5 +234,9 @@ func runOne(o Options, c check) (r Result) {
 	if c.Needs != "" && !s.has(c.Needs) && !s.has("MODE-READER") {
 		return c.notAdvertised(c.Needs)
 	}
-	return c.Run(s, c)
+	r = c.Run(s, c)
+	if r.Status == Fail && s.bad != nil {
+		r.Cmd, r.Code = s.bad.cmd, s.bad.code
+	}
+	return r
 }
