@@ -29,8 +29,8 @@ Fail, and nothing is posted unless `-group` names a group the checks may post in
 reader commands (GROUP, LISTGROUP ranges, ARTICLE/HEAD/BODY/STAT, NEXT/LAST, OVER, HDR, the LIST
 variants, NEWGROUPS, NEWNEWS, POST and the error codes), command syntax, AUTHINFO, streaming and IHAVE,
 STARTTLS (including commands pipelined behind it, CVE-2011-0411) and COMPRESS (including a large
-dot-stuffed upload). `-json` prints the report as JSON, `-allow check=substring` tolerates a known
-server bug; `nntp-conformance -h` lists the checks and flags, and [conformance](#conformance) has the
+dot-stuffed upload). `-json` prints the report as JSON, `-allow check=substring` (or `-allow-reply check:CMD=code`, by the
+wrong reply instead of the detail text) tolerates a known server bug; `nntp-conformance -h` lists the checks and flags, and [conformance](#conformance) has the
 details.
 
 ## Write your own tests
@@ -85,7 +85,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 |---|---|
 | `testkit` (root) | `Deadline()`, `DefaultDeadline`, `EnvDeadline`; `WaitFor`, `FreePort`, `Listening`, `ShortTempDir`, `SocketPathFits` |
 | `client` | strict NNTP test client; COMPRESS DEFLATE (RFC 8054); STARTTLS (RFC 4642) |
-| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults and counters; TLS and STARTTLS; COMPRESS DEFLATE; transit peer (streaming and IHAVE) |
+| `fakeserver` | fake NNTP server: Script, Handler or Store mode; faults (also byte-level) and counters; TLS and STARTTLS; COMPRESS DEFLATE (with shaped output); transit peer (streaming and IHAVE); a corpus of wrong server replies for client suites |
+| `cmd/nntp-fakeserver` | the fake server as a process that a JSON file configures, for test suites in other languages (Python, shell, C) |
 | `tlscert` | test CA and leaf certificates (expired, not yet valid, wrong name), as `tls.Certificate`, PEM or files with a 0600 key |
 | `proc` | runs an external server binary (stdio or TCP), stops it, dumps its logs on failure |
 | `conformance` | black-box RFC 3977/4643/4644 checks against any NNTP address, with a strict client |
@@ -190,20 +191,22 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 |---|---|
 | `New(tb, Options) *Server` / `Start(Options) (*Server, error)` | listen (default `127.0.0.1:0`) and serve; `New` registers `tb.Cleanup(Close)` |
 | `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration; MaxConns int; MaxConnsGreeting string }` | server config; `MaxConns` > 0: one more simultaneous connection gets `MaxConnsGreeting` (default `502 Too many connections`) and is closed |
-| `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply |
+| `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool; CompressShape CompressShape }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply, its output stream shaped by `CompressShape` (below) |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
 | `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
 | `Accepted`, `Open`, `MaxOpen`, `Closed`, `WaitOpen(tb, n, d)`, `WaitClosed(tb, n, d)`, `WaitLines(tb, want)` | connection counts (`MaxOpen`: the most open at once, e.g. a client's parallel-connection limit; `Closed`: connections that ended on the server side, e.g. a `RawStall` conn whose dial the client aborted) and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
 | `type Conn`: `ReadLine`, `WriteLines(lines...)`, `ReadDotBlock`, `Raw`, `Server`, `ID` | server side of one connection, for a Handler; `ID` is the accept order from 1 |
-| `(*Conn) StartCompress() error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
+| `(*Conn) StartCompress() error`, `StartCompressShaped(CompressShape) error`, `StartCompressOutputOnly() error`, `Compressed() bool` | COMPRESS DEFLATE from now on (call it after writing the 206); `Shaped` is `StartCompress` with the output stream shaped (see `CompressShape` below); `OutputOnly` is a broken server that compresses its output but reads the client's bytes uncompressed |
 | `TLSConfig(tb) (*tls.Config, *x509.CertPool)` | self-signed cert for 127.0.0.1 and a pool that trusts it (package `tlscert` makes CA-issued ones) |
+| `NewTLSConfig() (*tls.Config, *x509.CertPool, error)` | `TLSConfig` without a tb: returns the error, for a fake server program; the certificate is `server.Certificates[0].Leaf` |
 | `StoreOptions.StartTLS`, `PeerOptions.StartTLS *StartTLSOptions{Config *tls.Config; Refuse string; HideCapability, AuthNeedsTLS bool; CloseAfterHandshake int}` | STARTTLS (RFC 4642), see below; nil: unknown command |
 | `(*Conn) StartTLS(cfg) error`, `TLS() bool`, `TLSState()` | for a Handler: TLS server side from now on (call it after writing the 382) |
 | `(*Server) TLSHandshakes()`, `TLSFailed()`, `TLSServerNames()` | completed and failed handshakes (implicit TLS and STARTTLS), SNI of every ClientHello |
 | `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
+| `ReplyCorpus() []ReplyCase`, `ReplyCaseByName(name) (ReplyCase, bool)` | 112 named wrong and malformed server replies for the test suite of a client, see below |
 | `(*Conn) Wait(ch <-chan struct{}) bool`, `Sleep(d) bool` | for a Handler or `PeerOptions.BeforeReply`: block until `ch` fires (true) or the Deadline passes / the server closes (false); `Sleep` is bounded the same way |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
@@ -231,7 +234,10 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 
 `Options.Faults` apply to `PeerHandler` as to a `LineHandler` (Delay, Override, OverrideLine,
 CloseAfter, Drip, ...): `OverrideLine: {"MODE STREAM": {"203 StreamOK."}}` is the same as
-`ModeStreamReply`. For IHAVE they apply to the 335 only, as to POST's 340.
+`ModeStreamReply`. IHAVE has two replies, as POST has: the faults apply to the 335 (and the
+435/436/480 that end IHAVE before an article), the final 235/437 takes only the final-reply faults
+(`OverrideFinal`, `DelayFinal`, ...: see the table of `Options.Faults` below). TAKETHIS has one
+reply, which takes all faults.
 
 Three modes, chosen per server:
 
@@ -271,6 +277,7 @@ at its Date.
 | `OverviewFields func(conn int, group string, fields []string) []string` | change the fields of every OVER/XOVER line (`fields[0]` is the number, then Subject, From, Date, Message-ID, References, :bytes, :lines, `Xref: ...`): overview data out of step with the articles, e.g. a Message-ID that is not the one in the article's header |
 | `HdrLines func(conn int, group, field string, lines []string) []string` | change the `number value` lines of a HDR/XHDR reply before they are sent (XHDR by `<id>` gives the id instead of the number, an absent header `(none)`; HDR gives 0 and an empty value): header data out of step with the articles |
 | `Compress bool` | offer COMPRESS DEFLATE (RFC 8054): listed in CAPABILITIES while off (after authentication when required); COMPRESS answers 206 and compresses both directions; 501 missing or invalid algorithm name (case-sensitive), 502 once active (any valid algorithm), 503 another algorithm, 480 before required auth; AUTHINFO after it 502 |
+| `CompressShape CompressShape` | shape the compressed output stream after the 206 (flush kind, split writes, bytes pipelined behind the 206, a final block), see "COMPRESS DEFLATE" below; the zero value is the default |
 | `CompressBeforeAuth bool` | with `User`/`Pass`: list and take COMPRESS before AUTHINFO as INN's nnrpd does; other reading commands still 480, AUTHINFO 502 once compressed (CAPABILITIES then lists AUTHINFO without arguments) |
 | `CompressOutputOnly bool` | offer COMPRESS, but after the 206 compress only the server's output and read the client's commands uncompressed: a half implementation, for client tests |
 
@@ -307,7 +314,7 @@ connections of one server and answers as innd does:
 | `NoStream bool` | a peer without streaming, as innd with streaming off: MODE STREAM 501, CHECK and TAKETHIS unknown (500, the article lines after a TAKETHIS are then read as commands), no `STREAMING` capability; innfeed and innxmit fall back to IHAVE |
 | `StallModeStream time.Duration` | sleep before the first MODE STREAM reply (capped at the Deadline) |
 | `OnArticle func(msgID string, wire []string)` | runs before the 239/235 with the raw (dot-stuffed) lines |
-| `Compress`, `CompressOutputOnly bool` | COMPRESS DEFLATE as in `StoreOptions` (innd itself has none; INN's nnrpd has); AUTHINFO answers 502 once active |
+| `Compress`, `CompressOutputOnly bool`, `CompressShape CompressShape` | COMPRESS DEFLATE as in `StoreOptions` (innd itself has none; INN's nnrpd has); AUTHINFO answers 502 once active |
 
 Precedence: `RawStall` wins over everything (accept TCP, never write). Otherwise the greeting is
 written unless `NoGreeting`; then `Handler` when set, else `Store` when set, else `Script`. With
@@ -330,11 +337,36 @@ Handler; New and Start copy the maps.
 | `LineDelay map[string]time.Duration` | write the reply one line at a time with this pause between lines: a slow server on a large OVER |
 | `OverrideFrom map[string]int` | `Override`/`OverrideLine` of that command apply only from its N-th use on a connection: e.g. `"OVER": 2` with `Override` `"OVER": {"480 Authentication required"}`, a login that expires in the middle of a session |
 | `OverrideTimes map[string]int` | `Override`/`OverrideLine` of that command apply at most N times per connection, then the normal reply: one 480 that the client answers with AUTHINFO before it retries |
+| `Split map[string]Split` | write the reply in pieces: `Split{At []int, Size int, Gap time.Duration}`; `At` are byte offsets in the reply (status line first, CRLFs counted; `{1, 5}` writes bytes 0, 1-4 and the rest; offsets outside the reply and repeats are ignored), `Size` (when `At` is empty) a piece every N bytes, `Gap` the pause after each piece but the last (bounded by the Deadline): a CR and its LF, or `.` and its CRLF, in different packets |
+| `DropAfterBytes map[string]int` | close the connection after N bytes of the reply (0 = before any), also inside a status line or a line; a reply of N bytes or fewer is written whole |
+| `Abort map[string]bool` | a close caused by a fault of that command is abrupt: plain TCP is reset (`SO_LINGER` 0, the client reads ECONNRESET), TLS (also after STARTTLS) closes the TCP connection without `close_notify` (Go reads `io.EOF` at a record boundary, other stacks an error such as Python's `SSLEOFError`). The key is the command that was running when `DropAfterBytes`, `DropInMultiline`, `DropInUpload` or `CloseAfter` closed it; a close by the client or by `Close` is not affected |
+| `OverrideFinal map[string][]string` | `POST`, `IHAVE`, `TAKETHIS` only: lines written instead of the final reply (240/441, 235/437, 239/439); empty: no final reply. The article is read and handled as usual (a POST is filed before the reply is built) |
+| `DelayFinal map[string]time.Duration` | `POST`, `IHAVE`, `TAKETHIS` only: sleep before the final reply, after the article was read (bounded by the Deadline) |
+| `DropInUpload map[string]int` | `POST`, `IHAVE`, `TAKETHIS` only: close the connection after the server read N lines of the incoming dot block (0 = before the first; the terminator is not counted); the cut block is not recorded. Also for a Script step's `ReadDot` |
+| `Trailing map[string]Trailing` | `Trailing{Lines []string, Gap time.Duration}`: more lines in a separate write after `Gap` (0 = at once, but as its own write) behind the reply: data that reaches the client in the next packet, e.g. behind a STARTTLS 382 before the handshake. A cut or `Endless` reply gets none |
 
 The faults apply in this order: `Delay`; `OverrideLine`, else `Override`; `LongLine`;
 `DropInMultiline`; then the write, through `Drip` when set and with `LineDelay` between lines;
 then `Endless`. `Drip`, `LineDelay` and `Endless` are bounded by the Deadline like every
 server-side wait.
+
+The byte-level faults (`Split`, `DropAfterBytes`, `Trailing`, `Abort`, `DropInUpload`) are nil by
+default. `Split` and `DropAfterBytes` work on the bytes of the whole reply after the other faults,
+so they combine with `Override`, `LongLine` and `LineDelay`; offsets count from the first byte,
+`Split.At` wins over `Size`, and `Drip` (the one-byte case) wins over `Split`. `Trailing` follows
+a reply that was written whole, also the 382 of STARTTLS. Without `Abort` a fault closes normally
+(a normal close with unread client data pending still makes the OS send an RST, as with a
+pipelined or large upload).
+
+POST and IHAVE have two replies. The first (340, 335) takes every fault above; the final one
+(240/441, 235/437) takes only `OverrideFinal`, `DelayFinal`, `Split`, `DropAfterBytes`,
+`Trailing` and `Abort`, with the same command keys as the first reply, so `Split["POST"]` cuts
+the 340 and the 240 and offsets and byte counts are per reply: use `OverrideFinal` and
+`DelayFinal` to target the final one only. `Trailing["IHAVE"]` also follows the 435, 436 and 480
+that end IHAVE without an article. `Delay`, `Override`, `OverrideLine`, `Drip`, `LineDelay`,
+`Endless`, `LongLine`, `DropInMultiline`, `OverrideFrom` and `OverrideTimes` do not touch the
+final reply. TAKETHIS has one reply, which takes all faults and also `OverrideFinal` (over
+`Override`) and `DelayFinal`, on its 480 and 500 answers too.
 
 `Count(cmd)` and `Counts()` count the upper-cased first word of every client line read through
 `Conn.ReadLine`, in all modes and on all connections (dot-block payload lines are not counted).
@@ -349,6 +381,55 @@ handler starts compression when the status it wrote for COMPRESS, after the faul
 pipelines after `COMPRESS DEFLATE` are inflated too (INN's nnrpd reads them as plain commands).
 crypto/tls has no TLS-level compression.
 
+`CompressShape` (`StoreOptions`, `PeerOptions`, `Step`, `Conn.StartCompressShaped`) shapes the
+compressed output stream, for client tests; the zero value is the behaviour above:
+
+| field | effect |
+|---|---|
+| `Flush CompressFlush` | the flush at the end of each write: `FlushSync` (default; `00 00 FF FF`), `FlushPartial` (zlib's `Z_PARTIAL_FLUSH` like INN's nnrpd: an empty fixed-Huffman block, no marker, the last 0 to 7 bits held back until the next write; literals only, so the output is larger), `FlushFinish` (the first write after the 206 and a final block go in one socket write, later writes are plain bytes after the end of the stream; the kit still inflates what the client sends) |
+| `Split Split` | cut the compressed bytes of each write into socket writes: `At` offsets from the start of the write (negative = from its end: with `FlushSync` -1 to -3 cut inside the marker, -4 before it), `Size` when `At` is empty, `Gap` after each piece but the last (bounded by the Deadline): a client sees compressed bytes that end mid-block or mid-marker |
+| `EmptyFlushWith206 bool` | an empty flush block right after the 206 CRLF, in the same socket write as the 206 line; a client must keep those bytes for its inflater. Store, Peer and Script only: a Handler that writes its own 206 cannot use it |
+| `With206 []byte` | deflated and flushed into the 206's socket write: compressed payload pipelined behind the 206 (it ends with its own flush, so `EmptyFlushWith206` adds nothing then) |
+| `AfterEnd []byte` | with `FlushFinish`: bytes in the socket write of the final block (junk, or plain text) |
+
+Faults on the COMPRESS reply (`DropAfterBytes`, `Split` offsets) count the `EmptyFlushWith206` and
+`With206` bytes too. `compress/flate` cannot flush partially and its reader holds `Z_PARTIAL_FLUSH`
+data back until more arrives; the kit writes the partial flush itself, and its client inflater reads it.
+
+**Reply corpus.** `fakeserver.ReplyCorpus()` is 112 named wrong and malformed server replies (GROUP
+answered 215, a 211 without numbers, a greeting of `hello there`, an OVER row with a letter for the
+article number) for the test suite of an NNTP client, so each client project does not write the
+table again; `ReplyCaseByName(name)` finds one. A `ReplyCase` is `{Name; Family; Cmd, Line string;
+Lines []string; Why string; Want Outcome; NeedsTimeout bool}`:
+
+| field / method | what |
+|---|---|
+| `Name`, `Why` | a unique short identifier fit for `t.Run` (`group-211-nofields`); what is wrong, with the RFC where there is one |
+| `Family` | `FamilyCode` (well-formed reply, wrong code or shape for the command: 37 cases), `FamilyStatus` (malformed status line: 37), `FamilyGreeting` (bad greeting: 10), `FamilyBlock` (bad rows or terminator of a multi-line reply: 28) |
+| `Cmd`, `Line` | the `Faults` key (upper-cased command) whose reply is replaced, and a sample client line (`GROUP g`); both empty for a greeting case |
+| `Lines` | written instead of the normal reply, each plus CRLF (a block carries its own `.` line); may hold bytes that are no valid NNTP (NUL, 8-bit, bare LF) |
+| `Want` | the generic expected client outcome: `WantError` (the call fails cleanly: no panic, no hang, no data handed back as good; then the connection is in sync or closed; 74 cases), `WantEither` (a strict client fails, a lenient one may accept; neither may panic, hang or desynchronise; 34), `WantAccept` (odd but legal, e.g. `high` below `low` for an empty group, 281 to AUTHINFO USER; the client must accept it; 4). Error types and reuse of the connection afterwards are for each client suite to agree on |
+| `NeedsTimeout` | the client waits for more data than the reply holds (a terminator that never comes): the test needs a read timeout and the call ends with one |
+| `Apply(*Options)`, `ApplyLine(*Options)` | `Faults.Override[Cmd]` (every line of that command) or `Faults.OverrideLine[Line]` (that line only); `Options.Greeting` for a greeting case; they add to the maps already in `o`. A command case needs a mode that applies `Faults`, e.g. `Options.Store` |
+| `Bytes() []byte`, `IsGreeting() bool` | exactly what the server writes for the case; whether it is a greeting case (the reply to connecting) |
+
+A missing `.` terminator is `Faults.Endless`, an overlong block line `Faults.LongLine`, a reply cut
+short `Faults.DropInMultiline`: not repeated in the corpus. A reply that depends on an earlier answer of the
+same exchange (POST answered 340 and then 340 again after the article) needs a Script or a Handler and is not
+in it.
+
+```go
+for _, rc := range fakeserver.ReplyCorpus() {
+	t.Run(rc.Name, func(t *testing.T) {
+		o := fakeserver.Options{Store: fakeserver.NewStore()}
+		rc.Apply(&o)
+		srv := fakeserver.New(t, o)
+		// connect a client to srv.Addr(); for a greeting case connecting is the test,
+		// else send rc.Line (or any line of command rc.Cmd) and look at the outcome
+	})
+}
+```
+
 **STARTTLS** (RFC 4642): the Store handler and `PeerHandler` offer it with `StartTLS`
 (`StartTLSOptions`; `Options.TLS` stays implicit TLS from the first byte). It is listed in
 CAPABILITIES while the connection is plain, not compressed and not authenticated; it answers 382
@@ -362,6 +443,38 @@ TLS is 483 as RFC 4643 describes, and the Store handler lists `AUTHINFO` without
 `CloseAfterHandshake` (the first N upgrades are closed right after the handshake). The Server
 counts handshakes and records the SNI of every ClientHello. Make the certificates with `tlscert`.
 
+### cmd/nntp-fakeserver
+
+`fakeserver` as a program, for test suites that are not written in Go: a JSON file says what the
+server does, the program serves until the test closes its stdin and then reports what it saw.
+
+```bash
+go install github.com/go-while/nntp-testkit/cmd/nntp-fakeserver@latest
+nntp-fakeserver [-listen host:port] config.json
+```
+
+| step | what |
+|---|---|
+| 1. start | the program reads `config.json` and listens (default `127.0.0.1:0`, or `-listen`, or `Options.Addr` of the config) |
+| 2. ready | one JSON line on stdout: `{"addr","host","port","ca","ca_pem"}`; `ca` is a PEM file with the server's self-signed certificate (valid for localhost, 127.0.0.1 and ::1) and `ca_pem` its text: a client verifies implicit TLS and STARTTLS against it. The certificate and the file are made on every start in a temporary directory that is removed on exit |
+| 3. serve | until stdin reaches end of file, or SIGINT or SIGTERM |
+| 4. summary | one more JSON line: `lines` (client lines of all connections), `mismatches`, `articles` (dot blocks received), `notes` (what the server ran into itself: a failed handshake, a cut-off block), `accepted`, `counts` (lines per upper-cased command), `tls_handshakes`, `tls_failed`, `server_names` (SNI), `max_open`, `closed`, and exact base64 forms for any byte that is not UTF-8: `lines_b64`, `mismatches_b64`, `articles_raw` (the exact block bytes, still dot-stuffed). Exit 0; 2 and a message on stderr for a bad config or flag, 1 for another failure |
+
+The config is one JSON object with a `Mode`:
+
+| `Mode` | runs |
+|---|---|
+| `store` | a Store (`Store`: `Groups`, `Articles`) with `Options.StoreOpts` and `Options.Faults`: the RFC 3977 reader of the kit |
+| `peer` | `PeerOptions`: a transit peer (IHAVE, CHECK, TAKETHIS); `Options.Faults` apply |
+| `script` | `Options.Script`: lines of text, as `fakeserver.Step` |
+| `raw` | `Raw`: a byte-exact script of steps (`Expect`, `ReadDot`, `Send` chunks of `Text` or `B64`, `Sleep`, `Then`: `close`, `rst`, `hang`, `starttls`, `inflate`), run by this program |
+
+The keys are the Go field names of the kit types, matched exactly, and a key that does not exist is
+an error. Durations are numbers of milliseconds. `Options.TLS: true` is implicit TLS; a `StartTLS`
+of `{}` offers STARTTLS with the same certificate. Functions, channels and the Store itself cannot be
+set from JSON; the keys of `Faults` maps are upper-case command names. `nntp-fakeserver -h` and the
+package doc (`go doc ./cmd/nntp-fakeserver`) have the full schema with examples.
+
 ### tlscert
 
 | API | what |
@@ -374,6 +487,8 @@ counts handshakes and records the SNI of every ClientHello. Make the certificate
 | `(*Leaf) TLSCertificate() tls.Certificate`, `ServerConfig() *tls.Config`, `ClientConfig(serverName) *tls.Config` | for Go servers and fakes (`fakeserver.StartTLSOptions.Config`, `Options.TLS`) and clients (`client.Conn.TryStartTLS`); `CA.ClientConfig` too |
 | `(*Leaf) Write(tb, dir) Files{Cert, Key, CA string}`, `WriteKeyMode(tb, dir, mode)` | `cert.pem`, `key.pem` (mode 0600, files replaced atomically) and `ca.pem` in `dir` (`""` = `tb.TempDir()`), for servers that read paths from their config (INN, diablo, NewsCache); a server running as another user needs `WriteKeyMode` 0640 + chgrp, or 0644 |
 | `(*CA) WriteCA(tb, dir) string` | `ca.pem` alone; its path |
+| `GenerateCA() (*CA, error)`, `(*CA) GenerateLeaf(Options) (*Leaf, error)`, `GenerateSelfSigned(Options) (*Leaf, error)` | `NewCA`, `Issue` and `SelfSigned` without a tb: return the error instead of failing a test, for code outside a test such as a fake server program run by another language's test suite (`cmd/nntp-fakeserver`) |
+| `(*CA) WriteCAFile(dir) (string, error)`, `(*Leaf) WriteFiles(dir, keyMode os.FileMode) (Files, error)` | `WriteCA` and `WriteKeyMode` without a tb; `dir` is required (`""` is an error, not a temp dir; a missing `dir` is created); `WriteFiles` with mode 0600 is what `Write` does |
 
 A leaf made to fail (`Expired`, `NotYetValid`, another name) still carries the issuer's trust, so
 the failure is the certificate's alone: `*tls.CertificateVerificationError` wrapping
@@ -428,9 +543,10 @@ the test output with `tb.Log`, each part capped at `LogBytes`. `Stop` needs a Un
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
 | `(Report) Require(tb, names ...string)` | fails `tb` once per named check that did not Pass: a Fail, a Skip (not a pass) and a name not in `Names()`; each line has status, RFC and Detail |
 | `(Report) RequireNoFail(tb)` | fails `tb` once per Fail (what `Run` does, for a `ReportOnly` or `Check` report); an empty report fails too |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; Allow map[string]string; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Allow` maps a check name to a substring: a Fail of that check whose Detail contains it becomes a Skip "allowed: <Detail>" (known server bugs, without dropping the rest of the check; `Skip` drops the whole check). Use a specific substring: a check stops at its first mistake, so everything after an allowed Fail goes unseen; `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
-| `type Result struct { Name string; Status Status; Detail, RFC, Missing string }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note); on a Skip for a capability the server does not advertise, `Missing` names it ("NEWNEWS", "STREAMING", "LIST ACTIVE.TIMES") and `Detail` reads "<Missing> not advertised": match skips on `Missing` |
-| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; Allow map[string]string; AllowReply []AllowReply; CommitWait time.Duration; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Allow` maps a check name to a substring: a Fail of that check whose Detail contains it becomes a Skip "allowed: <Detail>" (known server bugs, without dropping the rest of the check; `Skip` drops the whole check). Use a specific substring: a check stops at its first mistake, so everything after an allowed Fail goes unseen; `AllowReply` is the same by what the server did (see below); `CommitWait` is the window in which `check-have` and `ihave-have` repeat an offer the server deferred (0: 5s, negative: ask once); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
+| `type AllowReply struct { Check, Cmd string; Code int }` | an `Options.AllowReply` entry: allows a Fail of check `Check` that is a wrong reply with code `Code` to command `Cmd` (see below) |
+| `type Result struct { Name string; Status Status; Detail, RFC, Missing, Cmd string; Code int }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note); on a Skip for a capability the server does not advertise, `Missing` names it ("NEWNEWS", "STREAMING", "LIST ACTIVE.TIMES") and `Detail` reads "<Missing> not advertised": match skips on `Missing`; `Cmd` and `Code` are set on a Fail that is a wrong reply code to a command (and stay on one that `Allow`/`AllowReply` turned into a Skip), empty and 0 otherwise |
+| `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO; `String()` ends a Fail line that is a wrong reply with `[reply: CMD code]` (e.g. `[reply: IHAVE 335]`) |
 
 Every check opens its own connection (`Options.Workers` at a time, default 4; the results keep
 the order of `Names()`), so one failure cannot poison the next. The checks that post run after
@@ -440,6 +556,25 @@ in `Options.Skip` ("skipped by option"), needs credentials without `User` or pos
 (unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
 broken greeting fails `greeting` once and skips the rest; a panic in a check is its Fail.
 The articles that checks post carry a Message-ID under `@conformance.invalid`.
+
+`Options.AllowReply` tolerates a known server bug by what the server did, not by the words of a
+Detail, which a later version of the kit may reword. An entry `{Check, Cmd, Code}` allows a Fail of
+that check that is a wrong reply with that code to that command (`{"ihave-have", "IHAVE", 335}`); the
+Fail becomes a Skip "allowed: <Detail>", as with `Allow`, and the two work side by side. `Check` is
+required and must be a check name; `Cmd` is the command's keywords (`IHAVE`, `AUTHINFO PASS`,
+`MODE STREAM`), compared case-insensitively word by word as a prefix of `Result.Cmd` (`LIST`
+matches `LIST ACTIVE`), empty: any command; `Code` 0: any code; an entry with neither allows
+nothing. `Result.Cmd` and `Result.Code` of the Fail (shown by `Report.String` as `[reply: IHAVE
+335]`, by `-json` as `cmd` and `code`) tell what to write. A Fail that is no wrong reply code (a
+wire mistake, a stray byte, a malformed list) has no `Cmd` and `Code` and is allowed by
+`Options.Allow` only. As with `Allow`, an allowed Fail ends its check.
+
+`Options.CommitWait`: a server that stores articles asynchronously answers the immediate
+re-offer in `check-have` (CHECK after TAKETHIS) and `ihave-have` (IHAVE after IHAVE) with 431
+or 436 while the article is in flight. The check offers again, pausing 100ms and doubling up to
+1s, until the server answers 438 / 435 (Pass, the Detail counts the re-offers), 238 / 335 (Fail:
+the server forgot the article) or the window ends (Skip, as before: a server may defer forever).
+Default 5s; negative: no retry, the first 431 / 436 is the Skip.
 
 `Options.StrictOverviewFmt` requires the RFC 3977 section 8.4.2 preferred `:bytes` and
 `:lines` metadata names in both the format and OVER checks. The zero value remains
@@ -492,10 +627,12 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-servername name` | TLS server name (SNI, and the name the certificate must carry) for `-tls` and STARTTLS; default the host of `-addr` |
 | `-starttls-verify` | verify the certificate in the STARTTLS checks (against `-ca`, else the system roots); without it (and without `-ca`) the handshake is not verified and the report says so |
 | `-allow name=substring` | repeatable: a Fail of check `name` whose detail contains the substring becomes a Skip "allowed: ..." (a known server bug); the substring must not be empty, an unknown check is a usage error, and a check named twice is one too (one substring per check); use a specific substring, because everything after the check's first mistake goes unseen |
+| `-allow-reply name:CMD=code` | repeatable: `Options.AllowReply`: a Fail of check `name` that is a wrong reply with `code` to a command starting with `CMD` (words case-insensitive) becomes a Skip "allowed: ..."; `CMD` or `=code` may be left out, not both (`help:HELP`, `ihave-have:IHAVE=335`, `mode-stream:=502`); the code is 100-599, an unknown check is a usage error; the report and `-json` show the `cmd` and `code` of a Fail |
+| `-commit-wait d` | how long `check-have` and `ihave-have` re-offer an article the server deferred (431/436) while it commits it asynchronously; default 5s (0), negative: do not retry |
 | `-deadline` | hang guard per read and write, default `10s` |
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
-| `-json` | the report as JSON (`results` with `name`, `status`, `rfc`, `detail` and, for a skip for a missing capability, `missing`; `capabilities`; `pass`/`fail`/`skip` counts) instead of text |
+| `-json` | the report as JSON (`results` with `name`, `status`, `rfc`, `detail` and, for a skip for a missing capability, `missing`, for a wrong reply `cmd` and `code`; `capabilities`; `pass`/`fail`/`skip` counts) instead of text |
 | `-strict-overview-fmt` | require preferred `:bytes`/`:lines` instead of the RFC-permitted legacy aliases; off by default |
 
 Exit status: 0 no Fail, 1 any Fail (also a 400/502 greeting), 2 a usage error or a server that
