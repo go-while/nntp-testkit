@@ -690,7 +690,15 @@ func sample(t reflect.Type) (string, bool) {
 		if !hasExported(t) {
 			return "", false
 		}
-		return `{}`, true
+		var parts []string // every field that can be set, so a nested struct is exercised too
+		for i := range t.NumField() {
+			if f := t.Field(i); f.IsExported() {
+				if v, ok := sample(f.Type); ok {
+					parts = append(parts, `"`+f.Name+`": `+v)
+				}
+			}
+		}
+		return `{` + strings.Join(parts, ", ") + `}`, true
 	}
 	return "", false
 }
@@ -778,7 +786,7 @@ func TestBinarySafe(t *testing.T) {
 	if !strings.Contains(s.Articles[0][0], "\ufffd") {
 		t.Errorf("the plain form is lossy by nature: %q", s.Articles[0])
 	}
-	if len(s.LinesB64) != len(s.Lines) || b64(t, s.LinesB64[2]) != "XYZ caf\xe9" {
+	if len(s.LinesB64) != len(s.Lines) || b64(t, s.LinesB64[1]) != "XYZ caf\xe9" {
 		t.Errorf("lines_b64 %q lines %q", s.LinesB64, s.Lines)
 	}
 
@@ -985,4 +993,53 @@ func TestMainSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestByteFaults: the byte-level Faults (Split, Trailing, DropAfterBytes, Abort, OverrideFinal,
+// DelayFinal, DropInUpload) come through with their nested fields and durations in ms.
+func TestByteFaults(t *testing.T) {
+	cfg, err := parseConfig([]byte(`{"Mode": "store", "Options": {"Faults": {
+	  "Split": {"DATE": {"At": [1, 5], "Size": 3, "Gap": 2.5}},
+	  "Trailing": {"DATE": {"Lines": ["111 x", "."], "Gap": 40}},
+	  "DropAfterBytes": {"GROUP": 4}, "Abort": {"GROUP": true},
+	  "OverrideFinal": {"POST": ["441 no"]}, "DelayFinal": {"POST": 15}, "DropInUpload": {"POST": 2}}}}`), &tls.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := cfg.Options.Faults
+	if sp := f.Split["DATE"]; !slices.Equal(sp.At, []int{1, 5}) || sp.Size != 3 || sp.Gap != 2500*time.Microsecond {
+		t.Errorf("Split %+v", sp)
+	}
+	if tr := f.Trailing["DATE"]; !slices.Equal(tr.Lines, []string{"111 x", "."}) || tr.Gap != 40*time.Millisecond {
+		t.Errorf("Trailing %+v", tr)
+	}
+	if f.DropAfterBytes["GROUP"] != 4 || !f.Abort["GROUP"] || f.OverrideFinal["POST"][0] != "441 no" ||
+		f.DelayFinal["POST"] != 15*time.Millisecond || f.DropInUpload["POST"] != 2 {
+		t.Errorf("faults %+v", f)
+	}
+
+	// End to end: the status line of DATE in two writes with a pause, then the trailing line.
+	p := startProc(t, `{"Mode": "store", "Options": {"Faults": {
+	  "Split": {"DATE": {"At": [3], "Gap": 100}}, "Trailing": {"DATE": {"Lines": ["TRAILER"], "Gap": 50}}}}}`)
+	nc, err := net.DialTimeout("tcp", p.ready.Addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	br := bufio.NewReader(nc)
+	br.ReadString('\n')
+	io.WriteString(nc, "DATE\r\n")
+	_ = nc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var got []string
+	for range 2 {
+		l, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, strings.TrimSpace(l))
+	}
+	if !strings.HasPrefix(got[0], "111 ") || got[1] != "TRAILER" {
+		t.Errorf("got %q", got)
+	}
+	p.finish()
 }

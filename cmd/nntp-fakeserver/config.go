@@ -381,7 +381,7 @@ func (d *decoder) decodeValue(dst reflect.Value, raw json.RawMessage, path strin
 		dst.Set(out)
 	case reflect.Slice:
 		if t.Elem().Kind() == reflect.Uint8 { // []byte is a base64 string, as in encoding/json
-			if err := json.Unmarshal(raw, dst.Addr().Interface()); err != nil {
+			if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte(`"`)) || json.Unmarshal(raw, dst.Addr().Interface()) != nil {
 				return fmt.Errorf("want a base64 string")
 			}
 			return nil
