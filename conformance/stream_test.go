@@ -447,6 +447,9 @@ func TestCheckHaveWants(t *testing.T) {
 		if r.Status != Fail || !strings.Contains(r.Detail, `got "238 <`) || !strings.Contains(r.Detail, "want 438") {
 			t.Errorf("%d deferrals: got %v %q, want FAIL 238", defers, r.Status, r.Detail)
 		}
+		if defers > 0 && !strings.Contains(r.Detail, "(after 2 re-offers)") {
+			t.Errorf("Detail %q lacks the re-offers", r.Detail)
+		}
 	}
 }
 
@@ -518,5 +521,30 @@ func TestAllowReplyIhave(t *testing.T) {
 	r = runOne(o, c)
 	if r.Status != Skip || !strings.HasPrefix(r.Detail, "allowed: IHAVE <") {
 		t.Errorf("allowed: got %+v, want SKIP allowed", r)
+	}
+}
+
+// TestAllowReplyWrongID: a legal negative reply that names another message-id fails without
+// a Cmd and Code, so no AllowReply can hide it; a really wrong code still has both.
+func TestAllowReplyWrongID(t *testing.T) {
+	s := fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "STREAMING", "."}},
+		{Expect: "MODE STREAM", Reply: []string{"203 streaming"}},
+		{Expect: "CHECK .*", Reply: []string{"431 <other@x>"}},
+	}})
+	c := asFind(t, streamChecks(), "check-new")
+	r := runOne(Options{Addr: s.Addr(), AllowReply: []AllowReply{{"check-new", "CHECK", 431}}}, c)
+	if r.Status != Fail || r.Cmd != "" || r.Code != 0 || !strings.Contains(r.Detail, "does not name") {
+		t.Errorf("wrong id: %+v, want FAIL without Cmd and Code", r)
+	}
+
+	s = fakeserver.New(t, fakeserver.Options{Script: []fakeserver.Step{
+		{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "STREAMING", "."}},
+		{Expect: "MODE STREAM", Reply: []string{"203 streaming"}},
+		{Expect: "CHECK .*", Reply: []string{"500 what"}},
+	}})
+	r = runOne(Options{Addr: s.Addr()}, c)
+	if r.Status != Fail || r.Cmd != "CHECK" || r.Code != 500 {
+		t.Errorf("wrong code: %+v, want FAIL with Cmd CHECK, Code 500", r)
 	}
 }

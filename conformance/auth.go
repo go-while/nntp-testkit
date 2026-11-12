@@ -75,7 +75,7 @@ func asDetail(res Result, notes ...string) Result {
 // asShown is the command as a Detail shows it: the password of AUTHINFO PASS is masked.
 func asShown(format string, args ...any) string {
 	shown := fmt.Sprintf(format, args...)
-	if strings.HasPrefix(strings.ToUpper(shown), "AUTHINFO PASS ") {
+	if f := strings.Fields(strings.ToUpper(shown)); len(f) > 2 && f[0] == "AUTHINFO" && f[1] == "PASS" {
 		shown = "AUTHINFO PASS ***"
 	}
 	return shown

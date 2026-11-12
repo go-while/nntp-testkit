@@ -298,6 +298,7 @@ func TestRunAllowReply(t *testing.T) {
 		{"empty-entry", []string{"-allow-reply", "help:"}, 2, "", "allows nothing"},
 		{"bad-code", []string{"-allow-reply", "help:HELP=abc"}, 2, "", "reply code"},
 		{"code-range", []string{"-allow-reply", "help:HELP=42"}, 2, "", "reply code"},
+		{"code-range-high", []string{"-allow-reply", "help:HELP=600"}, 2, "", "reply code"},
 		{"unknown-check", []string{"-allow-reply", "nosuch:HELP=500"}, 2, "", `unknown check "nosuch"`},
 		{"commit-wait", []string{"-commit-wait", "-1s"}, 1, "FAIL help", ""},
 	}

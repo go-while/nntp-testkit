@@ -305,6 +305,7 @@ func checkCompress(s *session, c check) Result {
 // compressPipelined sends DATE, HELP and DATE in one write, then a hundred DATEs in one
 // write, and checks the replies.
 func compressPipelined(s *session) error {
+	s.bad = nil
 	replies, err := s.c.TryPipeline([]string{"DATE", "HELP", "DATE"}, nil)
 	if err != nil {
 		return fmt.Errorf("over COMPRESS: DATE, HELP, DATE pipelined in one write: %s", s.cerr(err))
@@ -343,7 +344,7 @@ func compressBackToBack(s *session) error {
 		}
 	}
 	for i, want := range []int{111, 100, 111} {
-		code, line, err := s.c.ReadStatus()
+		code, line, err := s.readStatus()
 		if err != nil {
 			return fmt.Errorf("over COMPRESS: reply %d of 3 commands sent in separate writes: %s", i+1, s.cerr(err))
 		}
@@ -510,7 +511,7 @@ func compressUpload(lineByLine bool) func(*session, check) Result {
 		} else if err := s.c.Send(wire); err != nil {
 			return c.failf("POST over COMPRESS: sending the article %s: %v", sent, err)
 		}
-		code, line, err := s.c.ReadStatus()
+		code, line, err := s.readStatus()
 		switch {
 		case errors.Is(err, os.ErrDeadlineExceeded):
 			return c.failf("POST over COMPRESS: no reply within %v after the article (%d lines, %d bytes before compression, sent %s): "+

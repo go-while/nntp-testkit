@@ -141,8 +141,8 @@ type Result struct {
 	// Match skips on Missing rather than on Detail.
 	Missing string
 	// Cmd and Code are set on a Fail that is a wrong reply code to a command: the keywords of
-	// the command ("IHAVE", "AUTHINFO PASS", "LIST ACTIVE": the leading upper-case words, no
-	// arguments, a password never) and the code of the reply. They are what Options.AllowReply
+	// the command, upper-case ("IHAVE", "AUTHINFO PASS", "LIST ACTIVE": the command word and,
+	// for AUTHINFO, MODE, COMPRESS and LIST, the keyword after it; never an argument) and the code of the reply. They are what Options.AllowReply
 	// matches, and stay set on a Fail that was allowed (a Skip then). Empty and 0 on any other
 	// result.
 	Cmd  string
@@ -242,7 +242,7 @@ func (r Report) String() string {
 			fmt.Fprintf(&b, ": %s", res.Detail)
 		}
 		if res.Code != 0 {
-			fmt.Fprintf(&b, " [reply: %s %d]", res.Cmd, res.Code)
+			fmt.Fprintf(&b, " [reply: %s]", strings.TrimSpace(fmt.Sprintf("%s %d", res.Cmd, res.Code)))
 		}
 		b.WriteByte('\n')
 	}

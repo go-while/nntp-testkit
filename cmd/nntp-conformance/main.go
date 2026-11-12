@@ -98,8 +98,8 @@ func (a *allowReplyFlag) Set(v string) error {
 	e := conformance.AllowReply{Check: name, Cmd: strings.TrimSpace(cmd)}
 	if hasCode {
 		code, err := strconv.Atoi(strings.TrimSpace(codeText))
-		if err != nil || code < 100 || code > 999 {
-			return fmt.Errorf("%q: the code must be an NNTP reply code (100-999)", v)
+		if err != nil || code < 100 || code > 599 {
+			return fmt.Errorf("%q: the code must be an NNTP reply code (100-599)", v)
 		}
 		e.Code = code
 	}

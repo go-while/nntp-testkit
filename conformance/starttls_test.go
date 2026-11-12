@@ -542,6 +542,16 @@ func TestAllowReply(t *testing.T) {
 		t.Errorf("Allow with a non-matching AllowReply: %+v, want SKIP", r)
 	}
 
+	// a non-reply Fail after a quiet-window check carries no stale Cmd either
+	quiet := check{Name: "help", RFC: "x", Run: func(s *session, c check) Result {
+		_, _, _ = s.expect([]int{100}, "HELP") // 500: tolerated
+		_ = s.quiet(time.Millisecond)
+		return c.fail("another mistake")
+	}}
+	if r := run(Options{}, quiet); r.Cmd != "" || r.Code != 0 {
+		t.Errorf("after quiet: %+v, want no Cmd and Code", r)
+	}
+
 	// only the exchange a check ended on counts: a wrong code that the check went on after
 	// is forgotten, and a Fail that is no wrong reply has no Cmd or Code
 	stale := check{Name: "help", RFC: "x", Run: func(s *session, c check) Result {
@@ -580,27 +590,48 @@ func TestAllowReplyMatches(t *testing.T) {
 	}
 }
 
-// cmdName keeps the leading keywords of a shown command, never an argument or a password.
+// cmdName keeps the command name of a shown command, never an argument or a password.
 func TestCmdName(t *testing.T) {
 	for in, want := range map[string]string{
-		"IHAVE <a@b>":                   "IHAVE",
-		"AUTHINFO PASS SECRET":          "AUTHINFO PASS", // masked before: "AUTHINFO PASS ***"
-		"LIST OVERVIEW.FMT":             "LIST OVERVIEW.FMT",
-		"GROUP alt.test":                "GROUP",
-		"MODE STREAM":                   "MODE STREAM",
-		"IHAVE <a@b> (article sent)":    "IHAVE",
-		"HDR Subject 1-5":               "HDR",
-		"STAT 12":                       "STAT",
-		"":                              "",
-		"<a@b>":                         "",
-		"TAKETHIS <id> (article sent)":  "TAKETHIS",
-		"AUTHINFO USER fred":            "AUTHINFO USER",
-		"over compress: pipelined DATE": "",
+		"IHAVE <a@b>":                  "IHAVE",
+		"AUTHINFO PASS SECRET":         "AUTHINFO PASS",
+		"AUTHINFO PASS\tSECRET":        "AUTHINFO PASS",
+		"authinfo\tpass\tSECRET":       "AUTHINFO PASS",
+		"AUTHINFO USER FED":            "AUTHINFO USER",
+		"AUTHINFO FED":                 "AUTHINFO",
+		"GROUP ALT.TEST":               "GROUP",
+		"LIST OVERVIEW.FMT":            "LIST OVERVIEW.FMT",
+		"LIST ACTIVE ALT.*":            "LIST ACTIVE",
+		"LIST ALT.TEST":                "LIST",
+		"mode stream":                  "MODE STREAM",
+		"MODE FOO":                     "MODE",
+		"IHAVE <a@b> (article sent)":   "IHAVE",
+		"HDR Subject 1-5":              "HDR",
+		"STAT 12":                      "STAT",
+		"COMPRESS DEFLATE":             "COMPRESS DEFLATE",
+		"TAKETHIS <id> (article sent)": "TAKETHIS",
+		"":                             "",
+		"<a@b>":                        "",
+		"a=b c":                        "",
 	} {
 		s := &session{}
 		s.mismatch(in, 500)
 		if s.bad.cmd != want {
 			t.Errorf("mismatch(%q): cmd %q, want %q", in, s.bad.cmd, want)
 		}
+	}
+	// the password is masked in a shown command, whatever separates the words
+	for _, in := range []string{"AUTHINFO PASS secret", "authinfo pass secret", "AUTHINFO\tPASS\tsecret", "AUTHINFO PASS  secret"} {
+		if got := asShown("%s", in); got != "AUTHINFO PASS ***" {
+			t.Errorf("asShown(%q) = %q, want the password masked", in, got)
+		}
+	}
+}
+
+// TestReportStringReply: a Fail with a code but no command prints no double space.
+func TestReportStringReply(t *testing.T) {
+	r := Report{Results: []Result{{Name: "a", Status: Fail, RFC: "x", Code: 335}, {Name: "b", Status: Fail, RFC: "x", Cmd: "IHAVE", Code: 335}}}
+	if got := r.String(); !strings.Contains(got, " [reply: 335]\n") || !strings.Contains(got, " [reply: IHAVE 335]\n") {
+		t.Errorf("String:\n%s", got)
 	}
 }

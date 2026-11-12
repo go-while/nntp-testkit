@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,18 +45,29 @@ func (s *session) mismatch(cmd string, code int) {
 	s.bad = &wrongReply{cmd: cmdName(asShown("%s", cmd)), code: code}
 }
 
-// cmdName returns the keywords at the start of a command as shown: the leading words made of
-// upper-case letters, digits-free, '-' and '.' ("IHAVE <id>" is "IHAVE", "AUTHINFO PASS ***"
-// is "AUTHINFO PASS", "LIST OVERVIEW.FMT" is itself, "GROUP alt.test" is "GROUP").
+// cmdSecond lists the commands whose second word is part of the command name and the words
+// that may follow (the other second words are arguments: groups, ids, ranges, user names).
+var cmdSecond = map[string][]string{
+	"AUTHINFO": {"USER", "PASS", "SASL", "GENERIC"},
+	"MODE":     {"READER", "STREAM"},
+	"COMPRESS": {"DEFLATE"},
+	"LIST":     {"ACTIVE", "ACTIVE.TIMES", "COUNTS", "DISTRIB.PATS", "HEADERS", "MODERATORS", "MOTD", "NEWSGROUPS", "OVERVIEW.FMT", "SUBSCRIPTIONS"},
+}
+
+// cmdName returns the name of a command as shown, upper-cased: its first word, plus the second
+// one for the commands of cmdSecond when it is one of the listed words ("IHAVE <id>" is
+// "IHAVE", "mode stream" is "MODE STREAM", "AUTHINFO PASS ***" is "AUTHINFO PASS", "GROUP
+// alt.test" is "GROUP", "LIST ACTIVE alt.*" is "LIST ACTIVE"). It never holds an argument.
+// A first word that is no command name (not letters, digits and '-') gives "".
 func cmdName(shown string) string {
-	var words []string
-	for _, w := range strings.Fields(shown) {
-		if strings.Trim(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZ-.") != "" {
-			break
-		}
-		words = append(words, w)
+	f := strings.Fields(strings.ToUpper(shown))
+	if len(f) == 0 || strings.Trim(f[0], "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-") != "" {
+		return ""
 	}
-	return strings.Join(words, " ")
+	if len(f) > 1 && slices.Contains(cmdSecond[f[0]], f[1]) {
+		return f[0] + " " + f[1]
+	}
+	return f[0]
 }
 
 // deadline is the hang guard of this run.
@@ -102,6 +114,7 @@ func dial(o Options) (*session, error) {
 // terminator). It is called once per session by Run before the check; a check may call it
 // again (e.g. after MODE READER or AUTHINFO) and gets the new list.
 func (s *session) capabilities() ([]string, error) {
+	s.bad = nil
 	code, line, err := s.c.TryCmd("CAPABILITIES")
 	if err != nil {
 		s.caps, s.capsErr = nil, err
@@ -138,13 +151,22 @@ func (s *session) cmd(format string, args ...any) (int, string, error) {
 	return s.c.TryCmd(format, args...)
 }
 
+// readStatus reads the status line of a command sent with s.c.Send; like cmd it forgets the
+// last wrong reply.
+func (s *session) readStatus() (int, string, error) {
+	s.bad = nil
+	return s.c.ReadStatus()
+}
+
 // block reads a dot block after a 2xx multi-line reply.
 func (s *session) block() ([]string, error) {
+	s.bad = nil
 	return s.c.TryReadDotLines()
 }
 
 // quiet fails when anything arrives within d (a stray byte, a second status line).
 func (s *session) quiet(d time.Duration) error {
+	s.bad = nil // a Fail from here is no wrong reply code
 	return s.c.ExpectNoPending(d)
 }
 

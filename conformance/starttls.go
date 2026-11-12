@@ -233,7 +233,7 @@ func checkStartTLSPipelined(s *session, c check) Result {
 	if err := s.c.Send("STARTTLS\r\nDATE\r\n"); err != nil {
 		return c.failf("STARTTLS, DATE: %v", err)
 	}
-	code, line, err := s.c.ReadStatus()
+	code, line, err := s.readStatus()
 	switch {
 	case err != nil:
 		return c.failf("STARTTLS pipelined with DATE: %s", describe(err))

@@ -195,26 +195,28 @@ func asSend(s *session, c check, id string, want []int, soft map[int]string, for
 		return code, line, &r
 	}
 	r := asJudge(c, shown, code, line, id, want, soft)
-	s.judged(shown, code, want, r)
+	s.judged(shown, code, want, soft, r)
 	return code, line, r
 }
 
 // asReply reads the status line of cmd (already sent) and scores it with asJudge.
 func asReply(s *session, c check, cmd, id string, want []int, soft map[int]string) (int, string, *Result) {
-	code, line, err := s.c.ReadStatus()
+	code, line, err := s.readStatus()
 	if err != nil {
 		r := c.failf("%s: %v", cmd, err)
 		return code, line, &r
 	}
 	r := asJudge(c, cmd, code, line, id, want, soft)
-	s.judged(cmd, code, want, r)
+	s.judged(cmd, code, want, soft, r)
 	return code, line, r
 }
 
-// judged records the wrong reply code behind a Fail that asJudge returned (not the Fail of a
-// reply that names another message-id).
-func (s *session) judged(cmd string, code int, want []int, r *Result) {
-	if r != nil && r.Status == Fail && !asIntIn(code, want) {
+// judged records the wrong reply code behind a Fail that asJudge returned: a code that is
+// neither wanted nor a legal negative reply. The Fail of a legal reply that names another
+// message-id is no wrong code and is not recorded.
+func (s *session) judged(cmd string, code int, want []int, soft map[int]string, r *Result) {
+	s.bad = nil
+	if _, isSoft := soft[code]; r != nil && r.Status == Fail && !asIntIn(code, want) && !isSoft {
 		s.mismatch(cmd, code)
 	}
 }
@@ -258,7 +260,7 @@ func asAbortIhave(s *session, c check, fail Result) Result {
 		fail.Detail += fmt.Sprintf("; aborting with an empty article: %v", err)
 		return fail
 	}
-	if _, line, err := s.c.ReadStatus(); err != nil {
+	if _, line, err := s.c.ReadStatus(); err != nil { // not readStatus: the 335 stays the mistake of the check
 		fail.Detail += fmt.Sprintf("; reply to the empty article: %v", err)
 	} else {
 		fail.Detail += fmt.Sprintf("; the empty article got %q", line)
@@ -412,6 +414,9 @@ func checkCheckHave(s *session, c check) Result {
 		return code, r
 	})
 	if r != nil {
+		if r.Status == Fail && retries > 0 {
+			r.Detail += fmt.Sprintf(" (after %d re-offers)", retries)
+		}
 		return *r
 	}
 	return asDetail(asSettle(s, c), asRetried(retries, took))
