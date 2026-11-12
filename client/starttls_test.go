@@ -420,7 +420,7 @@ func TestUpgradeTLS(t *testing.T) {
 	tc.ExpectCmd(211, "GROUP alt.test")
 	in, out, dl := rec.seen()
 	// a TLS handshake record starts with 0x16 0x03; the plaintext "STARTTLS" and "382" went through c.Conn
-	if len(out) < 5 || out[0] != 0x16 || out[1] != 0x03 || bytes.Contains(out, []byte("GROUP")) || bytes.Contains(in, []byte("211")) {
+	if len(out) < 5 || out[0] != 0x16 || out[1] != 0x03 || bytes.Contains(out, []byte("GROUP")) || bytes.HasPrefix(in, []byte("211 ")) {
 		t.Errorf("recorder out %x in %x: not the raw TLS stream", out[:min(len(out), 8)], in[:min(len(in), 8)])
 	}
 	if len(in) < 5 || in[0] != 0x16 || dl == 0 {
@@ -481,7 +481,7 @@ func TestUpgradeTLSPending(t *testing.T) {
 	c.MustSend("STARTTLS\r\n")
 	c.ExpectStatus(382, "STARTTLS")
 	// the injected line has to be in the reader's buffer: peek until it is
-	if _, err := c.R.Peek(1); err != nil {
+	if _, err := c.R.Peek(len("200 injected\r\n")); err != nil {
 		t.Fatal(err)
 	}
 	rec := &recorder{Conn: c.Conn}

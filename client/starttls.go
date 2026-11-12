@@ -89,11 +89,12 @@ func (c *Conn) TryUpgradeTLS(raw net.Conn, cfg *tls.Config) (*Conn, error) {
 	}
 	tc := tls.Client(raw, cfg)
 	c.bump()
-	if raw != c.Conn {
-		_ = raw.SetDeadline(time.Now().Add(c.deadline()))
-	}
+	// also on raw (a no-op repeat when raw is c.Conn); no interface comparison, which
+	// panics for a non-comparable wrapper type
+	_ = raw.SetDeadline(time.Now().Add(c.deadline()))
 	if err := tc.Handshake(); err != nil {
 		c.Close()
+		_ = raw.Close() // a wrapper may hold its own resources; closing twice is harmless
 		return nil, fmt.Errorf("STARTTLS handshake: %w", err)
 	}
 	return &Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Greeting: c.Greeting,
