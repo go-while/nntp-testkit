@@ -75,7 +75,7 @@ func asDetail(res Result, notes ...string) Result {
 // asShown is the command as a Detail shows it: the password of AUTHINFO PASS is masked.
 func asShown(format string, args ...any) string {
 	shown := fmt.Sprintf(format, args...)
-	if strings.HasPrefix(strings.ToUpper(shown), "AUTHINFO PASS ") {
+	if f := strings.Fields(strings.ToUpper(shown)); len(f) > 2 && f[0] == "AUTHINFO" && f[1] == "PASS" {
 		shown = "AUTHINFO PASS ***"
 	}
 	return shown
@@ -93,6 +93,7 @@ func asExpect(s *session, c check, want []int, format string, args ...any) (int,
 	if asIntIn(code, want) {
 		return code, line, nil
 	}
+	s.mismatch(shown, code)
 	r := c.failf("%s: got %q, want %s", shown, line, asCodes(want))
 	return code, line, &r
 }
@@ -112,11 +113,13 @@ func asAuthCmd(s *session, c check, advertised bool, want []int, format string, 
 	case asIntIn(code, want):
 		return code, line, nil
 	case code == 480:
+		s.mismatch(shown, code)
 		r = c.failf("%s: got %q: RFC 4643 §2.3.1 forbids a 480 in reply to AUTHINFO", shown, line)
 	case !advertised && (code == 500 || code == 501 || code == 502):
 		r = c.skip(fmt.Sprintf("%s; %s got %q", asNotAdvertised, shown, line))
 		r.Missing = "AUTHINFO"
 	default:
+		s.mismatch(shown, code)
 		r = c.failf("%s: got %q, want %s", shown, line, asCodes(want))
 	}
 	return code, line, &r

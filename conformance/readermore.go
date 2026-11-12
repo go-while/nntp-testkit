@@ -436,13 +436,14 @@ func checkPost(s *session, c check) Result {
 	if err := s.c.Send(asArticle(s.o.PostGroup, c.Name, id)); err != nil {
 		return c.failf("POST: article: %v", err)
 	}
-	code, line, err := s.c.ReadStatus()
+	code, line, err := s.readStatus()
 	switch {
 	case err != nil:
 		return c.failf("POST (article sent): %s", describe(err))
 	case code == 441:
 		return c.skipf("server refused the article: %s", line)
 	case code != 240:
+		s.mismatch("POST", code)
 		return c.failf("POST (article sent): got %q, want 240", line)
 	}
 	if err := s.quiet(quietWindow); err != nil {

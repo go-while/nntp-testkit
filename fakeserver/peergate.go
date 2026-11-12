@@ -65,8 +65,8 @@ func (o *PeerOptions) greet(c *Conn) bool {
 }
 
 // send writes a reply of the peer: BeforeReply first, then the reply through the Faults
-// (Delay, Override, Drip, ...), or with plain as it is. False: stop serving the connection.
-func (o *PeerOptions) send(c *Conn, line string, reply []string, plain bool) bool {
+// (Delay, Override, Drip, ...); final: the final reply of IHAVE, with the faults meant for it (Conn.writeFinal). False: stop serving the connection.
+func (o *PeerOptions) send(c *Conn, line string, reply []string, final bool) bool {
 	if o.BeforeReply != nil {
 		status := ""
 		if len(reply) > 0 {
@@ -79,12 +79,11 @@ func (o *PeerOptions) send(c *Conn, line string, reply []string, plain bool) boo
 		default:
 		}
 	}
-	if plain {
-		c.last = ""
-		if len(reply) > 0 {
-			c.last = reply[0]
-		}
-		return c.WriteLines(reply...) == nil
+	switch {
+	case final:
+		return c.writeFinal(line, reply...)
+	case command(line) == "TAKETHIS":
+		return c.writeKind(line, replySole, reply)
 	}
 	return c.writeReply(line, reply...)
 }

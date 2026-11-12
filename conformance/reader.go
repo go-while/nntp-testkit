@@ -119,6 +119,7 @@ func (s *session) expect(want []int, format string, args ...any) (int, string, e
 		return code, line, fmt.Errorf("%s: %s", shown, describe(err))
 	}
 	if !slices.Contains(want, code) {
+		s.mismatch(shown, code)
 		return code, line, fmt.Errorf("%s: got %q, want %v", shown, line, want)
 	}
 	return code, line, nil
@@ -206,6 +207,7 @@ func (s *session) login() (bool, error) {
 		return false, fmt.Errorf("AUTHINFO PASS: %s", describe(err))
 	}
 	if code != 281 {
+		s.mismatch("AUTHINFO PASS", code)
 		return false, fmt.Errorf("AUTHINFO PASS: got %q, want 281", line)
 	}
 	if err := s.quiet(quietWindow); err != nil {

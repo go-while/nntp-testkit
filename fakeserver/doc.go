@@ -207,6 +207,13 @@
 //		LineDelay       map[string]time.Duration // command → write its reply one line at a time, this pause between lines
 //		OverrideFrom    map[string]int           // command → its Override/OverrideLine apply only from its N-th use on a connection
 //		OverrideTimes   map[string]int           // command → its Override/OverrideLine apply at most N times per connection
+//		Split           map[string]Split         // command → write its reply in pieces: Split{At []int (byte offsets) or Size int, Gap time.Duration between pieces}
+//		DropAfterBytes  map[string]int           // command → close the connection after this many bytes of its reply (0 = before any)
+//		Abort           map[string]bool          // command → a close by one of its faults is abrupt: TCP RST, on TLS no close_notify
+//		OverrideFinal   map[string][]string      // POST/IHAVE/TAKETHIS → lines written instead of the final reply (240/441, 235/437, 239/439); empty: none
+//		DelayFinal      map[string]time.Duration // POST/IHAVE/TAKETHIS → sleep before the final reply
+//		DropInUpload    map[string]int           // POST/IHAVE/TAKETHIS → close the connection after this many lines of the incoming dot block
+//		Trailing        map[string]Trailing      // command → Trailing{Lines []string, Gap time.Duration}: more lines in a separate write after the reply and Gap
 //	}
 //	// Keys are upper-cased command names ("ARTICLE"), OverrideLine's the whole client line
 //	// normalised (command upper-cased, arguments joined by single spaces); the hooks apply in
@@ -216,6 +223,23 @@
 //	// On a compressed connection the faults work on the inflated stream; each write is deflated, sync-flushed and sent in one socket write.
 //	// CloseAfter counts every client line, mismatches included. Drip and Endless stop at the
 //	// Deadline and close the connection.
+//	// Byte level: Split and DropAfterBytes work on the bytes of the whole reply (offsets count from
+//	// its first byte, status line included; Split.At wins over Size; Drip is the one-byte case and
+//	// wins over Split); a reply of DropAfterBytes bytes or fewer is written whole. Trailing follows
+//	// a reply that was written whole (not a cut or Endless one), also the 382 of STARTTLS. Abort is
+//	// keyed by the command that was running when DropAfterBytes, DropInMultiline, DropInUpload or
+//	// CloseAfter closed the connection; without it the close is normal (a normal close with unread
+//	// client data pending still makes the OS send an RST). On plain TCP Abort sets SO_LINGER 0
+//	// (the client reads ECONNRESET); on TLS it closes the TCP connection under the TLS layer, so
+//	// the client sees a FIN after the last record and no close_notify (Go reads io.EOF at a
+//	// record boundary, other stacks an error such as Python's SSLEOFError).
+//	// The final reply of POST (and IHAVE in PeerHandler) takes only OverrideFinal, DelayFinal,
+//	// Split, DropAfterBytes, Trailing and Abort (same command keys as the first reply: Split["POST"]
+//	// cuts the 340 and the 240; offsets and byte counts are per reply, so use OverrideFinal and
+//	// DelayFinal to target only the final one; Trailing also follows the 340/335 and the 435/436/480
+//	// of IHAVE); the article is read and handled before. TAKETHIS has one reply that
+//	// takes all faults, OverrideFinal over Override (and also on its 480 and 500 answers). DropInUpload counts the lines of the dot block
+//	// read after the command (0 = none), the terminator not included; the cut block is not recorded.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
 //
 // StoreHandler splits a command line on any Unicode white space (strings.Fields: also VT, FF and NBSP, not only SP and TAB; lenient, the RFC allows it) and ignores the keyword's case; an ARTICLE/HEAD/BODY/STAT/OVER/HDR argument that is neither a number (range) nor a message-id (<...>) is 501, also without a selected group.

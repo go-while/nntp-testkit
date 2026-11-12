@@ -3,6 +3,7 @@ package conformance
 import (
 	"crypto/tls"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,21 @@ type Options struct {
 	// unseen (a broad substring hides every later mistake of the check as well).
 	Allow map[string]string
 
+	// AllowReply tolerates a known server bug by what the server did, not by what the Detail
+	// says: see AllowReply. It works next to Allow (either one allows a Fail), survives a
+	// rewording of a check's Detail, and is the form to prefer for a bug that is a wrong reply
+	// code to a command.
+	AllowReply []AllowReply
+
+	// CommitWait is how long check-have (CHECK after TAKETHIS) and ihave-have (IHAVE after
+	// IHAVE) re-offer an article the server deferred. A server that stores articles
+	// asynchronously answers the immediate re-offer with 431 (CHECK) or 436 (IHAVE) while the
+	// article is in flight: the check repeats the offer, pausing 100ms and doubling up to 1s,
+	// until the server answers 438 / 435 (Pass; Detail says how many re-offers it took), 238 /
+	// 335 (Fail: the server forgot the article) or this window ends (Skip, as before: a server
+	// may defer forever). 0: 5s; negative: no retry, the first 431 / 436 is the Skip.
+	CommitWait time.Duration
+
 	// ReportOnly makes Run return the report without failing tb on a Fail.
 	ReportOnly bool
 
@@ -55,6 +71,40 @@ type Options struct {
 	// the legacy Bytes:/Lines: aliases permitted by that RFC. This is an opt-in
 	// naming policy, not a claim that a legacy-compatible server violates it.
 	StrictOverviewFmt bool
+}
+
+// AllowReply is an Options.AllowReply entry: it allows a Fail of check Check that ended on a
+// reply with the code Code to the command Cmd (Result.Cmd and Result.Code of that Fail). The
+// Fail becomes a Skip with Detail "allowed: <the original Detail>", like an Options.Allow
+// match. Check is a check name (Names()) and required; Cmd is the keywords of the command
+// ("IHAVE", "AUTHINFO PASS", "MODE STREAM"), compared case-insensitively, word by word, as a
+// prefix of Result.Cmd ("LIST" matches "LIST ACTIVE"), empty: any command; Code is the reply
+// code, 0: any code. An entry with neither Cmd nor Code allows nothing. Neither depends on the
+// words of a Detail, which a later version of the kit may reword.
+//
+// Cmd and Code are known only for a Fail that is a wrong reply code to a command (the "got
+// ..., want ..." Fails); a Fail of another kind (a wire mistake, a stray byte, a malformed
+// list) has Cmd empty and Code 0 and is allowed by Options.Allow only. Like Allow, an
+// allowed Fail ends its check: whatever came after it goes unseen.
+type AllowReply struct {
+	Check string
+	Cmd   string
+	Code  int
+}
+
+// matches reports whether a Fail r is allowed by a.
+func (a AllowReply) matches(r Result) bool {
+	if a.Check != r.Name || (a.Cmd == "" && a.Code == 0) || r.Code == 0 {
+		return false
+	}
+	if a.Code != 0 && a.Code != r.Code {
+		return false
+	}
+	if a.Cmd == "" {
+		return true
+	}
+	want, got := strings.Fields(strings.ToUpper(a.Cmd)), strings.Fields(strings.ToUpper(r.Cmd))
+	return len(want) <= len(got) && slices.Equal(want, got[:len(want)])
 }
 
 // Status is the outcome of one check.
@@ -90,6 +140,13 @@ type Result struct {
 	// then reads "<Missing> not advertised", plus what the server answered where it was asked.
 	// Match skips on Missing rather than on Detail.
 	Missing string
+	// Cmd and Code are set on a Fail that is a wrong reply code to a command: the keywords of
+	// the command, upper-case ("IHAVE", "AUTHINFO PASS", "LIST ACTIVE": the command word and,
+	// for AUTHINFO, MODE, COMPRESS and LIST, the keyword after it; never an argument) and the code of the reply. They are what Options.AllowReply
+	// matches, and stay set on a Fail that was allowed (a Skip then). Empty and 0 on any other
+	// result.
+	Cmd  string
+	Code int
 }
 
 // Report is the outcome of a Run or Check.
@@ -183,6 +240,9 @@ func (r Report) String() string {
 		fmt.Fprintf(&b, "%-4s %-32s %s", res.Status, res.Name, res.RFC)
 		if res.Detail != "" {
 			fmt.Fprintf(&b, ": %s", res.Detail)
+		}
+		if res.Code != 0 {
+			fmt.Fprintf(&b, " [reply: %s]", strings.TrimSpace(fmt.Sprintf("%s %d", res.Cmd, res.Code)))
 		}
 		b.WriteByte('\n')
 	}

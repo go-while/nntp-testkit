@@ -482,3 +482,156 @@ func TestAllow(t *testing.T) {
 		t.Errorf("panic: %+v", r)
 	}
 }
+
+// Options.AllowReply matches a Fail by check, command and reply code, not by the Detail text.
+func TestAllowReply(t *testing.T) {
+	srv := fakeserver.New(t, fakeserver.Options{Store: testStore(),
+		Faults: fakeserver.Faults{Override: map[string][]string{"HELP": {"500 nope"}}}})
+	help := asFind(t, readerChecks(), "help")
+	run := func(o Options, c check) Result {
+		o.Addr = srv.Addr()
+		r := runOne(o, c)
+		t.Logf("%s %s [%s %d]", r.Status, r.Detail, r.Cmd, r.Code)
+		return r
+	}
+	failed := run(Options{}, help)
+	if failed.Status != Fail || failed.Cmd != "HELP" || failed.Code != 500 {
+		t.Fatalf("without AllowReply: %+v, want FAIL with Cmd HELP, Code 500", failed)
+	}
+	for name, ar := range map[string]AllowReply{
+		"check, cmd and code": {"help", "HELP", 500},
+		"lower case cmd":      {"help", "help", 500},
+		"cmd only":            {"help", "HELP", 0},
+		"code only":           {"help", "", 500},
+	} {
+		r := run(Options{AllowReply: []AllowReply{{"date", "DATE", 111}, ar}}, help)
+		if r.Status != Skip || r.Detail != "allowed: "+failed.Detail || r.Missing != "" || r.Cmd != "HELP" || r.Code != 500 {
+			t.Errorf("%s: %+v, want SKIP \"allowed: %s\"", name, r, failed.Detail)
+		}
+	}
+	for name, ar := range map[string]AllowReply{
+		"other code":    {"help", "HELP", 501},
+		"other cmd":     {"help", "DATE", 500},
+		"longer cmd":    {"help", "HELP ME", 500},
+		"other check":   {"date", "HELP", 500},
+		"empty entry":   {"help", "", 0},
+		"no check name": {"", "HELP", 500},
+	} {
+		if r := run(Options{AllowReply: []AllowReply{ar}}, help); r.Status != Fail || r.Detail != failed.Detail {
+			t.Errorf("%s: %+v, want the Fail unchanged", name, r)
+		}
+	}
+
+	// the match survives a rewording of the Detail; the text form does not
+	reworded := check{Name: help.Name, RFC: help.RFC, Run: func(s *session, c check) Result {
+		r := help.Run(s, c)
+		if r.Status == Fail {
+			r.Detail = "HELP answered something else than the RFC wants"
+		}
+		return r
+	}}
+	if r := run(Options{Allow: map[string]string{"help": `got "500 nope"`}}, reworded); r.Status != Fail {
+		t.Errorf("text Allow after a rewording: %+v, want FAIL (the text no longer matches)", r)
+	}
+	r := run(Options{AllowReply: []AllowReply{{"help", "HELP", 500}}}, reworded)
+	if r.Status != Skip || r.Detail != "allowed: HELP answered something else than the RFC wants" {
+		t.Errorf("AllowReply after a rewording: %+v, want SKIP", r)
+	}
+	// Allow and AllowReply side by side: either allows
+	if r := run(Options{Allow: map[string]string{"help": "nope"}, AllowReply: []AllowReply{{"help", "HELP", 501}}}, help); r.Status != Skip {
+		t.Errorf("Allow with a non-matching AllowReply: %+v, want SKIP", r)
+	}
+
+	// a non-reply Fail after a quiet-window check carries no stale Cmd either
+	quiet := check{Name: "help", RFC: "x", Run: func(s *session, c check) Result {
+		_, _, _ = s.expect([]int{100}, "HELP") // 500: tolerated
+		_ = s.quiet(time.Millisecond)
+		return c.fail("another mistake")
+	}}
+	if r := run(Options{}, quiet); r.Cmd != "" || r.Code != 0 {
+		t.Errorf("after quiet: %+v, want no Cmd and Code", r)
+	}
+
+	// only the exchange a check ended on counts: a wrong code that the check went on after
+	// is forgotten, and a Fail that is no wrong reply has no Cmd or Code
+	stale := check{Name: "help", RFC: "x", Run: func(s *session, c check) Result {
+		_, _, _ = s.expect([]int{100}, "HELP") // 500: tolerated
+		_, _, _ = s.cmd("DATE")
+		return c.fail("another mistake")
+	}}
+	if r := run(Options{AllowReply: []AllowReply{{"help", "HELP", 500}}}, stale); r.Status != Fail || r.Cmd != "" || r.Code != 0 {
+		t.Errorf("stale: %+v, want FAIL without Cmd and Code", r)
+	}
+}
+
+// AllowReply.matches compares the command word by word, as a prefix.
+func TestAllowReplyMatches(t *testing.T) {
+	r := Result{Name: "x", Status: Fail, Cmd: "LIST ACTIVE", Code: 215}
+	for _, tc := range []struct {
+		a    AllowReply
+		want bool
+	}{
+		{AllowReply{"x", "LIST", 0}, true},
+		{AllowReply{"x", "list active", 215}, true},
+		{AllowReply{"x", "  LIST   ACTIVE ", 0}, true},
+		{AllowReply{"x", "LIST ACTIVE.TIMES", 0}, false},
+		{AllowReply{"x", "LISTGROUP", 0}, false},
+		{AllowReply{"x", "LIST ACTIVE NOW", 0}, false},
+		{AllowReply{"x", "", 215}, true},
+		{AllowReply{"x", "", 216}, false},
+		{AllowReply{"x", "", 0}, false},
+	} {
+		if got := tc.a.matches(r); got != tc.want {
+			t.Errorf("%+v matches %+v: %v, want %v", tc.a, r, got, tc.want)
+		}
+	}
+	if (AllowReply{"x", "LIST", 0}).matches(Result{Name: "x", Status: Fail}) {
+		t.Error("an entry matched a Fail without Cmd and Code")
+	}
+}
+
+// cmdName keeps the command name of a shown command, never an argument or a password.
+func TestCmdName(t *testing.T) {
+	for in, want := range map[string]string{
+		"IHAVE <a@b>":                  "IHAVE",
+		"AUTHINFO PASS SECRET":         "AUTHINFO PASS",
+		"AUTHINFO PASS\tSECRET":        "AUTHINFO PASS",
+		"authinfo\tpass\tSECRET":       "AUTHINFO PASS",
+		"AUTHINFO USER FED":            "AUTHINFO USER",
+		"AUTHINFO FED":                 "AUTHINFO",
+		"GROUP ALT.TEST":               "GROUP",
+		"LIST OVERVIEW.FMT":            "LIST OVERVIEW.FMT",
+		"LIST ACTIVE ALT.*":            "LIST ACTIVE",
+		"LIST ALT.TEST":                "LIST",
+		"mode stream":                  "MODE STREAM",
+		"MODE FOO":                     "MODE",
+		"IHAVE <a@b> (article sent)":   "IHAVE",
+		"HDR Subject 1-5":              "HDR",
+		"STAT 12":                      "STAT",
+		"COMPRESS DEFLATE":             "COMPRESS DEFLATE",
+		"TAKETHIS <id> (article sent)": "TAKETHIS",
+		"":                             "",
+		"<a@b>":                        "",
+		"a=b c":                        "",
+	} {
+		s := &session{}
+		s.mismatch(in, 500)
+		if s.bad.cmd != want {
+			t.Errorf("mismatch(%q): cmd %q, want %q", in, s.bad.cmd, want)
+		}
+	}
+	// the password is masked in a shown command, whatever separates the words
+	for _, in := range []string{"AUTHINFO PASS secret", "authinfo pass secret", "AUTHINFO\tPASS\tsecret", "AUTHINFO PASS  secret"} {
+		if got := asShown("%s", in); got != "AUTHINFO PASS ***" {
+			t.Errorf("asShown(%q) = %q, want the password masked", in, got)
+		}
+	}
+}
+
+// TestReportStringReply: a Fail with a code but no command prints no double space.
+func TestReportStringReply(t *testing.T) {
+	r := Report{Results: []Result{{Name: "a", Status: Fail, RFC: "x", Code: 335}, {Name: "b", Status: Fail, RFC: "x", Cmd: "IHAVE", Code: 335}}}
+	if got := r.String(); !strings.Contains(got, " [reply: 335]\n") || !strings.Contains(got, " [reply: IHAVE 335]\n") {
+		t.Errorf("String:\n%s", got)
+	}
+}
