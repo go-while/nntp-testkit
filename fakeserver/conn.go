@@ -38,6 +38,7 @@ type Conn struct {
 	faulted bool   // a fault closes the connection now (Faults.Abort decides how)
 
 	shape     CompressShape // the shape of the stream compressAfter starts (the handler's CompressShape)
+	shapeOn   bool          // Store/Peer: COMPRESS is offered, so a 206 to it starts compression
 	shapeStep bool          // Script: the step being served starts compression, whatever its command
 	enc       *encoder      // made when the 206 carried pipelined bytes; startCompress takes it over
 }
@@ -322,7 +323,7 @@ func (c *Conn) writeKind(line string, kind replyKind, lines []string) bool {
 	if len(lines) > 0 {
 		c.last = lines[0]
 	}
-	tail := c.pipeline206(cmd == "COMPRESS" || c.shapeStep, c.last) // empty flush etc. in the 206's write
+	tail := c.pipeline206((cmd == "COMPRESS" && c.shapeOn) || c.shapeStep, c.last) // empty flush etc. in the 206's write
 	endless := normal && f.Endless[cmd]
 	if endless && len(lines) > 0 && lines[len(lines)-1] == "." {
 		lines = lines[:len(lines)-1]

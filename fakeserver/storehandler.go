@@ -91,7 +91,7 @@ func StoreHandler(st *Store, o StoreOptions) func(*Conn) {
 	seq := new(atomic.Int64)  // generated POST Message-IDs, shared by the handler's connections
 	postMu := new(sync.Mutex) // serialises filing POSTs across the handler's connections
 	return func(c *Conn) {
-		c.shape = o.CompressShape
+		c.shape, c.shapeOn = o.CompressShape, o.Compress || o.CompressOutputOnly
 		h := &storeConn{st: st, o: o, c: c, seq: seq, postMu: postMu, authed: o.User == "" && o.Pass == ""}
 		h.serve()
 	}

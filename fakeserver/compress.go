@@ -87,7 +87,20 @@ type deflateConn struct {
 	enc      *encoder
 	sleep    func(time.Duration) bool // Conn.sleep: bounded by the Deadline, false when the server closed
 	deadline time.Duration
-	werr     error // the first failed write: the stream is broken from there on
+	werr     error     // the first failed write: the stream is broken from there on
+	wdl      time.Time // the write deadline last set through this conn (zero: none)
+}
+
+// SetWriteDeadline and SetDeadline remember the write deadline, so that send can put back the
+// one writeKind set (Drip, LineDelay, Split, Endless) instead of clearing it.
+func (d *deflateConn) SetWriteDeadline(t time.Time) error {
+	d.wdl = t
+	return d.Conn.SetWriteDeadline(t)
+}
+
+func (d *deflateConn) SetDeadline(t time.Time) error {
+	d.wdl = t
+	return d.Conn.SetDeadline(t)
 }
 
 func (d *deflateConn) Read(p []byte) (int, error) { return d.r.Read(p) }
@@ -133,9 +146,9 @@ func (d *deflateConn) send(b []byte) error {
 		return err
 	}
 	end := time.Now().Add(d.deadline)
-	if sp.Gap > 0 {
+	if sp.Gap > 0 && (d.wdl.IsZero() || end.Before(d.wdl)) {
 		_ = d.Conn.SetWriteDeadline(end)
-		defer d.Conn.SetWriteDeadline(time.Time{})
+		defer d.Conn.SetWriteDeadline(d.wdl) // what the caller had set, not "none"
 	}
 	prev := 0
 	for _, k := range append(cuts, len(b)) {

@@ -133,7 +133,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 		dropReply = "400 Service temporarily unavailable"
 	}
 	return func(c *Conn) {
-		c.shape = o.CompressShape
+		c.shape, c.shapeOn = o.CompressShape, offerCompress
 		if !o.greet(c) {
 			return
 		}

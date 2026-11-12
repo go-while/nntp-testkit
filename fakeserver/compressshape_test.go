@@ -30,10 +30,17 @@ type recConn struct {
 }
 
 func (r *recConn) Write(p []byte) (int, error) {
-	n, err := r.Conn.Write(p)
+	// recorded before the write, so a client that has read the bytes finds them in writes()
 	r.mu.Lock()
-	r.w = append(r.w, bytes.Clone(p[:n]))
+	r.w = append(r.w, bytes.Clone(p))
+	i := len(r.w) - 1
 	r.mu.Unlock()
+	n, err := r.Conn.Write(p)
+	if n < len(p) {
+		r.mu.Lock()
+		r.w[i] = r.w[i][:n]
+		r.mu.Unlock()
+	}
 	return n, err
 }
 
@@ -325,19 +332,22 @@ func TestPartialEncoderDecodes(t *testing.T) {
 	if bytes.Contains(stream, []byte(marker)) {
 		t.Error("sync marker in the stream")
 	}
-	// complete the stream: pad the unsent bits (zeros, the end of the empty block's code) and
-	// add a final empty stored block
+	// complete the stream: the held bits are the zero tail of the empty block's end code; a
+	// final stored block header (BFINAL 1, BTYPE 00) follows them at once, then padding to a
+	// byte and the empty block's LEN and NLEN
+	unfinished := len(stream)
+	e.bw.put(1, 3)
 	if e.bw.n > 0 {
 		e.bw.put(0, 8-e.bw.n)
 	}
-	stream = append(append(stream, e.bw.take()...), 0x01, 0x00, 0x00, 0xff, 0xff)
+	stream = append(append(stream, e.bw.take()...), 0x00, 0x00, 0xff, 0xff)
 	got, err := io.ReadAll(flate.NewReader(bytes.NewReader(stream)))
 	if err != nil || !bytes.Equal(got, plainText) {
 		t.Fatalf("decoded %d bytes, %v; want %d", len(got), err, len(plainText))
 	}
 	// the kit's inflater decodes the unfinished stream as it is
 	var out []byte
-	_ = inflate.Run(bufio.NewReader(bytes.NewReader(stream[:len(stream)-5])), func(b []byte) error { out = append(out, b...); return nil })
+	_ = inflate.Run(bufio.NewReader(bytes.NewReader(stream[:unfinished])), func(b []byte) error { out = append(out, b...); return nil })
 	if !bytes.Equal(out, plainText) {
 		t.Errorf("kit inflater: %d bytes, want %d", len(out), len(plainText))
 	}
@@ -432,4 +442,69 @@ func TestStartCompressShaped(t *testing.T) {
 	z := zDial(t, s)
 	br := plain(t, z)
 	wantPlainLine(t, br, z.c, "111 20260102030405\r\n")
+}
+
+// The pipelined tail is armed only when compression starts: a Script step without Compress and
+// a Peer without Compress (a forced 206) stay plain.
+func TestCompressShapeNotArmedWithoutCompress(t *testing.T) {
+	shape := CompressShape{EmptyFlushWith206: true, With206: []byte("x")}
+	check := func(t *testing.T, s *Server, cmd, wantPrefix string) {
+		t.Helper()
+		c := bytesDial(t, s)
+		rawSend(t, c, cmd+"\r\n")
+		br := bufio.NewReader(c)
+		line, err := br.ReadString('\n')
+		if err != nil || !strings.HasPrefix(line, "206 ") {
+			t.Fatalf("%q, %v", line, err)
+		}
+		if br.Buffered() != 0 || !readQuiet(t, c, 200*time.Millisecond) {
+			t.Fatal("bytes after the 206 of a connection that stays plain")
+		}
+		rawSend(t, c, "MODE STREAM\r\n")
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if line, err = br.ReadString('\n'); err != nil || !strings.HasPrefix(line, wantPrefix) {
+			t.Fatalf("plain command after the 206: %q, %v", line, err)
+		}
+	}
+	t.Run("script", func(t *testing.T) {
+		s := New(t, Options{Script: []Step{
+			{Expect: "COMPRESS DEFLATE", Reply: []string{"206 ok"}, CompressShape: shape},
+			{Expect: "MODE STREAM", Reply: []string{"203 ok"}},
+		}})
+		check(t, s, "COMPRESS DEFLATE", "203 ")
+	})
+	t.Run("peer", func(t *testing.T) {
+		s := New(t, Options{Handler: PeerHandler(&PeerOptions{CompressShape: shape}),
+			Faults: Faults{Override: map[string][]string{"COMPRESS": {"206 ok"}}}})
+		check(t, s, "COMPRESS DEFLATE", "203 ")
+	})
+}
+
+// A write deadline that the caller set (writeKind does for its pauses) survives a Write with a
+// Split gap; without one, the deadline set for the pauses is cleared again.
+type dlConn struct {
+	net.Conn
+	dl []time.Time
+}
+
+func (c *dlConn) Write(p []byte) (int, error)        { return len(p), nil }
+func (c *dlConn) SetWriteDeadline(t time.Time) error { c.dl = append(c.dl, t); return nil }
+
+func TestCompressSplitKeepsCallerDeadline(t *testing.T) {
+	for _, set := range []bool{true, false} {
+		sc := &dlConn{}
+		enc, _ := newEncoder(CompressShape{Split: Split{Size: 3, Gap: time.Millisecond}})
+		d := &deflateConn{Conn: sc, enc: enc, sleep: func(time.Duration) bool { return true }, deadline: time.Hour}
+		var want time.Time
+		if set {
+			want = time.Now().Add(time.Minute)
+			_ = d.SetWriteDeadline(want)
+		}
+		if _, err := d.Write([]byte("hello\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		if last := sc.dl[len(sc.dl)-1]; !last.Equal(want) {
+			t.Errorf("caller deadline set=%v: after Write the deadline is %v, want %v", set, last, want)
+		}
+	}
 }

@@ -18,7 +18,8 @@ const (
 	// FlushPartial ends every write with zlib's Z_PARTIAL_FLUSH, as INN's nnrpd does: an empty
 	// fixed-Huffman block (10 bits), of which only the whole bytes are sent. The last 0 to 7
 	// bits stay in the compressor until the next write; the data before them is complete.
-	// There is no 00 00 FF FF marker in the stream. The data are literals in fixed-Huffman
+	// The data before them is complete: the held bits are only the tail of the empty block's
+	// end-of-block code, which is zeros. There is no 00 00 FF FF marker in the stream. The data are literals in fixed-Huffman
 	// blocks, one per write (no matches), so the output is larger than FlushSync's. A client
 	// that waits for a stored block, or for the end of the block it is in, hangs on this
 	// stream, as INN's clients must not.
@@ -50,8 +51,9 @@ type CompressShape struct {
 	// EmptyFlushWith206 writes an empty flush block (the marker of Flush) right after the CRLF
 	// of the "206" in the same socket write as the 206 line, as a server that flushes its
 	// compressor when it switches it on. A client must keep those bytes for its inflater. The
-	// 206 is written by the kit's handlers (Store, Peer, Script step); a Handler that writes
-	// its own 206 cannot use this.
+	// 206 is written by the kit's handlers (Store, Peer with Compress or CompressOutputOnly,
+	// Script step with Compress); a Handler that writes its own 206 cannot use this. Faults on
+	// the COMPRESS reply (DropAfterBytes, Split offsets) count these bytes too.
 	EmptyFlushWith206 bool
 	// With206 is deflated and flushed like a reply and written in the same socket write as the
 	// 206 (it ends with its own flush, so EmptyFlushWith206 adds nothing then): compressed
