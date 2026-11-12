@@ -3,7 +3,10 @@
 // files (the key at mode 0600) for servers that read their certificate from a path (INN's
 // tls_cert_file/tls_key_file, diablo, NewsCache). Leaf options make the usual failing
 // certificates one field away: Expired, NotYetValid, DNSNames/IPs that do not match the host.
-// Standard library only; errors fail tb.
+// Standard library only. Errors fail tb; each function that takes a tb has a twin without it
+// that returns the error instead (GenerateCA, GenerateLeaf, GenerateSelfSigned, WriteFiles,
+// WriteCAFile), for code outside a test such as a fake server program run by another language's
+// test suite.
 //
 // Contract (plan nntp-testkit; implemented in tlscert.go):
 //
@@ -45,6 +48,12 @@
 //	func (l *Leaf) ClientConfig(serverName string) *tls.Config // as CA.ClientConfig, trusting the issuer
 //	func (l *Leaf) Write(tb testing.TB, dir string) Files      // dir/cert.pem, key.pem (0600), ca.pem, replaced atomically; dir "" = tb.TempDir()
 //	func (l *Leaf) WriteKeyMode(tb testing.TB, dir string, keyMode os.FileMode) Files // Write with another key mode (0640 + chgrp, or 0644, for a server running as another user)
+//
+//	func GenerateCA() (*CA, error)                                      // NewCA without tb
+//	func (ca *CA) GenerateLeaf(o Options) (*Leaf, error)                // Issue without tb
+//	func GenerateSelfSigned(o Options) (*Leaf, error)                   // SelfSigned without tb
+//	func (ca *CA) WriteCAFile(dir string) (string, error)               // WriteCA without tb; dir required
+//	func (l *Leaf) WriteFiles(dir string, keyMode os.FileMode) (Files, error) // WriteKeyMode without tb; dir required
 //
 // A leaf that a test expects to fail verification still carries the issuer's Pool and
 // ClientConfig, so a failure comes from the certificate alone: x509.CertificateInvalidError

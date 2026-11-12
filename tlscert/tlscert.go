@@ -88,13 +88,23 @@ func serial() (*big.Int, error) {
 // NewCA creates a CA (ECDSA P-256, valid from three days ago for a year). Errors fail tb.
 func NewCA(tb testing.TB) *CA {
 	tb.Helper()
+	ca, err := GenerateCA()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return ca
+}
+
+// GenerateCA is NewCA for code without a testing.TB, such as a test server program: it returns
+// the error instead of failing a test.
+func GenerateCA() (*CA, error) {
 	key, err := genKey(ECDSA)
 	if err != nil {
-		tb.Fatalf("tlscert: CA key: %v", err)
+		return nil, fmt.Errorf("tlscert: CA key: %w", err)
 	}
 	sn, err := serial()
 	if err != nil {
-		tb.Fatalf("tlscert: serial: %v", err)
+		return nil, fmt.Errorf("tlscert: serial: %w", err)
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
@@ -108,15 +118,15 @@ func NewCA(tb testing.TB) *CA {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
-		tb.Fatalf("tlscert: CA certificate: %v", err)
+		return nil, fmt.Errorf("tlscert: CA certificate: %w", err)
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		tb.Fatalf("tlscert: parse CA certificate: %v", err)
+		return nil, fmt.Errorf("tlscert: parse CA certificate: %w", err)
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
-	return &CA{Cert: cert, Key: key, CertPEM: pemCert(der), Pool: pool}
+	return &CA{Cert: cert, Key: key, CertPEM: pemCert(der), Pool: pool}, nil
 }
 
 func pemCert(der []byte) []byte {
@@ -218,22 +228,41 @@ func issue(o Options, parent *x509.Certificate, parentKey crypto.Signer, caPEM [
 // Issue creates a leaf certificate signed by the CA. Errors fail tb.
 func (ca *CA) Issue(tb testing.TB, o Options) *Leaf {
 	tb.Helper()
-	l, err := issue(o, ca.Cert, ca.Key, ca.CertPEM, ca.Pool)
+	l, err := ca.GenerateLeaf(o)
 	if err != nil {
-		tb.Fatalf("tlscert: %v", err)
+		tb.Fatal(err)
 	}
 	return l
+}
+
+// GenerateLeaf is Issue without a testing.TB: it returns the error.
+func (ca *CA) GenerateLeaf(o Options) (*Leaf, error) {
+	l, err := issue(o, ca.Cert, ca.Key, ca.CertPEM, ca.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("tlscert: %w", err)
+	}
+	return l, nil
 }
 
 // SelfSigned creates a self-signed certificate that is its own trust anchor (Pool, CAPEM): the
 // common case of one server and one client config. Errors fail tb.
 func SelfSigned(tb testing.TB, o Options) *Leaf {
 	tb.Helper()
-	l, err := issue(o, nil, nil, nil, nil)
+	l, err := GenerateSelfSigned(o)
 	if err != nil {
-		tb.Fatalf("tlscert: %v", err)
+		tb.Fatal(err)
 	}
 	return l
+}
+
+// GenerateSelfSigned is SelfSigned without a testing.TB, for a test server program that prints
+// or writes its CA for a client in another language: it returns the error.
+func GenerateSelfSigned(o Options) (*Leaf, error) {
+	l, err := issue(o, nil, nil, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("tlscert: %w", err)
+	}
+	return l, nil
 }
 
 func clientConfig(pool *x509.CertPool, serverName string) *tls.Config {
@@ -267,9 +296,24 @@ func dirOr(tb testing.TB, dir string) string {
 // tb.TempDir(). Errors fail tb.
 func (ca *CA) WriteCA(tb testing.TB, dir string) string {
 	tb.Helper()
-	p := filepath.Join(dirOr(tb, dir), "ca.pem")
-	write(tb, p, ca.CertPEM, 0o644)
+	p, err := ca.WriteCAFile(dirOr(tb, dir))
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return p
+}
+
+// WriteCAFile is WriteCA without a testing.TB: dir must be given (a missing dir is created),
+// and it returns the error.
+func (ca *CA) WriteCAFile(dir string) (string, error) {
+	if dir == "" {
+		return "", errNoDir
+	}
+	p := filepath.Join(dir, "ca.pem")
+	if err := writeFile(p, ca.CertPEM, 0o644); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 // Write writes dir/cert.pem, dir/key.pem (mode 0600) and dir/ca.pem (the issuer, for servers
@@ -286,31 +330,51 @@ func (l *Leaf) Write(tb testing.TB, dir string) Files {
 // WriteKeyMode is Write with another mode for key.pem (cert.pem and ca.pem stay 0644).
 func (l *Leaf) WriteKeyMode(tb testing.TB, dir string, keyMode os.FileMode) Files {
 	tb.Helper()
-	dir = dirOr(tb, dir)
-	f := Files{Cert: filepath.Join(dir, "cert.pem"), Key: filepath.Join(dir, "key.pem"), CA: filepath.Join(dir, "ca.pem")}
-	write(tb, f.Cert, l.CertPEM, 0o644)
-	write(tb, f.Key, l.KeyPEM, keyMode)
-	write(tb, f.CA, l.CAPEM, 0o644)
+	f, err := l.WriteFiles(dirOr(tb, dir), keyMode)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return f
 }
 
-// write replaces path with a file of mode perm: it writes a 0600 temp file in the same
+// WriteFiles is WriteKeyMode without a testing.TB: dir must be given (a missing dir is
+// created), and it returns the error. Use mode 0600 for what Write does.
+func (l *Leaf) WriteFiles(dir string, keyMode os.FileMode) (Files, error) {
+	if dir == "" {
+		return Files{}, errNoDir
+	}
+	f := Files{Cert: filepath.Join(dir, "cert.pem"), Key: filepath.Join(dir, "key.pem"), CA: filepath.Join(dir, "ca.pem")}
+	for _, w := range []struct {
+		path string
+		data []byte
+		perm os.FileMode
+	}{{f.Cert, l.CertPEM, 0o644}, {f.Key, l.KeyPEM, keyMode}, {f.CA, l.CAPEM, 0o644}} {
+		if err := writeFile(w.path, w.data, w.perm); err != nil {
+			return Files{}, err
+		}
+	}
+	return f, nil
+}
+
+var errNoDir = errors.New("tlscert: no directory given (only the testing.TB forms default to a temp dir)")
+
+// writeFile replaces path with a file of mode perm: it writes a 0600 temp file in the same
 // directory, sets the mode and renames it over path, so a rewrite never exposes the new content
 // with the old, wider mode (or the umask's).
-func write(tb testing.TB, path string, data []byte, perm os.FileMode) {
-	tb.Helper()
+func writeFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		tb.Fatalf("tlscert: %v", err)
+		return fmt.Errorf("tlscert: %w", err)
 	}
 	f, err := os.CreateTemp(dir, ".tlscert-*")
 	if err != nil {
-		tb.Fatalf("tlscert: %v", err)
+		return fmt.Errorf("tlscert: %w", err)
 	}
 	_, werr := f.Write(data)
 	cerr := f.Close()
 	if err := errors.Join(werr, cerr, os.Chmod(f.Name(), perm), os.Rename(f.Name(), path)); err != nil {
 		_ = os.Remove(f.Name())
-		tb.Fatalf("tlscert: %v", err)
+		return fmt.Errorf("tlscert: %w", err)
 	}
+	return nil
 }

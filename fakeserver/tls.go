@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -18,13 +19,24 @@ import (
 // client side. Errors fail tb.
 func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) {
 	tb.Helper()
+	server, roots, err := NewTLSConfig()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return server, roots
+}
+
+// NewTLSConfig is TLSConfig for code without a testing.TB, such as a fake server program: it
+// returns the error instead of failing a test. The certificate (server.Certificates[0].Leaf)
+// is its own CA; package tlscert has the PEM and file forms (GenerateSelfSigned, WriteFiles).
+func NewTLSConfig() (server *tls.Config, roots *x509.CertPool, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		tb.Fatalf("fakeserver: ecdsa key: %v", err)
+		return nil, nil, fmt.Errorf("fakeserver: ecdsa key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
 	if err != nil {
-		tb.Fatalf("fakeserver: serial: %v", err)
+		return nil, nil, fmt.Errorf("fakeserver: serial: %w", err)
 	}
 	now := time.Now()
 	tmpl := &x509.Certificate{
@@ -41,11 +53,11 @@ func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		tb.Fatalf("fakeserver: certificate: %v", err)
+		return nil, nil, fmt.Errorf("fakeserver: certificate: %w", err)
 	}
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
-		tb.Fatalf("fakeserver: parse certificate: %v", err)
+		return nil, nil, fmt.Errorf("fakeserver: parse certificate: %w", err)
 	}
 	roots = x509.NewCertPool()
 	roots.AddCert(cert)
@@ -53,5 +65,5 @@ func TLSConfig(tb testing.TB) (server *tls.Config, roots *x509.CertPool) {
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key, Leaf: cert}},
 		MinVersion:   tls.VersionTLS12,
 	}
-	return server, roots
+	return server, roots, nil
 }
