@@ -1,6 +1,8 @@
 package fakeserver
 
 import (
+	"bytes"
+	"compress/flate"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -76,6 +78,39 @@ func rawRead(t *testing.T, c net.Conn) string {
 	return string(b[:n])
 }
 
+// readPieces reads the pieces of a reply written by the server with pauses and checks their
+// bytes exactly (io.ReadFull, so a reader that is slow and finds several pieces at once does
+// not matter) and that the first byte of piece i did not arrive before mins[i] after start:
+// the server waits before it writes the piece, so this lower bound holds on any machine, while a
+// cut at the wrong offset or a missing pause would break it.
+func readPieces(t *testing.T, c net.Conn, start time.Time, pieces []string, mins []time.Duration) {
+	t.Helper()
+	for i, p := range pieces {
+		buf := make([]byte, len(p))
+		if _, err := io.ReadFull(c, buf[:1]); err != nil {
+			t.Fatalf("piece %d: %v", i, err)
+		}
+		if took, min := time.Since(start), mins[i]*9/10; took < min {
+			t.Errorf("piece %d (%q) arrived after %v, want at least %v", i, p, took, min)
+		}
+		if _, err := io.ReadFull(c, buf[1:]); err != nil {
+			t.Fatalf("piece %d: %v", i, err)
+		}
+		if string(buf) != p {
+			t.Fatalf("piece %d = %q, want %q", i, buf, p)
+		}
+	}
+}
+
+// gaps returns mins for n pieces that are g apart.
+func gaps(n int, g time.Duration) []time.Duration {
+	out := make([]time.Duration, n)
+	for i := range out {
+		out[i] = time.Duration(i) * g
+	}
+	return out
+}
+
 // readQuiet reports whether nothing arrives within d (a read timeout).
 func readQuiet(t *testing.T, c net.Conn, d time.Duration) bool {
 	t.Helper()
@@ -110,23 +145,9 @@ func TestFaultSplitAt(t *testing.T) {
 	// cut inside the status line, and between CR and LF
 	s := dateServer(t, Faults{Split: map[string]Split{"DATE": {At: []int{3, 99, 19, 3, -1, 0}, Gap: testGap}}})
 	c := bytesDial(t, s)
-	rawSend(t, c, "DATE\r\n")
 	start := time.Now()
-	if got := rawRead(t, c); got != "111" {
-		t.Fatalf("first piece %q", got)
-	}
-	if !readQuiet(t, c, testGap/3) {
-		t.Fatal("not quiet")
-	}
-	if got := rawRead(t, c); got != " 12345678901234\r" {
-		t.Fatalf("second piece %q", got)
-	}
-	if got := rawRead(t, c); got != "\n" {
-		t.Fatalf("third piece %q", got)
-	}
-	if took := time.Since(start); took < 2*testGap-testGap/4 {
-		t.Errorf("pieces arrived in %v, want two gaps", took)
-	}
+	rawSend(t, c, "DATE\r\n")
+	readPieces(t, c, start, []string{"111", " 12345678901234\r", "\n"}, gaps(3, testGap))
 	// the next reply is normal
 	rawSend(t, c, "MODE READER\r\n")
 	if got := rawRead(t, c); !strings.HasPrefix(got, "200 ") {
@@ -135,31 +156,27 @@ func TestFaultSplitAt(t *testing.T) {
 }
 
 func TestFaultSplitSize(t *testing.T) {
-	s := dateServer(t, Faults{Split: map[string]Split{"DATE": {Size: 7, Gap: 100 * time.Millisecond}}})
+	s := dateServer(t, Faults{Split: map[string]Split{"DATE": {Size: 7, Gap: testGap}}})
 	c := bytesDial(t, s)
+	start := time.Now()
 	rawSend(t, c, "DATE\r\n")
-	for i, want := range []string{dateReply[:7], dateReply[7:14], dateReply[14:]} {
-		if got := rawRead(t, c); got != want {
-			t.Fatalf("piece %d = %q, want %q", i, got, want)
-		}
-	}
+	readPieces(t, c, start, []string{dateReply[:7], dateReply[7:14], dateReply[14:]}, gaps(3, testGap))
 }
 
 // Split offsets count over the whole reply, across the lines of a LineDelay write.
 func TestFaultSplitLineDelay(t *testing.T) {
 	s := New(t, Options{Store: testStore(), Deadline: 10 * time.Second, Faults: Faults{
 		Override:  map[string][]string{"HELP": {"100 ab", "cd", "."}}, // 8 + 4 + 3 bytes
-		LineDelay: map[string]time.Duration{"HELP": 50 * time.Millisecond},
-		Split:     map[string]Split{"HELP": {At: []int{10}, Gap: 100 * time.Millisecond}},
+		LineDelay: map[string]time.Duration{"HELP": testGap},
+		Split:     map[string]Split{"HELP": {At: []int{10}, Gap: 2 * testGap}},
 	}})
 	c := bytesDial(t, s)
+	start := time.Now()
 	rawSend(t, c, "HELP\r\n")
-	want := []string{"100 ab\r\n", "cd", "\r\n", ".\r\n"}
-	for i, w := range want {
-		if got := rawRead(t, c); got != w {
-			t.Fatalf("piece %d = %q, want %q", i, got, w)
-		}
-	}
+	// "cd" is written after one line pause, its CRLF after the Split gap, the "." line after
+	// another line pause
+	readPieces(t, c, start, []string{"100 ab\r\n", "cd", "\r\n", ".\r\n"},
+		[]time.Duration{0, testGap, 3 * testGap, 4 * testGap})
 }
 
 func TestFaultDropAfterBytes(t *testing.T) {
@@ -386,21 +403,15 @@ func TestFaultFinalBytes(t *testing.T) {
 	// Split["POST"] cuts the 340 and the final reply alike
 	s = New(t, Options{Store: testStore(), Deadline: 10 * time.Second, Faults: Faults{
 		OverrideFinal: map[string][]string{"POST": {"240 12345678"}},
-		Split:         map[string]Split{"POST": {At: []int{7}, Gap: 100 * time.Millisecond}},
+		Split:         map[string]Split{"POST": {At: []int{7}, Gap: testGap}},
 	}})
 	c = bytesDial(t, s)
+	start := time.Now()
 	rawSend(t, c, "POST\r\n")
-	for _, want := range []string{"340 Sen", "d article to be posted\r\n"} {
-		if got := rawRead(t, c); got != want {
-			t.Fatalf("340 piece %q, want %q", got, want)
-		}
-	}
+	readPieces(t, c, start, []string{"340 Sen", "d article to be posted\r\n"}, gaps(2, testGap))
+	start = time.Now()
 	rawSend(t, c, postArticle())
-	for _, want := range []string{"240 123", "45678\r\n"} {
-		if got := rawRead(t, c); got != want {
-			t.Fatalf("final piece %q, want %q", got, want)
-		}
-	}
+	readPieces(t, c, start, []string{"240 123", "45678\r\n"}, gaps(2, testGap))
 }
 
 func TestFaultFinalPeer(t *testing.T) {
@@ -503,20 +514,9 @@ func TestFaultDropInUpload(t *testing.T) {
 func TestFaultTrailing(t *testing.T) {
 	s := dateServer(t, Faults{Trailing: map[string]Trailing{"DATE": {Lines: []string{"200 extra", "more"}, Gap: testGap}}})
 	c := bytesDial(t, s)
-	rawSend(t, c, "DATE\r\n")
 	start := time.Now()
-	if got := rawRead(t, c); got != dateReply {
-		t.Fatalf("reply %q", got)
-	}
-	if !readQuiet(t, c, testGap/3) {
-		t.Fatal("not quiet")
-	}
-	if got := rawRead(t, c); got != "200 extra\r\nmore\r\n" {
-		t.Fatalf("trailing %q", got)
-	}
-	if took := time.Since(start); took < testGap-testGap/4 {
-		t.Errorf("trailing data after %v, want the gap", took)
-	}
+	rawSend(t, c, "DATE\r\n")
+	readPieces(t, c, start, []string{dateReply, "200 extra\r\nmore\r\n"}, []time.Duration{0, testGap})
 	// a cut reply gets none
 	s = dateServer(t, Faults{DropAfterBytes: map[string]int{"DATE": 5}, Trailing: map[string]Trailing{"DATE": {Lines: []string{"extra"}}}})
 	c = bytesDial(t, s)
@@ -531,27 +531,58 @@ func TestFaultTrailingStartTLS(t *testing.T) {
 	ca := tlscert.NewCA(t)
 	s := New(t, Options{Store: testStore(), Deadline: 10 * time.Second,
 		StoreOpts: StoreOptions{StartTLS: &StartTLSOptions{Config: ca.Issue(t, tlscert.Options{}).ServerConfig()}},
-		Faults:    Faults{Trailing: map[string]Trailing{"STARTTLS": {Lines: []string{"junk"}, Gap: 100 * time.Millisecond}}}})
+		Faults:    Faults{Trailing: map[string]Trailing{"STARTTLS": {Lines: []string{"junk"}, Gap: testGap}}}})
 	c := bytesDial(t, s)
+	start := time.Now()
 	rawSend(t, c, "STARTTLS\r\n")
-	if got := rawRead(t, c); got != "382 Continue with TLS negotiation\r\n" {
-		t.Fatalf("STARTTLS %q", got)
-	}
-	if got := rawRead(t, c); got != "junk\r\n" {
-		t.Fatalf("trailing %q", got)
-	}
+	readPieces(t, c, start, []string{"382 Continue with TLS negotiation\r\n", "junk\r\n"}, []time.Duration{0, testGap})
 }
 
 // New copies the new maps too.
 func TestFaultBytesCopied(t *testing.T) {
 	at := []int{3}
-	f := Faults{Split: map[string]Split{"DATE": {At: at, Gap: time.Millisecond}}, DropAfterBytes: map[string]int{"DATE": 25}}
+	f := Faults{Split: map[string]Split{"DATE": {At: at, Gap: testGap}}, DropAfterBytes: map[string]int{"DATE": 25}}
 	s := dateServer(t, f)
 	at[0] = 9
 	f.DropAfterBytes["DATE"] = 0
 	c := bytesDial(t, s)
+	start := time.Now()
 	rawSend(t, c, "DATE\r\n")
-	if got := rawRead(t, c); got != "111" {
-		t.Errorf("first piece %q, want the offset as it was at New", got)
+	readPieces(t, c, start, []string{"111", dateReply[3:]}, gaps(2, testGap)) // the offset as it was at New, the whole reply
+}
+
+// Abort on a compressed connection also ends the inflater goroutine, which blocks in a write
+// when the client sent more compressed commands than the server reads.
+func TestFaultAbortCompressed(t *testing.T) {
+	inflaters := func() int {
+		buf := make([]byte, 1<<20)
+		return strings.Count(string(buf[:runtime.Stack(buf, true)]), "internal/inflate.Run")
+	}
+	base := inflaters()
+	s := New(t, Options{Store: testStore(), Deadline: 10 * time.Second,
+		StoreOpts: StoreOptions{Compress: true},
+		Faults: Faults{DropAfterBytes: map[string]int{"DATE": 5}, Abort: map[string]bool{"DATE": true},
+			Override: map[string][]string{"DATE": {"111 12345678901234"}}}})
+	c := bytesDial(t, s)
+	rawSend(t, c, "COMPRESS DEFLATE\r\n")
+	if got := rawRead(t, c); !strings.HasPrefix(got, "206 ") {
+		t.Fatalf("COMPRESS: %q", got)
+	}
+	var zb bytes.Buffer
+	zw, err := flate.NewWriter(&zb, flate.DefaultCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = zw.Write([]byte(strings.Repeat("DATE\r\n", 200000))) // far more than the server reads
+	_ = zw.Flush()
+	_, _ = c.Write(zb.Bytes())
+	_, _ = readAll(c)
+	s.WaitOpen(t, 0, 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for inflaters() > base && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := inflaters(); n > base {
+		t.Errorf("%d inflater goroutines left after the abort, want %d", n, base)
 	}
 }

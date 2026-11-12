@@ -188,12 +188,15 @@ type StoreOptions struct {
 // pipelined or large upload.
 //
 // POST and IHAVE have two replies. The first (340, 335) takes every fault above; the final one
-// (240/441, 235/436/437) is written by Conn.writeFinal and takes only OverrideFinal,
+// (240/441, 235/437) is written by Conn.writeFinal and takes only OverrideFinal,
 // DelayFinal, Split, DropAfterBytes, Trailing and Abort (keyed by the command like for the
-// first reply, so Split["POST"] splits both). Delay, Override, OverrideLine, Drip, LineDelay,
-// Endless, LongLine, DropInMultiline and OverrideFrom/OverrideTimes do not touch it, as
-// before. TAKETHIS has one reply, which takes all faults, and OverrideFinal and DelayFinal on
-// top (OverrideFinal wins over Override). In StoreHandler the article of POST is filed before
+// first reply, so Split["POST"] splits both; Split offsets and DropAfterBytes count per
+// reply, so they cannot target only the final one: use OverrideFinal and DelayFinal for that).
+// Trailing["POST"] and Trailing["IHAVE"] also follow the first reply (after the 340 or 335,
+// while the client is about to upload) and the 435, 436 and 480 that end IHAVE without an
+// article. Delay, Override, OverrideLine, Drip, LineDelay, Endless, LongLine, DropInMultiline
+// and OverrideFrom/OverrideTimes do not touch the final reply, as before. TAKETHIS has one reply, which takes all faults, and OverrideFinal and DelayFinal on
+// top (OverrideFinal wins over Override; they also hit its 480 and 500 answers). In StoreHandler the article of POST is filed before
 // the final reply is built, so an overridden final reply does not undo that.
 type Faults struct {
 	Delay           map[string]time.Duration // command → sleep before its reply
@@ -241,10 +244,13 @@ type Faults struct {
 	// DropAfterBytes, DropInMultiline, DropInUpload or CloseAfter closed the connection (for
 	// CloseAfter the N-th command); a close by the client or by Close is not affected.
 	Abort map[string]bool
-	// OverrideFinal replaces the final reply of POST (240/441), IHAVE (235/436/437) and
-	// TAKETHIS (239/439), with Override for the first reply untouched; empty: the final reply
-	// is not sent. DelayFinal sleeps before it (bounded by the Deadline), after the article was
-	// read. The article is read and handled as usual.
+	// OverrideFinal replaces the reply that follows the article of POST (240/441), IHAVE
+	// (235/437) and TAKETHIS (239/439), with Override for the first reply (340, 335, and the
+	// 435/436/480 that ends IHAVE before an article) untouched; empty: the final reply is not
+	// sent. For TAKETHIS, whose only reply this is, it also replaces the 480 (not
+	// authenticated) and 500 (NoStream) answers. DelayFinal sleeps before it (bounded by the
+	// Deadline), after the article was read, with the same TAKETHIS rule. The article is read
+	// and handled as usual.
 	OverrideFinal map[string][]string
 	DelayFinal    map[string]time.Duration
 	// DropInUpload closes the connection after the server read that many lines of the incoming

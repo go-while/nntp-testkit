@@ -209,7 +209,7 @@
 //		Split           map[string]Split         // command → write its reply in pieces: Split{At []int (byte offsets) or Size int, Gap time.Duration between pieces}
 //		DropAfterBytes  map[string]int           // command → close the connection after this many bytes of its reply (0 = before any)
 //		Abort           map[string]bool          // command → a close by one of its faults is abrupt: TCP RST, on TLS no close_notify
-//		OverrideFinal   map[string][]string      // POST/IHAVE/TAKETHIS → lines written instead of the final reply (240/441, 235/436/437, 239/439); empty: none
+//		OverrideFinal   map[string][]string      // POST/IHAVE/TAKETHIS → lines written instead of the final reply (240/441, 235/437, 239/439); empty: none
 //		DelayFinal      map[string]time.Duration // POST/IHAVE/TAKETHIS → sleep before the final reply
 //		DropInUpload    map[string]int           // POST/IHAVE/TAKETHIS → close the connection after this many lines of the incoming dot block
 //		Trailing        map[string]Trailing      // command → Trailing{Lines []string, Gap time.Duration}: more lines in a separate write after the reply and Gap
@@ -234,8 +234,10 @@
 //	// record boundary, other stacks an error such as Python's SSLEOFError).
 //	// The final reply of POST (and IHAVE in PeerHandler) takes only OverrideFinal, DelayFinal,
 //	// Split, DropAfterBytes, Trailing and Abort (same command keys as the first reply: Split["POST"]
-//	// cuts the 340 and the 240); the article is read and handled before. TAKETHIS has one reply that
-//	// takes all faults, OverrideFinal over Override. DropInUpload counts the lines of the dot block
+//	// cuts the 340 and the 240; offsets and byte counts are per reply, so use OverrideFinal and
+//	// DelayFinal to target only the final one; Trailing also follows the 340/335 and the 435/436/480
+//	// of IHAVE); the article is read and handled before. TAKETHIS has one reply that
+//	// takes all faults, OverrideFinal over Override (and also on its 480 and 500 answers). DropInUpload counts the lines of the dot block
 //	// read after the command (0 = none), the terminator not included; the cut block is not recorded.
 //	const DefaultGreeting = "200 fakeserver ready"            // DefaultGreetingNoPost ("201 ...") for a read-only Store server
 //

@@ -198,6 +198,9 @@ func (c *Conn) finish() {
 		if tc, ok := c.raw.(*net.TCPConn); ok && c.tls == nil {
 			_ = tc.SetLinger(0)
 		}
+		if d, ok := c.conn.(*deflateConn); ok && d.pr != nil {
+			_ = d.pr.Close() // ends the inflater goroutine, which may block in a write to the pipe
+		}
 		_ = c.raw.Close()
 	} else {
 		_ = c.conn.Close()
