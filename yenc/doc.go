@@ -2,8 +2,9 @@
 // body lines, ready for a fakeserver.Article, and a fakeserver.Generator that serves a group of
 // them. Options cover the choices posting tools differ in (line length, which characters to
 // escape) and broken posts (no =ybegin or =yend line, a wrong size or CRC). Data makes
-// reproducible test data in a few profiles. It is an encoder for tests, not a decoder; only the
-// standard library is used.
+// reproducible test data in a few profiles. Corpus is a shared list of broken and odd posts
+// with the outcome a decoder's test suite expects. It is an encoder for tests, not a decoder;
+// only the standard library is used.
 //
 // Contract (plan nntp-testkit). Implemented in yenc.go:
 //
@@ -49,4 +50,16 @@
 //	// of Data(p, size(n), uint64(n)), with the headers, Message-ID and Date of
 //	// fakeserver.GeneratedArticle (so Lookup stays nil) and the Subject posting tools write:
 //	// `<group> - "<name>" yEnc (1/1) <size>`. size nil: 750000 bytes for every article.
+//
+// Implemented in corpus.go:
+//
+//	type Case struct {
+//		Name  string             // unique, fit for t.Run: "stray-yend-after-block"
+//		Lines []string           // body lines as Encode writes them
+//		Data  []byte             // the decoded bytes when a decoder accepts the case; nil for WantError
+//		Why   string
+//		Want  fakeserver.Outcome // WantError, WantEither or WantAccept, as in the reply corpus
+//	}
+//	func Corpus() []Case            // fixed order, a new slice each call
+//	func CaseByName(name string) (Case, bool)
 package yenc
