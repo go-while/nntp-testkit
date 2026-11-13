@@ -254,7 +254,7 @@
 // wrong; Apply puts it into the Options of a fake server (a command case needs a mode that
 // applies Faults, e.g. a Store):
 //
-//	func ReplyCorpus() []ReplyCase                          // 123 cases
+//	func ReplyCorpus() []ReplyCase                          // 125 cases
 //	func ReplyCaseByName(name string) (ReplyCase, bool)
 //	type ReplyCase struct {
 //		Name         string   // unique, fit for t.Run, e.g. "group-211-nofields"

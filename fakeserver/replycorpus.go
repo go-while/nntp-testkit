@@ -102,7 +102,9 @@ type ReplyCase struct {
 	// Final is set when Lines replace the reply that follows the article of POST or IHAVE
 	// (240/441, 235/437; Faults.OverrideFinal), not the first reply: the client gets its
 	// normal 340 or 335, sends an article and then reads the case. ApplyLine treats it like
-	// Apply, since OverrideFinal is keyed by the command only.
+	// Apply, since OverrideFinal is keyed by the command only. The corpus's Final cases are
+	// POST: they need a Store that allows posting (not ReaderOnly); Script, LineHandler and
+	// Handler modes do not apply OverrideFinal.
 	Final bool
 }
 
@@ -239,9 +241,10 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(c, "ihave-340-first", "IHAVE <i@x>", WantError, "340 is the POST send code; IHAVE answers 335 (6.3.2)", "340 ok"),
 		rcCase(c, "quit-200", "QUIT", WantError, "QUIT answers 205 (5.4)", "200 hm"),
 		rcCase(c, "authinfo-user-250", "AUTHINFO USER u", WantError, "AUTHINFO USER answers 381, 281 or 481 (RFC 4643 2.3)", "250 hm"),
-		rcCase(c, "authinfo-user-215-block", "AUTHINFO USER u", WantError, "a 215 block where AUTHINFO USER answers one line (RFC 4643 2.3)", rcBlock("215 what", "111 19990101000000")...),
-		rcFinal(rcCase(c, "post-240-address-in-text", "POST", WantAccept, "the 240 text is free (6.3.1) and holds no message-id; an address in angle brackets there is not the Message-ID of the article", "240 posted ok; report abuse to <abuse@example.net>")),
+		// code, Final: the reply after the article of POST, a well-formed 240 with odd text
+		rcFinal(rcCase(c, "post-240-address-in-text", "POST", WantAccept, "the 240 text is free and not defined to carry a message-id (6.3.1); an address in angle brackets there is not the Message-ID of the article", "240 posted ok; report abuse to <abuse@example.net>")),
 		rcFinal(rcCase(c, "post-240-empty-brackets", "POST", WantAccept, "the 240 text is free (6.3.1); '<>' in it is no message-id (RFC 5536 3.1.3 needs content between the brackets)", "240 <> posted")),
+		rcCase(c, "authinfo-user-215-block", "AUTHINFO USER u", WantError, "a 215 block where AUTHINFO USER answers one line (RFC 4643 2.3)", rcBlock("215 what", "111 19990101000000")...),
 		rcCase(c, "authinfo-user-281", "AUTHINFO USER u", WantAccept, "281 to USER with no PASS asked: legal when the server needs no password (RFC 4643 2.3.1); a client must not send PASS", "281 ok"),
 
 		// status: a malformed status line
@@ -311,11 +314,13 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(b, "hdr-msgid-unclosed-row", "HDR Subject <a@b>", WantError, "a row that starts with '<' but has no closing '>'; the row for a message-id argument starts with 0 (8.5.2)", rcBlock("225 hdr", "<broken value")...),
 		rcCase(b, "hdr-msgid-empty-row", "HDR Subject <a@b>", WantError, "'<>' where the 0 of a message-id argument belongs (8.5.2)", rcBlock("225 hdr", "<> value")...),
 		rcCase(b, "hdr-negative-row", "HDR Subject 1-2", WantError, "a negative article number in an HDR row (8.5.2: numbers are digits only)", rcBlock("225 hdr", "-1 x")...),
-		rcCase(b, "hdr-plus-sign-row", "HDR Subject 1-2", WantError, "a '+' before the article number (8.5.2: digits only)", rcBlock("225 hdr", "+1 x")...),
-		rcCase(b, "hdr-underscore-row", "HDR Subject 1-2", WantError, "'1_0' for the article number: some number parsers (Python int()) accept the underscore (8.5.2: digits only)", rcBlock("225 hdr", "1_0 x")...),
+		rcCase(b, "hdr-plus-sign-row", "HDR Subject 1-2", WantEither, "a '+' before the article number (8.5.2: digits only); common number parsers (strconv.Atoi, strtol, int()) accept it and get the right number", rcBlock("225 hdr", "+1 x")...),
+		rcCase(b, "hdr-underscore-row", "HDR Subject 1-2", WantError, "'1_0' for the article number: some number parsers (Python int(), Go ParseInt with base 0) accept the underscore and read 10, a wrong number handed back as good (8.5.2: digits only)", rcBlock("225 hdr", "1_0 x")...),
 		rcCase(b, "hdr-non-ascii-digit-row", "HDR Subject 1-2", WantError, "U+0661 (Arabic-Indic digit one) for the article number: Unicode-aware parsers read it as 1 (8.5.2: ASCII digits only)", rcBlock("225 hdr", "\u0661 x")...),
 		rcCase(b, "list-overview-fmt-empty-name", "LIST OVERVIEW.FMT", WantError, "a field of ':' alone, with no header name (8.4.2)", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", ":")...),
-		rcCase(b, "list-overview-fmt-padded-name", "LIST OVERVIEW.FMT", WantEither, "spaces around a field name (8.4.2: a field is a header name and a colon, or a colon and a metadata name); a lenient client trims them; one that keeps ' :full' as the name of the Xref field no longer finds it", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", " :full", "Xref :full")...),
+		rcCase(b, "list-overview-fmt-bare-full", "LIST OVERVIEW.FMT", WantError, "' :full' with no header name before the suffix, also after trimming the space (8.4.2: ':full' follows a header name)", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", " :full")...),
+		rcCase(b, "list-overview-fmt-space-before-colon", "LIST OVERVIEW.FMT", WantEither, "'Xref :full', a space between the header name and the colon (8.4.2); a lenient client trims it to Xref:full, none may key the field 'Xref '", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "Xref :full")...),
+		rcCase(b, "list-overview-fmt-leading-space", "LIST OVERVIEW.FMT", WantEither, "' Subject:', a space before the header name (8.4.2); a lenient client trims it, none may key the field ' Subject'", rcBlock("215 fmt", " Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines")...),
 		rcCase(b, "list-active-too-few-fields", "LIST ACTIVE", WantError, "a LIST ACTIVE row without the status field (7.6.3)", rcBlock("215 list", "alt.test 5 1")...),
 		rcCase(b, "list-active-nonnumeric", "LIST ACTIVE", WantError, "letters for high and low (7.6.3)", rcBlock("215 list", "alt.test x y y")...),
 		rcCase(b, "list-active-empty-group", "LIST ACTIVE", WantAccept, "high below low is how an empty group reads (7.6.3): not an error", rcBlock("215 list", "alt.test 0 1 y")...),

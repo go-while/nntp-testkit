@@ -21,6 +21,8 @@ import (
 //	}
 //
 // Want uses the classes of the reply corpus (fakeserver.WantError, WantEither, WantAccept).
+// For a decoder, WantError means it reports the post as broken; one that hands back the data
+// with a CRC or size warning passes when the warning reaches the caller.
 // The cases are facts about yEnc 1.3 posts, written from scratch.
 type Case struct {
 	// Name is a unique short identifier fit for t.Run, e.g. "stray-yend-after-block".
@@ -53,15 +55,15 @@ func Corpus() []Case {
 	with := func(lines ...string) []string { return append(slices.Clone(good), lines...) }
 	bad := func(o Options) []string { o.Line = 64; return Encode("a.bin", data, o) }
 	return []Case{
-		{Name: "stray-yend-after-block", Lines: with("=yend size=0"), Data: data, Want: fakeserver.WantAccept,
-			Why: "a second =yend after a complete block whose size and CRC match: the block ended at the first =yend, the stray line must not be checked against it"},
-		{Name: "text-after-yend", Lines: with("", "-- ", "posted with a newsreader"), Data: data, Want: fakeserver.WantAccept,
+		{Name: "stray-yend-after-block", Lines: with("=yend size=0"), Data: slices.Clone(data), Want: fakeserver.WantAccept,
+			Why: "a second =yend after a complete block whose size and CRC match: yEnc 1.3 says nothing about lines after the block, decoders in practice stop at the first =yend, and the stray line must not be checked against the block"},
+		{Name: "text-after-yend", Lines: with("", "-- ", "posted with a newsreader"), Data: slices.Clone(data), Want: fakeserver.WantAccept,
 			Why: "plain text (a signature) after =yend: yEnc data ends at =yend, what follows is not decoded"},
 		{Name: "bad-crc32", Lines: bad(Options{BadCRC: true}), Want: fakeserver.WantError,
 			Why: "=yend gives a crc32 that does not match the data"},
 		{Name: "bad-size", Lines: bad(Options{BadSize: true}), Want: fakeserver.WantError,
 			Why: "=yend gives a size one byte more than the data and than =ybegin says"},
-		{Name: "no-yend", Lines: bad(Options{NoEnd: true}), Data: data, Want: fakeserver.WantEither,
+		{Name: "no-yend", Lines: bad(Options{NoEnd: true}), Data: slices.Clone(data), Want: fakeserver.WantEither,
 			Why: "the post ends without =yend: the data may be cut short and nothing can be checked; a lenient decoder returns what it has"},
 	}
 }
