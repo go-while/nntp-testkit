@@ -42,7 +42,9 @@ import "strings"
 // A missing "." terminator is Faults.Endless, an overlong block line Faults.LongLine, a reply
 // cut short Faults.DropInMultiline: not repeated here. A reply that depends on an earlier
 // answer of the same exchange (POST answered 340 and then, after the article, 340 again) needs
-// a Script or a Handler, not an Override, and is not in the corpus.
+// a Script or a Handler, not an Override, and is not in the corpus. A case with Final set
+// replaces the reply that follows the article of POST or IHAVE (240/441, 235/437) instead: the
+// first reply is the normal 340 or 335, and the test sends an article before it looks.
 
 // Family groups the cases of the reply corpus.
 type Family string
@@ -97,6 +99,11 @@ type ReplyCase struct {
 	// terminator that never comes): the test needs a read timeout in the client, and the
 	// call ends with a timeout error.
 	NeedsTimeout bool
+	// Final is set when Lines replace the reply that follows the article of POST or IHAVE
+	// (240/441, 235/437; Faults.OverrideFinal), not the first reply: the client gets its
+	// normal 340 or 335, sends an article and then reads the case. ApplyLine treats it like
+	// Apply, since OverrideFinal is keyed by the command only.
+	Final bool
 }
 
 // IsGreeting reports whether the case is a bad greeting (the reply to connecting, not to a
@@ -107,13 +114,21 @@ func (rc ReplyCase) IsGreeting() bool { return rc.Family == FamilyGreeting }
 func (rc ReplyCase) Bytes() []byte { return joinCRLF(rc.Lines) }
 
 // Apply makes the server of o write the case: Faults.Override[Cmd] for a command case (every
-// line of that command gets the reply), Options.Greeting for a greeting case. It adds to the
+// line of that command gets the reply), Faults.OverrideFinal[Cmd] for a Final case,
+// Options.Greeting for a greeting case. It adds to the
 // maps already in o and keeps the other faults. The server still needs a mode that applies
 // Faults: a Store (Options.Store) for a command case; a greeting case works in any mode that
 // writes Options.Greeting.
 func (rc ReplyCase) Apply(o *Options) {
 	if rc.IsGreeting() {
 		o.Greeting = strings.Join(rc.Lines, "\r\n")
+		return
+	}
+	if rc.Final {
+		if o.Faults.OverrideFinal == nil {
+			o.Faults.OverrideFinal = make(map[string][]string)
+		}
+		o.Faults.OverrideFinal[rc.Cmd] = append([]string(nil), rc.Lines...)
 		return
 	}
 	if o.Faults.Override == nil {
@@ -125,7 +140,7 @@ func (rc ReplyCase) Apply(o *Options) {
 // ApplyLine is Apply for the sample client line only (Faults.OverrideLine[Line]): other lines
 // of the same command get their normal reply.
 func (rc ReplyCase) ApplyLine(o *Options) {
-	if rc.IsGreeting() {
+	if rc.IsGreeting() || rc.Final {
 		rc.Apply(o)
 		return
 	}
@@ -164,6 +179,11 @@ func rcCase(fam Family, name, line string, want Outcome, why string, lines ...st
 
 func rcGreeting(name string, want Outcome, why string, lines ...string) ReplyCase {
 	return ReplyCase{Name: name, Family: FamilyGreeting, Lines: lines, Why: why, Want: want}
+}
+
+func rcFinal(rc ReplyCase) ReplyCase {
+	rc.Final = true
+	return rc
 }
 
 func rcTimeout(rc ReplyCase) ReplyCase {
@@ -220,6 +240,8 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(c, "quit-200", "QUIT", WantError, "QUIT answers 205 (5.4)", "200 hm"),
 		rcCase(c, "authinfo-user-250", "AUTHINFO USER u", WantError, "AUTHINFO USER answers 381, 281 or 481 (RFC 4643 2.3)", "250 hm"),
 		rcCase(c, "authinfo-user-215-block", "AUTHINFO USER u", WantError, "a 215 block where AUTHINFO USER answers one line (RFC 4643 2.3)", rcBlock("215 what", "111 19990101000000")...),
+		rcFinal(rcCase(c, "post-240-address-in-text", "POST", WantAccept, "the 240 text is free (6.3.1) and holds no message-id; an address in angle brackets there is not the Message-ID of the article", "240 posted ok; report abuse to <abuse@example.net>")),
+		rcFinal(rcCase(c, "post-240-empty-brackets", "POST", WantAccept, "the 240 text is free (6.3.1); '<>' in it is no message-id (RFC 5536 3.1.3 needs content between the brackets)", "240 <> posted")),
 		rcCase(c, "authinfo-user-281", "AUTHINFO USER u", WantAccept, "281 to USER with no PASS asked: legal when the server needs no password (RFC 4643 2.3.1); a client must not send PASS", "281 ok"),
 
 		// status: a malformed status line
@@ -285,6 +307,15 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(b, "over-non-utf8-subject", "OVER 1-2", WantEither, "bytes that are not UTF-8 in the Subject field; a client keeps them or reports an error", rcBlock("224 overview follows", "1\tsubj \xff\xfe\ta@b\td\t<1@x>\t\t1\t1")...),
 		rcCase(b, "hdr-nonnumeric-row", "HDR Subject 1", WantError, "a word for the article number of an HDR row (8.5)", rcBlock("225 hdr", "abc x")...),
 		rcCase(b, "hdr-row-no-space", "HDR Subject 1", WantEither, "an HDR row of the number only, no value and no space (8.5)", rcBlock("225 hdr", "1")...),
+		rcCase(b, "hdr-msgid-row-for-range", "HDR Subject 1-2", WantError, "a message-id where the article number belongs: rows of a range request carry numbers, the 0 form is for a message-id argument only (8.5.2)", rcBlock("225 hdr", "<a@b> x")...),
+		rcCase(b, "hdr-msgid-unclosed-row", "HDR Subject <a@b>", WantError, "a row that starts with '<' but has no closing '>'; the row for a message-id argument starts with 0 (8.5.2)", rcBlock("225 hdr", "<broken value")...),
+		rcCase(b, "hdr-msgid-empty-row", "HDR Subject <a@b>", WantError, "'<>' where the 0 of a message-id argument belongs (8.5.2)", rcBlock("225 hdr", "<> value")...),
+		rcCase(b, "hdr-negative-row", "HDR Subject 1-2", WantError, "a negative article number in an HDR row (8.5.2: numbers are digits only)", rcBlock("225 hdr", "-1 x")...),
+		rcCase(b, "hdr-plus-sign-row", "HDR Subject 1-2", WantError, "a '+' before the article number (8.5.2: digits only)", rcBlock("225 hdr", "+1 x")...),
+		rcCase(b, "hdr-underscore-row", "HDR Subject 1-2", WantError, "'1_0' for the article number: some number parsers (Python int()) accept the underscore (8.5.2: digits only)", rcBlock("225 hdr", "1_0 x")...),
+		rcCase(b, "hdr-non-ascii-digit-row", "HDR Subject 1-2", WantError, "U+0661 (Arabic-Indic digit one) for the article number: Unicode-aware parsers read it as 1 (8.5.2: ASCII digits only)", rcBlock("225 hdr", "\u0661 x")...),
+		rcCase(b, "list-overview-fmt-empty-name", "LIST OVERVIEW.FMT", WantError, "a field of ':' alone, with no header name (8.4.2)", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", ":")...),
+		rcCase(b, "list-overview-fmt-padded-name", "LIST OVERVIEW.FMT", WantEither, "spaces around a field name (8.4.2: a field is a header name and a colon, or a colon and a metadata name); a lenient client trims them; one that keeps ' :full' as the name of the Xref field no longer finds it", rcBlock("215 fmt", "Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", " :full", "Xref :full")...),
 		rcCase(b, "list-active-too-few-fields", "LIST ACTIVE", WantError, "a LIST ACTIVE row without the status field (7.6.3)", rcBlock("215 list", "alt.test 5 1")...),
 		rcCase(b, "list-active-nonnumeric", "LIST ACTIVE", WantError, "letters for high and low (7.6.3)", rcBlock("215 list", "alt.test x y y")...),
 		rcCase(b, "list-active-empty-group", "LIST ACTIVE", WantAccept, "high below low is how an empty group reads (7.6.3): not an error", rcBlock("215 list", "alt.test 0 1 y")...),

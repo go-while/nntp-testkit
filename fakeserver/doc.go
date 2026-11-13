@@ -254,7 +254,7 @@
 // wrong; Apply puts it into the Options of a fake server (a command case needs a mode that
 // applies Faults, e.g. a Store):
 //
-//	func ReplyCorpus() []ReplyCase                          // 112 cases
+//	func ReplyCorpus() []ReplyCase                          // 123 cases
 //	func ReplyCaseByName(name string) (ReplyCase, bool)
 //	type ReplyCase struct {
 //		Name         string   // unique, fit for t.Run, e.g. "group-211-nofields"
@@ -265,9 +265,10 @@
 //		Why          string   // what is wrong, with the RFC where there is one
 //		Want         Outcome  // WantError (fail cleanly), WantEither (strict fails, lenient may accept; no panic, hang or desync), WantAccept (odd but legal: must be accepted)
 //		NeedsTimeout bool     // the client waits for more data than the reply holds: the test needs a read timeout
+//		Final        bool     // Lines replace the reply after the article of POST/IHAVE (Faults.OverrideFinal): the client gets 340/335, sends an article, then reads the case
 //	}
-//	func (rc ReplyCase) Apply(o *Options)                   // Faults.Override[Cmd]; Options.Greeting for a greeting case; adds to the maps already in o
-//	func (rc ReplyCase) ApplyLine(o *Options)               // Apply for Line only (Faults.OverrideLine[Line])
+//	func (rc ReplyCase) Apply(o *Options)                   // Faults.Override[Cmd]; OverrideFinal[Cmd] for a Final case; Options.Greeting for a greeting case; adds to the maps already in o
+//	func (rc ReplyCase) ApplyLine(o *Options)               // Apply for Line only (Faults.OverrideLine[Line]); a Final case as Apply
 //	func (rc ReplyCase) Bytes() []byte                      // exactly what the server writes: every line + CRLF
 //	func (rc ReplyCase) IsGreeting() bool
 //

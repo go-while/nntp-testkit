@@ -46,7 +46,41 @@ func rcExpect(t *testing.T, rc ReplyCase, apply func(ReplyCase, *Options)) strin
 	if _, err := io.WriteString(conn, rc.Line+"\r\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	if rc.Final {
+		rcUpload(t, conn, rc.Cmd)
+	}
 	return rcRead(t, conn, len(rc.Bytes()))
+}
+
+// rcUpload reads the normal first reply of POST (340) or IHAVE (335) and sends an article.
+func rcUpload(t *testing.T, conn net.Conn, cmd string) {
+	t.Helper()
+	want := map[string]string{"POST": "340", "IHAVE": "335"}[cmd]
+	if want == "" {
+		t.Fatalf("a Final case for %q, want POST or IHAVE", cmd)
+	}
+	line := rcReadLine(t, conn)
+	if !strings.HasPrefix(line, want+" ") {
+		t.Fatalf("first reply %q, want %s", line, want)
+	}
+	art := "From: a@b.invalid\r\nNewsgroups: g\r\nSubject: s\r\nMessage-ID: <rc@x>\r\n\r\nbody\r\n.\r\n"
+	if _, err := io.WriteString(conn, art); err != nil {
+		t.Fatalf("write article: %v", err)
+	}
+}
+
+// rcReadLine reads one CRLF line, a byte at a time so nothing after it is consumed.
+func rcReadLine(t *testing.T, conn net.Conn) string {
+	t.Helper()
+	var b []byte
+	var c [1]byte
+	for !strings.HasSuffix(string(b), "\r\n") {
+		if _, err := io.ReadFull(conn, c[:]); err != nil {
+			t.Fatalf("read line: %v (got %q)", err, b)
+		}
+		b = append(b, c[0])
+	}
+	return strings.TrimSuffix(string(b), "\r\n")
 }
 
 func TestReplyCorpusShape(t *testing.T) {
@@ -89,6 +123,9 @@ func TestReplyCorpusShape(t *testing.T) {
 		}
 		if rc.Want != WantError && rc.Want != WantEither && rc.Want != WantAccept {
 			t.Errorf("%s: Want %q", rc.Name, rc.Want)
+		}
+		if rc.Final && rc.Cmd != "POST" && rc.Cmd != "IHAVE" {
+			t.Errorf("%s: Final for %q, want POST or IHAVE", rc.Name, rc.Cmd)
 		}
 		if rc.NeedsTimeout && rc.Want != WantError {
 			t.Errorf("%s: NeedsTimeout with Want %q", rc.Name, rc.Want)
@@ -171,7 +208,7 @@ func TestReplyCorpusApplyLine(t *testing.T) {
 
 // Nothing but the case's bytes is written: a sample of cases, then a probe after them.
 func TestReplyCorpusNoExtraBytes(t *testing.T) {
-	for _, name := range []string{"group-211-negative", "article-222-block", "over-nonnumeric-row", "status-bare-lf", "greeting-400"} {
+	for _, name := range []string{"group-211-negative", "article-222-block", "over-nonnumeric-row", "status-bare-lf", "greeting-400", "post-240-address-in-text"} {
 		rc, ok := ReplyCaseByName(name)
 		if !ok {
 			t.Fatalf("no case %q", name)
@@ -181,6 +218,9 @@ func TestReplyCorpusNoExtraBytes(t *testing.T) {
 			if !rc.IsGreeting() {
 				rcRead(t, conn, len(DefaultGreeting)+2)
 				_, _ = io.WriteString(conn, rc.Line+"\r\n")
+				if rc.Final {
+					rcUpload(t, conn, rc.Cmd)
+				}
 			}
 			rcRead(t, conn, len(rc.Bytes()))
 			_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
@@ -207,6 +247,13 @@ func TestReplyCaseApplyKeepsOptions(t *testing.T) {
 	rc.ApplyLine(&o)
 	if got := o.Faults.OverrideLine["GROUP g"]; len(got) != 1 || got[0] != "200 ok" {
 		t.Fatalf("OverrideLine = %v", o.Faults.OverrideLine)
+	}
+
+	f, _ := ReplyCaseByName("post-240-address-in-text")
+	var of Options
+	f.ApplyLine(&of)
+	if got := of.Faults.OverrideFinal["POST"]; len(got) != 1 || got[0] != f.Lines[0] || of.Faults.Override != nil || of.Faults.OverrideLine != nil {
+		t.Fatalf("Final ApplyLine: %+v", of.Faults)
 	}
 
 	g, _ := ReplyCaseByName("greeting-two-lines")

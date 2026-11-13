@@ -206,7 +206,7 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | `(*Server) TLSHandshakes()`, `TLSFailed()`, `TLSServerNames()` | completed and failed handshakes (implicit TLS and STARTTLS), SNI of every ClientHello |
 | `LineHandler(f func(c *Conn, line string) (reply []string, closeConn bool)) func(*Conn)` | answer each client line with what `f` returns, in any order (what `Script` cannot); `f` may `c.ReadDotBlock()` for an article; `Faults` apply |
 | `PeerHandler(*PeerOptions) func(*Conn)`, `type PeerOptions` | transit peer: MODE STREAM, CHECK, TAKETHIS (RFC 4644), IHAVE (RFC 3977 6.3.2), AUTHINFO; options below |
-| `ReplyCorpus() []ReplyCase`, `ReplyCaseByName(name) (ReplyCase, bool)` | 112 named wrong and malformed server replies for the test suite of a client, see below |
+| `ReplyCorpus() []ReplyCase`, `ReplyCaseByName(name) (ReplyCase, bool)` | 123 named wrong and malformed server replies for the test suite of a client, see below |
 | `(*Conn) Wait(ch <-chan struct{}) bool`, `Sleep(d) bool` | for a Handler or `PeerOptions.BeforeReply`: block until `ch` fires (true) or the Deadline passes / the server closes (false); `Sleep` is bounded the same way |
 | `NewStore() *Store` (the zero value works too) | stateful store; safe for concurrent use; returns copies |
 | `(*Store) AddGroup`, `AddGroupAt`, `SetPosting`, `AddArticle(group, Article) int64` | setup |
@@ -396,27 +396,28 @@ Faults on the COMPRESS reply (`DropAfterBytes`, `Split` offsets) count the `Empt
 `With206` bytes too. `compress/flate` cannot flush partially and its reader holds `Z_PARTIAL_FLUSH`
 data back until more arrives; the kit writes the partial flush itself, and its client inflater reads it.
 
-**Reply corpus.** `fakeserver.ReplyCorpus()` is 112 named wrong and malformed server replies (GROUP
+**Reply corpus.** `fakeserver.ReplyCorpus()` is 123 named wrong and malformed server replies (GROUP
 answered 215, a 211 without numbers, a greeting of `hello there`, an OVER row with a letter for the
 article number) for the test suite of an NNTP client, so each client project does not write the
 table again; `ReplyCaseByName(name)` finds one. A `ReplyCase` is `{Name; Family; Cmd, Line string;
-Lines []string; Why string; Want Outcome; NeedsTimeout bool}`:
+Lines []string; Why string; Want Outcome; NeedsTimeout, Final bool}`:
 
 | field / method | what |
 |---|---|
 | `Name`, `Why` | a unique short identifier fit for `t.Run` (`group-211-nofields`); what is wrong, with the RFC where there is one |
-| `Family` | `FamilyCode` (well-formed reply, wrong code or shape for the command: 37 cases), `FamilyStatus` (malformed status line: 37), `FamilyGreeting` (bad greeting: 10), `FamilyBlock` (bad rows or terminator of a multi-line reply: 28) |
+| `Family` | `FamilyCode` (well-formed reply, wrong code or shape for the command: 39 cases), `FamilyStatus` (malformed status line: 37), `FamilyGreeting` (bad greeting: 10), `FamilyBlock` (bad rows or terminator of a multi-line reply: 37) |
 | `Cmd`, `Line` | the `Faults` key (upper-cased command) whose reply is replaced, and a sample client line (`GROUP g`); both empty for a greeting case |
 | `Lines` | written instead of the normal reply, each plus CRLF (a block carries its own `.` line); may hold bytes that are no valid NNTP (NUL, 8-bit, bare LF) |
-| `Want` | the generic expected client outcome: `WantError` (the call fails cleanly: no panic, no hang, no data handed back as good; then the connection is in sync or closed; 74 cases), `WantEither` (a strict client fails, a lenient one may accept; neither may panic, hang or desynchronise; 34), `WantAccept` (odd but legal, e.g. `high` below `low` for an empty group, 281 to AUTHINFO USER; the client must accept it; 4). Error types and reuse of the connection afterwards are for each client suite to agree on |
+| `Want` | the generic expected client outcome: `WantError` (the call fails cleanly: no panic, no hang, no data handed back as good; then the connection is in sync or closed; 82 cases), `WantEither` (a strict client fails, a lenient one may accept; neither may panic, hang or desynchronise; 35), `WantAccept` (odd but legal, e.g. `high` below `low` for an empty group, 281 to AUTHINFO USER, an address in the 240 text of POST; the client must accept it; 6). Error types and reuse of the connection afterwards are for each client suite to agree on |
 | `NeedsTimeout` | the client waits for more data than the reply holds (a terminator that never comes): the test needs a read timeout and the call ends with one |
-| `Apply(*Options)`, `ApplyLine(*Options)` | `Faults.Override[Cmd]` (every line of that command) or `Faults.OverrideLine[Line]` (that line only); `Options.Greeting` for a greeting case; they add to the maps already in `o`. A command case needs a mode that applies `Faults`, e.g. `Options.Store` |
+| `Final` | `Lines` replace the reply after the article of POST or IHAVE (`Faults.OverrideFinal`): the client gets its normal 340 or 335, sends an article, then reads the case |
+| `Apply(*Options)`, `ApplyLine(*Options)` | `Faults.Override[Cmd]` (every line of that command) or `Faults.OverrideLine[Line]` (that line only); `Faults.OverrideFinal[Cmd]` for a `Final` case (both); `Options.Greeting` for a greeting case; they add to the maps already in `o`. A command case needs a mode that applies `Faults`, e.g. `Options.Store` |
 | `Bytes() []byte`, `IsGreeting() bool` | exactly what the server writes for the case; whether it is a greeting case (the reply to connecting) |
 
 A missing `.` terminator is `Faults.Endless`, an overlong block line `Faults.LongLine`, a reply cut
 short `Faults.DropInMultiline`: not repeated in the corpus. A reply that depends on an earlier answer of the
 same exchange (POST answered 340 and then 340 again after the article) needs a Script or a Handler and is not
-in it.
+in it; a fixed final reply after the article is a `Final` case.
 
 ```go
 for _, rc := range fakeserver.ReplyCorpus() {
@@ -658,6 +659,7 @@ into a `fakeserver.Article` body like any other: no CRLF and no dot-stuffing (th
 | `EncodeParts(name, data, partSize, Options) [][]string` | one post per part: `=ybegin part= total=`, `=ypart begin= end=`, the data, `=yend size= part= pcrc32=` (and `crc32=` of the whole data on the last part) |
 | `Data(Profile, size, seed) []byte`; `Random`, `Plain`, `Escapes`, `Edges` | reproducible data: random bytes (most of Usenet), no escapes, an escape in every second byte, a third of the bytes at `.`, tab and space |
 | `Generator(Profile, low, high, size func(n int64) int, Options) fakeserver.Generator` | a generated group: article n is `Data(p, size(n), n)` named `<p>-<n>.bin`, with `GeneratedArticle`'s headers and a yEnc Subject |
+| `Corpus() []Case`, `CaseByName(name) (Case, bool)`; `type Case struct { Name string; Lines []string; Data []byte; Why string; Want fakeserver.Outcome }` | broken and odd posts for the test suite of a decoder, with the reply corpus's outcome classes: a stray `=yend` after a complete block and text after `=yend` (accept, decode to `Data`), a bad CRC or size (error), no `=yend` (either) |
 
 `RawDots` and `RawSpaces` model posting tools that leave those characters to the server's
 dot-stuffing and to the reader. The broken-post options model corrupt uploads; `Faults.DropInMultiline`
