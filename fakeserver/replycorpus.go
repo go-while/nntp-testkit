@@ -307,7 +307,7 @@ func ReplyCorpus() []ReplyCase {
 		rcCase(b, "over-non-utf8-subject", "OVER 1-2", WantEither, "bytes that are not UTF-8 in the Subject field; a client keeps them or reports an error", rcBlock("224 overview follows", "1\tsubj \xff\xfe\ta@b\td\t<1@x>\t\t1\t1")...),
 		rcCase(b, "hdr-nonnumeric-row", "HDR Subject 1", WantError, "a word for the article number of an HDR row (8.5)", rcBlock("225 hdr", "abc x")...),
 		rcCase(b, "hdr-row-no-space", "HDR Subject 1", WantEither, "an HDR row of the number only, no value and no space (8.5)", rcBlock("225 hdr", "1")...),
-		rcCase(b, "hdr-msgid-row-for-range", "HDR Subject 1-2", WantError, "a message-id where the article number belongs: rows of a range request carry numbers, the 0 form is for a message-id argument only (8.5.2)", rcBlock("225 hdr", "<a@b> x")...),
+		rcCase(b, "hdr-msgid-row-for-range", "HDR Subject 1-2", WantEither, "a message-id where the article number belongs: rows of a range request carry numbers, the 0 form is for a message-id argument only (8.5.2); a client that checks the row syntax but not which request it answers may accept it", rcBlock("225 hdr", "<a@b> x")...),
 		rcCase(b, "hdr-msgid-unclosed-row", "HDR Subject <a@b>", WantError, "a row that starts with '<' but has no closing '>'; the row for a message-id argument starts with 0 (8.5.2)", rcBlock("225 hdr", "<broken value")...),
 		rcCase(b, "hdr-msgid-empty-row", "HDR Subject <a@b>", WantError, "'<>' where the 0 of a message-id argument belongs (8.5.2)", rcBlock("225 hdr", "<> value")...),
 		rcCase(b, "hdr-negative-row", "HDR Subject 1-2", WantError, "a negative article number in an HDR row (8.5.2: numbers are digits only)", rcBlock("225 hdr", "-1 x")...),
