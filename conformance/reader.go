@@ -35,12 +35,19 @@ const unknownGroup = "conformance.invalid.no-such-group"
 // farAbove is added to a group's high water mark for an article number that cannot exist.
 const farAbove = 1000000
 
-// maxArticle is the largest article number farNumber gives (2^31-1: servers with 32-bit
-// numbers must still parse it).
+// maxArticle is the largest article number farNumber gives while the group's numbers fit in
+// 32 bits (2^31-1: servers with 32-bit numbers must still parse it).
 const maxArticle = 2147483647
 
-// farNumber returns an article number far above high, at most maxArticle.
-func farNumber(high int64) int64 { return min(high+farAbove, maxArticle) }
+// farNumber returns an article number above high that cannot exist: high+farAbove capped at
+// maxArticle, unless high is maxArticle or more (the server counts beyond 32 bits, and the
+// cap would name an existing article), when it is high+farAbove.
+func farNumber(high int64) int64 {
+	if high >= maxArticle {
+		return high + farAbove
+	}
+	return min(high+farAbove, maxArticle)
+}
 
 // readerChecks returns the RFC 3977 checks, in report order.
 func readerChecks() []check {
@@ -1042,7 +1049,7 @@ func checkOverLine(l string, fmtLines []string, want int64, wantID string) (int6
 			continue
 		}
 		if !strings.HasPrefix(strings.ToLower(f[i]), name+":") {
-			return n, fmt.Errorf("OVER line %q: field %d %q does not start with %q", l, i+1, f[i], fmtLines[i-1][:len(name)+1])
+			return n, fmt.Errorf("OVER line %q: field %d %q does not start with %q", l, i+1, f[i], name+":")
 		}
 	}
 	return n, nil

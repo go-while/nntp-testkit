@@ -146,9 +146,9 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 			if err != nil {
 				return
 			}
-			verb, arg := line, ""
-			if i := strings.IndexByte(line, ' '); i >= 0 {
-				verb, arg = line[:i], line[i+1:]
+			verb, arg := cutWord(line)
+			if !strings.EqualFold(verb, "AUTHINFO") {
+				arg = strings.TrimSpace(arg) // a message-id or keyword: no padding ("CHECK  <id>")
 			}
 			verb = strings.ToUpper(verb)
 			if o.NoStream && (verb == "CHECK" || verb == "TAKETHIS") {
@@ -225,10 +225,7 @@ func PeerHandler(o *PeerOptions) func(*Conn) {
 					reply = []string{"502 Command unavailable"} // RFC 4643 §2.3: no AUTHINFO after a successful one
 					break
 				}
-				sub, val := arg, ""
-				if i := strings.IndexByte(arg, ' '); i >= 0 {
-					sub, val = arg[:i], arg[i+1:]
-				}
+				sub, val := cutWord(arg)
 				switch strings.ToUpper(sub) {
 				case "USER":
 					userSent = true

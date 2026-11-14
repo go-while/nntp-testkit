@@ -555,4 +555,21 @@ func TestParseHelpers(t *testing.T) {
 	if n := farNumber(maxArticle - 5); n != maxArticle {
 		t.Errorf("farNumber near the 32-bit limit: %d", n)
 	}
+	// a group already at or beyond the 32-bit limit: the number stays above high
+	for _, high := range []int64{maxArticle, maxArticle + 1, 5_000_000_000} {
+		if n := farNumber(high); n <= high {
+			t.Errorf("farNumber(%d) = %d, not above high", high, n)
+		}
+	}
+}
+
+// TestCheckOverLineFoldingName: a LIST OVERVIEW.FMT name whose lower-case form is longer than
+// the original (U+023A, 2 bytes, lower-cases to U+2C65, 3 bytes) gives an error, not a slice
+// panic.
+func TestCheckOverLineFoldingName(t *testing.T) {
+	fmtLines := []string{"Subject:", "From:", "Date:", "Message-ID:", "References:", ":bytes", ":lines", "\u023a\u023a\u023a\u023a\u023a:full"}
+	l := "1\ts\tf\td\t<1@x>\t\t10\t1\tother: x"
+	if _, err := checkOverLine(l, fmtLines, 1, "<1@x>"); err == nil || !strings.Contains(err.Error(), "does not start with") {
+		t.Errorf("checkOverLine: %v", err)
+	}
 }
