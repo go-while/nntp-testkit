@@ -47,7 +47,7 @@ func init() { storeHandler = StoreHandler }
 //	NEWGROUPS d t [GMT] 231 groups whose Created is at or after d t (yymmdd or yyyymmdd, hhmmss; always UTC); 501
 //	NEWNEWS wm d t [GMT] 230 message-ids of the articles in groups matching wm whose Arrived is at or after d t (date and time as NEWGROUPS); 501; 503 when a matching generated group spans more numbers than its limit
 //	DATE                111 yyyymmddhhmmss (UTC)
-//	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces)
+//	POST                440 when ReaderOnly; else 340, then 240 "<id>" or 441 (Newsgroups, Subject and From required; a Message-ID that is duplicate or not "<...>" without spaces; a generated group in Newsgroups)
 //	COMPRESS alg        only with Compress or CompressOutputOnly (else 500; 480 before required auth unless CompressBeforeAuth): 206, then both directions compressed (RFC 8054); 501 for a missing or invalid algorithm name; 502 when active; 503 for an algorithm other than DEFLATE
 //	STARTTLS            only with StartTLS (else 500): 382 then the TLS handshake (RFC 4642); 502 when TLS or COMPRESS is active or AUTHINFO succeeded; 501 with arguments; StartTLSOptions.Refuse replaces the 382
 //	QUIT                205, then the connection is closed
@@ -110,7 +110,8 @@ type storeConn struct {
 	authed   bool
 	user     string // AUTHINFO USER argument
 	userSeen bool
-	loggedIn bool // an AUTHINFO succeeded (STARTTLS is then 502)
+	loggedIn bool   // an AUTHINFO succeeded (STARTTLS is then 502)
+	line     string // the client line being answered
 }
 
 // action tells serve what to do after dispatch.
@@ -133,6 +134,7 @@ func (h *storeConn) serve() {
 		if len(args) > 0 {
 			args = args[1:]
 		}
+		h.line = line
 		reply, act := h.dispatch(cmd, args)
 		switch act {
 		case actPost:
@@ -309,7 +311,10 @@ func (h *storeConn) authinfo(args []string) []string {
 	if h.authed || h.c.Compressed() { // RFC 8054 2.2.2: 502 once compression is active
 		return []string{"502 Command unavailable"}
 	}
-	val := strings.Join(args[1:], " ")
+	// the user name or password is the rest of the line after the subcommand and one
+	// separator, byte for byte (not re-joined from fields: "p  q" stays "p  q")
+	_, rest := cutWord(h.line)
+	_, val := cutWord(rest)
 	switch strings.ToUpper(args[0]) {
 	case "USER":
 		if h.o.Pass == "" { // username-only authentication (RFC 4643 2.3.2)
@@ -738,8 +743,8 @@ func (h *storeConn) post(line string) bool {
 	if !h.c.writeReply(line, "340 Send article to be posted") {
 		return false
 	}
-	if ov, ok := h.c.override(line); ok && (len(ov) == 0 || !strings.HasPrefix(ov[0], "340")) {
-		return true // the overridden first reply was final: no article follows
+	if !strings.HasPrefix(h.c.last, "340") {
+		return true // an overridden first reply was final: no article follows
 	}
 	wire, err := h.c.ReadDotBlock()
 	if err != nil {
@@ -778,6 +783,9 @@ func (h *storeConn) file(wire []string) string {
 	}
 	if len(groups) == 0 {
 		return "441 Posting failed: no newsgroup"
+	}
+	if g, ok := h.st.firstGenerated(groups); ok {
+		return "441 Posting failed: " + g + " is a generated group"
 	}
 	h.postMu.Lock()
 	defer h.postMu.Unlock()

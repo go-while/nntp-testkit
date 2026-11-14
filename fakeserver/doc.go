@@ -189,7 +189,8 @@
 //	// Arrived is at or after the time; date and time as NEWGROUPS, always UTC; 503 when a
 //	// matching generated group spans more than its limit), DATE, POST (440 when
 //	// ReaderOnly; 340 then 240/441: Newsgroups, Subject and From required, Message-ID must be
-//	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; stored with
+//	// <...> and unused, generated as <posted-N@fakeserver.invalid> when missing; 441 when
+//	// Newsgroups names a generated group, before anything is stored; stored with
 //	// AddPosted and AddArticle per group), AUTHINFO USER/PASS (381/281/481/482; USER alone
 //	// answers 281/481 when Pass is empty; 502 when not configured, done or compression is active), COMPRESS alg (with
 //	// Compress or CompressOutputOnly, else 500; 480 before required auth; 501 missing or

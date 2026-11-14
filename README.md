@@ -554,7 +554,9 @@ the order of `Names()`), so one failure cannot poison the next. The checks that 
 all the others, so no article arrives in `PostGroup` while a reader check counts its articles. Before the dial a check is skipped when it is
 in `Options.Skip` ("skipped by option"), needs credentials without `User` or posts without
 `PostGroup`; after the dial and CAPABILITIES it is skipped when its capability is not listed
-(unless the server lists `MODE-READER`: the check then sends MODE READER and tests again). A
+(unless the server lists `MODE-READER`, or `User` is set: the check then sends MODE READER
+or logs in, reads CAPABILITIES again and tests then, since a server may list its reader
+capabilities only after AUTHINFO). A
 broken greeting fails `greeting` once and skips the rest; a panic in a check is its Fail.
 The articles that checks post carry a Message-ID under `@conformance.invalid`.
 

@@ -118,6 +118,19 @@ func (g *Generator) lookup(group, id string) (int64, bool) {
 	return generatedNumber(group, id)
 }
 
+// firstGenerated returns the first of groups that is a generated group (AddArticle refuses
+// those), without creating any group.
+func (st *Store) firstGenerated(groups []string) (string, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, name := range groups {
+		if g, ok := st.groups[name]; ok && g.gen != nil {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // AddGenerated creates group (or turns an existing group without articles into one) as a
 // generated group: its articles Low..High come from gen and are never stored. Count is
 // High-Low+1 (holes included, like the estimate of a real server). Store methods work on it:
