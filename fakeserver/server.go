@@ -178,9 +178,11 @@ type StoreOptions struct {
 // The faults apply in this order: Delay; OverrideLine, else Override; LongLine;
 // DropInMultiline; then the reply is written, through Drip when set (else Split; DropAfterBytes
 // cuts the bytes at any rate), and Endless goes on from there; Trailing follows a reply that
-// was written whole. OverrideLine is keyed by the whole client line, normalised as the command upper-cased
-// and the arguments as sent, joined by single spaces ("ARTICLE 2", "OVER 11-20",
-// "ARTICLE <a@b>"); New and Start normalise its keys the same way. Drip and Endless are bounded
+// was written whole. OverrideLine is keyed by the whole client line, normalised as the command upper-cased,
+// a keyword first argument upper-cased too (LIST, MODE, AUTHINFO, COMPRESS, CAPABILITIES and the
+// header name of HDR, XHDR, XPAT), the other arguments as sent, joined by single spaces
+// ("ARTICLE 2", "OVER 11-20", "ARTICLE <a@b>", "LIST OVERVIEW.FMT"); New and Start normalise its
+// keys the same way, so "list overview.fmt" and "mode reader" match too. Drip and Endless are bounded
 // by Options.Deadline like every server-side wait: after it the connection is closed.
 //
 // On a compressed connection (COMPRESS DEFLATE) every fault works on the inflated stream as

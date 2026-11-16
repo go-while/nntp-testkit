@@ -71,14 +71,29 @@ func cutWord(s string) (word, rest string) {
 	return s[:i], s[i+1:]
 }
 
-// lineKey is the key of Faults.OverrideLine for a client line: the command upper-cased and the
-// arguments as sent, joined by single spaces.
+// keywordArg holds the commands whose first argument is a keyword or a header name, which
+// RFC 3977 compares without regard to case: "list overview.fmt" is LIST OVERVIEW.FMT.
+var keywordArg = map[string]bool{
+	"AUTHINFO": true, "CAPABILITIES": true, "COMPRESS": true, "HDR": true,
+	"LIST": true, "MODE": true, "XHDR": true, "XPAT": true,
+}
+
+// lineKey is the key of Faults.OverrideLine for a client line: the command upper-cased, the
+// first argument upper-cased too when it is a keyword or header name (keywordArg; for LIST
+// HEADERS also MSGID or RANGE), the other arguments as sent (group names, message-ids, user
+// names), all joined by single spaces.
 func lineKey(line string) string {
 	f := strings.Fields(line)
 	if len(f) == 0 {
 		return ""
 	}
 	f[0] = strings.ToUpper(f[0])
+	if len(f) > 1 && keywordArg[f[0]] {
+		f[1] = strings.ToUpper(f[1])
+		if f[0] == "LIST" && f[1] == "HEADERS" && len(f) > 2 {
+			f[2] = strings.ToUpper(f[2])
+		}
+	}
 	return strings.Join(f, " ")
 }
 

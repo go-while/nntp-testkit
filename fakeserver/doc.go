@@ -224,7 +224,8 @@
 //		Trailing        map[string]Trailing      // command → Trailing{Lines []string, Gap time.Duration}: more lines in a separate write after the reply and Gap
 //	}
 //	// Keys are upper-cased command names ("ARTICLE"), OverrideLine's the whole client line
-//	// normalised (command upper-cased, arguments joined by single spaces); the hooks apply in
+//	// normalised (command and a keyword first argument such as LIST OVERVIEW.FMT or MODE READER
+//	// upper-cased, other arguments as sent, joined by single spaces); the hooks apply in
 //	// Store mode, to a LineHandler and in Script mode (there: only to a matched step's reply), in this order:
 //	// Delay, OverrideLine else Override, LongLine, DropInMultiline, then the write (Drip),
 //	// then Endless (LineDelay pauses between the lines of the write). DropInMultiline counts the status line; 0 closes before writing anything.
