@@ -905,17 +905,87 @@ func TestRawBoundedByDeadline(t *testing.T) {
 	}
 }
 
-// TestRawLineLimit: a line over 1 MiB closes the connection and is noted, not held in memory.
+// TestRawLineLimit: a line over the cap (64 KiB by default, like the other modes) closes the
+// connection and is noted, not held in memory.
 func TestRawLineLimit(t *testing.T) {
 	p := startProc(t, `{"Mode": "raw", "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X"}]}`)
 	c := p.dial()
-	go c.Send(strings.Repeat("a", maxLine+1<<16)) // the write may fail when the server closes
+	go c.Send(strings.Repeat("a", fakeserver.DefaultMaxLine+1)) // the write may fail when the server closes
 	if _, err := c.ReadLine(); err == nil {
 		t.Error("the connection stayed open")
 	}
 	s, _ := p.finish()
-	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over") || len(s.Lines) != 0 {
+	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over 65536 bytes") || len(s.Lines) != 0 {
 		t.Errorf("notes %q lines %d", s.Notes, len(s.Lines))
+	}
+}
+
+// TestRawLineNoWait: in raw mode a line over a small cap is given up as soon as its bytes
+// arrive, without waiting for an LF or a full buffer (council r1); the note is the cap's, not
+// the Deadline's.
+func TestRawLineNoWait(t *testing.T) {
+	p := startProc(t, `{"Mode": "raw", "Options": {"MaxLine": 64, "Deadline": 5000}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X.*"}]}`)
+	c := p.dial()
+	if err := c.Send("X" + strings.Repeat("a", 70)); err != nil { // no CRLF, the client stays
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := c.ReadLine(); err == nil {
+		t.Error("the connection stayed open")
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("closed after %v, want at once", d)
+	}
+	s, _ := p.finish()
+	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over 64 bytes") {
+		t.Errorf("notes %q", s.Notes)
+	}
+}
+
+// TestLineCapConfig: Options.MaxLine from JSON sets the cap of every mode: raw (a configured
+// cap, the line end counting, and a negative one that lifts it) and the fakeserver modes (the
+// note comes from Server.Notes).
+func TestLineCapConfig(t *testing.T) {
+	t.Run("raw configured", func(t *testing.T) {
+		p := startProc(t, `{"Mode": "raw", "Options": {"MaxLine": 64}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X.*"}, {"Send": [{"Text": "250 ok\r\n"}]}]}`)
+		c := p.dial()
+		c.MustSend("X" + strings.Repeat("a", 61) + "\r\n") // 64 bytes with CRLF: fits
+		if line, err := c.ReadLine(); err != nil || line != "250 ok" {
+			t.Fatalf("a line of exactly the cap was refused: %q %v", line, err)
+		}
+		c.MustSend("Y" + strings.Repeat("a", 62) + "\r\n") // 65 bytes
+		if _, err := c.ReadLine(); err == nil {
+			t.Error("the connection stayed open")
+		}
+		s, _ := p.finish()
+		if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over 64 bytes") {
+			t.Errorf("notes %q", s.Notes)
+		}
+	})
+	t.Run("raw uncapped", func(t *testing.T) {
+		p := startProc(t, `{"Mode": "raw", "Options": {"MaxLine": -1}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "X.*"}, {"Send": [{"Text": "250 ok\r\n"}]}]}`)
+		c := p.dial()
+		c.MustSend("X" + strings.Repeat("a", 200<<10) + "\r\n")
+		if line, err := c.ReadLine(); err != nil || line != "250 ok" {
+			t.Fatalf("%q %v", line, err)
+		}
+		if s, _ := p.finish(); len(s.Notes) != 0 {
+			t.Errorf("notes %q", s.Notes)
+		}
+	})
+	for _, mode := range []string{"store", "peer", "script"} {
+		t.Run(mode, func(t *testing.T) {
+			p := startProc(t, `{"Mode": "`+mode+`", "Options": {"MaxLine": 100, "MaxBlock": 50}}`)
+			c := p.dial()
+			c.MustSend(strings.Repeat("a", 101) + "\r\n")
+			if _, err := c.ReadLine(); err == nil {
+				t.Error("the connection stayed open")
+			}
+			s, _ := p.finish()
+			if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "over Options.MaxLine (100 bytes)") || len(s.Lines) != 0 {
+				t.Errorf("notes %q lines %q", s.Notes, s.Lines)
+			}
+		})
 	}
 }
 

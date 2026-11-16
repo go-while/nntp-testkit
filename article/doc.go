@@ -212,7 +212,8 @@
 // The cases (names; the Invalid ones marked *): latin1 (8-bit ISO-8859-1 body with MIME
 // headers), utf8, nul* (NUL in the body), nul-header*, bare-cr* and bare-lf* (in the body),
 // bare-cr-header*, bare-lf-header*, dot-lines (lines ".", "..", ".hidden", "...three"),
-// long-line* (100000 bytes, over the 998 octets of RFC 5322 section 2.1.1), long-header* (5000
+// long-line* (100000 bytes, over the 998 octets of RFC 5322 section 2.1.1, and over the kit's
+// default 64 KiB line cap: raise client Conn.MaxLine and fakeserver Options.MaxLine for it), long-header* (5000
 // byte Subject on one line), max-line (998 octet body line and Subject), long-message-id (250
 // octets), folded-subject, folded-path (a
 // fold before '!'), no-colon*, space-before-colon*, dup-header* (Subject twice), empty-path*

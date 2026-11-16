@@ -1,7 +1,6 @@
 package conformance
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/tls"
 	"errors"
@@ -275,7 +274,9 @@ func checkStartTLSPipelined(s *session, c check) Result {
 		r.Detail = fmt.Sprintf("the DATE sent behind STARTTLS was not executed: the server did not complete the TLS handshake after it (%v)", err)
 		return r
 	}
-	s.c = &client.Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Greeting: s.c.Greeting, Deadline: s.c.Deadline, Strict: true}
+	g := s.c.Greeting
+	s.c = s.o.newClient(tc, s.c.Deadline)
+	s.c.Greeting = g
 	err = s.c.ExpectNoPending(waitTLS)
 	switch {
 	case errors.As(err, &se) && se.Kind == client.Pending:

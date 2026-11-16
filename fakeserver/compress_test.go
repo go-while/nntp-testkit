@@ -266,6 +266,7 @@ func TestCompressFaults(t *testing.T) {
 		const n = 2 << 20
 		_, c := storeServer(t, testStore(), opts, Faults{LongLine: map[string]int{"ARTICLE": n}})
 		c.Compress()
+		c.MaxLine = -1 // the line is over the client's default cap
 		wantCode(t, c, "GROUP alt.test", 211)
 		if _, l := wantBlock(t, c, "ARTICLE 1", 220); len(l[0]) != n || l[1] != "Subject: one" {
 			t.Errorf("long line %d bytes, then %q", len(l[0]), l[1])

@@ -83,14 +83,13 @@ func (e *StrictError) Unwrap() error { return e.Err }
 
 // readStrictLine reads one raw line and checks its line end: the strict form of ReadLine. On a
 // StrictError the raw line is returned with it.
-func (c *Conn) readStrictLine() (string, error) {
-	c.bump()
-	raw, err := c.R.ReadBytes('\n')
+func (c *Conn) readStrictLine(until time.Time, limit int) (string, error) {
+	raw, err := c.readLineBytes(until, limit)
 	if err != nil {
-		if len(raw) > 0 {
+		if len(raw) > 0 && !errors.Is(err, ErrLineTooLong) {
 			return string(raw), &StrictError{Kind: NoCRLF, Line: string(raw), Err: err}
 		}
-		return "", err
+		return string(raw), err
 	}
 	if serr := checkLine(raw); serr != nil {
 		return string(raw), serr

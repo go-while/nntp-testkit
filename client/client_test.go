@@ -662,11 +662,12 @@ func TestTryRawUntilDot(t *testing.T) {
 	}
 }
 
-// TestLongLines: lines beyond the 1 MiB reader buffer in strict mode.
+// TestLongLines: lines beyond the 1 MiB reader buffer in strict mode (with the line cap lifted).
 func TestLongLines(t *testing.T) {
 	long := strings.Repeat("x", 2<<20)
 	p := newPeer(t, scripted("200 hi\r\n"+long+"\r\n"+long+"\n"+"211 after\r\n"))
 	c := Dial(t, p.addr())
+	c.MaxLine = -1
 	if line, err := c.ReadLine(); err != nil || line != long {
 		t.Fatalf("CRLF line: len %d err %v", len(line), err)
 	}

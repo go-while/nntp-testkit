@@ -13,6 +13,11 @@ import (
 	"github.com/go-while/nntp-testkit/client"
 )
 
+// BlockWindow is how many hang guards (Options.Deadline) a multi-line reply of the server may
+// take in all: a block that is still going after that, whatever the pace of its lines, fails
+// the check (the guard of a single line is the Deadline itself).
+const BlockWindow = 3
+
 // readerSize is the bufio size of a session's client (the client package keeps its own
 // constant unexported; 64 KiB holds any status line and most overview lines).
 const readerSize = 64 << 10
@@ -82,32 +87,34 @@ func (o Options) deadline() time.Duration {
 // CAPABILITIES (see capabilities): a check about the greeting wants nothing else on the wire.
 func dial(o Options) (*session, error) {
 	d := o.deadline()
-	var c *client.Conn
-	if o.TLS == nil {
-		var err error
-		if c, err = client.TryDial(o.Addr, d); err != nil {
-			return nil, err
-		}
-	} else {
-		nc, err := net.DialTimeout("tcp", o.Addr, d)
-		if err != nil {
-			return nil, err
-		}
+	nc, err := net.DialTimeout("tcp", o.Addr, d)
+	if err != nil {
+		return nil, err
+	}
+	if o.TLS != nil {
 		tc := tls.Client(nc, o.TLS)
 		_ = tc.SetDeadline(time.Now().Add(d))
 		if err := tc.Handshake(); err != nil {
 			_ = nc.Close()
 			return nil, fmt.Errorf("tls: %w", err)
 		}
-		c = &client.Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Deadline: d, Strict: true}
-		if _, err := c.ReadGreeting(); err != nil {
-			c.Close()
-			return nil, fmt.Errorf("greeting: %w", err)
-		}
+		nc = tc
+	}
+	c := o.newClient(nc, d)
+	if _, err := c.ReadGreeting(); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("greeting: %w", err)
 	}
 	s := &session{o: o, c: c, greeting: c.Greeting}
 	s.code, _ = client.ParseCode(c.Greeting)
 	return s, nil
+}
+
+// newClient wraps nc as the strict client of a session with the line and block bounds of the
+// Options.
+func (o Options) newClient(nc net.Conn, deadline time.Duration) *client.Conn {
+	return &client.Conn{Conn: nc, R: bufio.NewReaderSize(nc, readerSize), Deadline: deadline, Strict: true,
+		MaxLine: o.MaxLine, MaxBlock: o.MaxBlock, BlockTime: BlockWindow * deadline}
 }
 
 // capabilities sends CAPABILITIES and stores the list (without the status line and the

@@ -116,7 +116,7 @@ func preRead(o Options) (caps []string, refused string, err error) {
 	s, err := dial(o)
 	if err != nil {
 		var se *client.StrictError
-		if errors.As(err, &se) {
+		if errors.As(err, &se) || errors.Is(err, client.ErrLineTooLong) {
 			return nil, "", nil
 		}
 		return nil, "", err

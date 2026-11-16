@@ -35,6 +35,17 @@
 // article it was just given with 431 / 436 while it is in flight, the check offers again
 // (100ms, doubling up to 1s) until 438 / 435 (Pass, the Detail counts the re-offers), 238 /
 // 335 (Fail) or the end of the window (Skip). Default 5s, negative: ask once.
+// Options.MaxLine and Options.MaxBlock cap what the checks read from the server: a line over
+// MaxLine bytes (line end included; default 64 KiB, negative: no cap) and a multi-line reply
+// over MaxBlock bytes (default 64 MiB) fail the check that reads it with a Detail that says so
+// ("line too long", "dot block too long"), and a block must end within BlockWindow (3) times
+// Options.Deadline whatever the pace of its lines, so a server that streams lines without the
+// "." terminator, or an endless line, can neither grow the process nor hold Check: this holds
+// for the CAPABILITIES block read before the checks start as well. A greeting line over the
+// cap is the greeting check's Fail (the other checks are skipped, as for a bare LF). The caps
+// are no RFC limits, only a guard: raise MaxLine for a server whose legitimate lines are
+// longer. A Detail quotes at most one server line, so at most MaxLine bytes; the reply
+// descriptions (a status line, the start of a block) and quoted lists are cut at 1000 bytes.
 // Options.StartTLS configures the STARTTLS handshake (nil: not verified, said in the Detail).
 // Options.StrictOverviewFmt additionally requires the RFC-preferred :bytes/:lines
 // metadata names; by default the RFC-permitted Bytes:/Lines: aliases remain accepted.

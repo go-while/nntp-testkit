@@ -79,6 +79,34 @@ Every blocking step (dial, read, write, waits) is bounded by `testkit.Deadline()
 hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `client.Conn.Deadline`
 (or the `deadline` argument of `DialWith`/`TryDial`) and `proc.Options.Deadline` override it per use.
 
+## Line and block caps
+
+A client under test that sends an endless line or dot block to the fake server, or a server under test that
+sends an endless line or an endless multi-line reply to the kit's client or the conformance checker, makes
+the test fail cleanly instead of growing the test process without bound. (Calls that take their own limit,
+such as `TryReadUntilQuiet` with a limit of 0, are bounded by the hang guard only.)
+One line may hold 64 KiB (65536 bytes, **the line ending counted**: a 65534-character line plus CRLF
+passes, one character more does not) unless configured, a dot block 64 MiB. The caps are **not RFC
+enforcement** (RFC 3977 3.1: 512 bytes for a command or status line; RFC 5322 2.1.1: 998 characters per
+article line; OVER and HDR rows have no fixed limit); the tests and the reply corpus detect RFC
+violations, and the reply corpus even sends a 64 KiB status line on purpose, and the article corpus case `long-line` is a
+100000-byte line: raise `MaxLine` for those. A cap only stops runaway memory,
+and it is checked while the line is read (in fragments), so an endless line costs no memory. `MaxBlock`
+counts bytes, not lines: a block held in memory costs a small multiple of its size (a block of empty lines
+the most, one slice entry per line), so a 64 MiB block of empty lines can take 1-3 GiB of one test process; lower `MaxBlock` for tests with
+many connections. It stays bounded.
+
+| where | setting (0 = default, negative = no cap) | when exceeded |
+|---|---|---|
+| `fakeserver.Options` | `MaxLine` (default `DefaultMaxLine`, 64 KiB), `MaxBlock` (`DefaultMaxBlock`, 64 MiB; one dot block read with `ReadDotBlock`) | `ReadLine` / `ReadDotBlock` return `ErrLineTooLong` / `ErrBlockTooLong`, `Server.Notes()` records it (the `notes` of the `nntp-fakeserver` summary), the connection is closed; every mode, also the inflated stream after COMPRESS |
+| `nntp-fakeserver` JSON config | `Options.MaxLine`, `Options.MaxBlock`; raw mode follows `MaxLine` (it also keeps its own 16 MiB block and 64 MiB connection caps) | a note and the close, as above |
+| `client.Conn` | `MaxLine` (`DefaultMaxLine`), `MaxBlock` (`DefaultMaxBlock`), `BlockTime` (0 = 10 hang guards) | `ErrLineTooLong` (`errors.Is`); a block over `MaxBlock` or `BlockTime`: `*StrictError` (NoTerminator) wrapping `ErrBlockTooLong`. Applies to `ReadLine` and so to `ReadStatus`, `TryCmd` and the greeting, to `TryReadDotLines`, `TryRawUntilDot` and `TryPipeline` |
+| `conformance.Options` / `-max-line`, `-max-block` | `MaxLine`, `MaxBlock`; a block must end within `BlockWindow` (3) times `Deadline` | a Fail whose Detail says "line too long" or "dot block too long"; also for the CAPABILITIES block read before the checks start |
+
+A test that reads a line over the cap on purpose (`Faults.LongLine`, the reply corpus case
+`status-long-64k`, whose status line is a little over 64 KiB) sets `client.Conn.MaxLine` to a larger
+value or to -1; `TryReadUntilQuiet` and `ExpectClosed` have limits of their own.
+
 ## Packages
 
 | package | what |
@@ -115,7 +143,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 
 | API | what |
 |---|---|
-| `type Conn struct { Conn net.Conn; R *bufio.Reader; Greeting string; Deadline time.Duration; Strict bool }` | one client connection |
+| `type Conn struct { Conn net.Conn; R *bufio.Reader; Greeting string; Deadline time.Duration; Strict bool; MaxLine, MaxBlock int; BlockTime time.Duration }` | one client connection; `MaxLine` caps one line read (line end included; 0 = `DefaultMaxLine` 64 KiB, <0 none; over it `ErrLineTooLong`, raised while reading), `MaxBlock` one dot block in bytes (0 = `DefaultMaxBlock` 64 MiB, <0 none), `BlockTime` a whole dot block in time (0 = 10 hang guards, <0 none); over either: a `*StrictError` (NoTerminator) wrapping `ErrBlockTooLong`; not RFC limits, only a guard against runaway memory (see "Line and block caps" below) |
 | `Dial(tb, addr) *Conn` / `DialWith(tb, addr, deadline) *Conn` | dial, read the greeting, `tb.Cleanup(Close)`; fail tb on error |
 | `TryDial(addr, deadline) (*Conn, error)` | the same without `testing`; the caller closes |
 | `New(tb, net.Conn) *Conn` | wrap an open conn (net.Pipe, TLS); no greeting read |
@@ -143,7 +171,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryPost(article) (code, line, sent, err)`, `TryIhave(id, article)`, `TryCheck(id)`, `TryTakethis(id, article)`, `TryModeStream()`, `TryLogin(user, pass)` | the transfer and login exchanges in one call. POST/IHAVE send the article on 340/335 and return the final reply, else the first one; TAKETHIS sends command and article without waiting; LOGIN sends PASS on 381. A refusal (435, 440, 480, 481 ...) is a result: `err` is for I/O and protocol errors only. `sent` says whether the article went out (a 436 or 437 can come before or after the transfer; TAKETHIS always sends). `ExpectPost(want, article)`, `ExpectIhave(want, id, article)`, `ExpectTakethis(want, id, article)` fail the test unless the article was sent and the final code is `want`. `id` includes the `<>` |
 | `SendBytes`, `MustSendBytes` | `Send` and `MustSend` for a `[]byte` (e.g. `StuffBytes(article)`) |
 | `Post`, `Ihave`, `Check`, `Takethis`, `ModeStream`, `Login` | the same, `(code, line)`; fail tb only on an I/O or protocol error, never on a refusal |
-| `TryPipeline(cmds, multi) ([]Reply, error)` / `Pipeline(...)`, `type Reply struct { Cmd string; Code int; Line string; Lines []string }`, `MultiLine(cmd, code) bool` | write all commands from a goroutine while reading the replies in order (no deadlock when the server stops reading); `multi(cmd, code)` says whether a dot block follows (nil: `MultiLine`; `Reply.Cmd` is the entry's first line); the deadline slides with every line, a dot block also ends within 10 deadlines and 64 MiB |
+| `TryPipeline(cmds, multi) ([]Reply, error)` / `Pipeline(...)`, `type Reply struct { Cmd string; Code int; Line string; Lines []string }`, `MultiLine(cmd, code) bool` | write all commands from a goroutine while reading the replies in order (no deadlock when the server stops reading); `multi(cmd, code)` says whether a dot block follows (nil: `MultiLine`; `Reply.Cmd` is the entry's first line); the deadline slides with every line, a dot block also ends within `BlockTime` (10 deadlines) and holds at most `MaxBlock` (64 MiB); no line over `MaxLine` |
 | `TryDialFrom(addr, localIP, deadline)` / `DialFrom(tb, addr, localIP)` | dial from a chosen source address (127.0.0.2) and read the greeting; skip the test where the OS cannot bind it (macOS without an alias) |
 | `TryDialUntil(addr, prefix, d)` / `DialUntil(tb, addr, prefix, d)` | redial every 50 ms until the greeting starts with `prefix` (a server that greets 400 while it starts); refused dials count as not yet |
 | `TryReadUntilQuiet(quiet, limit) ([]byte, error)` / `ReadUntilQuiet(...) (data, eof)` | raw bytes until the server is silent for `quiet` or `limit` bytes; `io.EOF` when the server closed |
@@ -190,10 +218,10 @@ call it after a reply to catch a stray byte or a second status line (e.g. a NUL 
 | API | what |
 |---|---|
 | `New(tb, Options) *Server` / `Start(Options) (*Server, error)` | listen (default `127.0.0.1:0`) and serve; `New` registers `tb.Cleanup(Close)` |
-| `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration; MaxConns int; MaxConnsGreeting string }` | server config; `MaxConns` > 0: one more simultaneous connection gets `MaxConnsGreeting` (default `502 Too many connections`) and is closed |
+| `type Options struct { Addr, Greeting string; NoGreeting, RawStall bool; TLS *tls.Config; Script []Step; Handler func(*Conn); Store *Store; StoreOpts StoreOptions; Faults Faults; Deadline time.Duration; MaxLine, MaxBlock int; MaxConns int; MaxConnsGreeting string }` | server config; `MaxConns` > 0: one more simultaneous connection gets `MaxConnsGreeting` (default `502 Too many connections`) and is closed; `MaxLine` caps one client line (line end included; 0 = `DefaultMaxLine` 64 KiB, <0 none) and `MaxBlock` one dot block (0 = `DefaultMaxBlock` 64 MiB, <0 none): over it the read fails with `ErrLineTooLong` / `ErrBlockTooLong`, `Notes()` records it and the connection is closed (see "Line and block caps" below) |
 | `type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool; CompressShape CompressShape }` | one scripted exchange; `Expect` is an anchored regexp, "" matches any line; `Compress`: COMPRESS DEFLATE after the reply, its output stream shaped by `CompressShape` (below) |
 | `(*Server) Addr`, `Host`, `Port` | listen address |
-| `Lines`, `Articles`, `Mismatches` | client lines, dot blocks read (raw), lines no step matched |
+| `Lines`, `Articles`, `Mismatches`, `Notes` | client lines, dot blocks read (raw), lines no step matched, what the server ran into itself (a line or block over its cap) |
 | `Accepted`, `Open`, `MaxOpen`, `Closed`, `WaitOpen(tb, n, d)`, `WaitClosed(tb, n, d)`, `WaitLines(tb, want)` | connection counts (`MaxOpen`: the most open at once, e.g. a client's parallel-connection limit; `Closed`: connections that ended on the server side, e.g. a `RawStall` conn whose dial the client aborted) and polling waits |
 | `Count(cmd) int`, `Counts() map[string]int` | commands seen |
 | `Close()` | close listener and connections, wait for the goroutines |
@@ -544,7 +572,7 @@ the test output with `tb.Log`, each part capped at `LogBytes`. `Stop` needs a Un
 | `Names() []string` | the check names in report order (the values of `Options.Skip`) |
 | `(Report) Require(tb, names ...string)` | fails `tb` once per named check that did not Pass: a Fail, a Skip (not a pass) and a name not in `Names()`; each line has status, RFC and Detail |
 | `(Report) RequireNoFail(tb)` | fails `tb` once per Fail (what `Run` does, for a `ReportOnly` or `Check` report); an empty report fails too |
-| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; Allow map[string]string; AllowReply []AllowReply; CommitWait time.Duration; ReportOnly bool; Workers int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Allow` maps a check name to a substring: a Fail of that check whose Detail contains it becomes a Skip "allowed: <Detail>" (known server bugs, without dropping the rest of the check; `Skip` drops the whole check). Use a specific substring: a check stops at its first mistake, so everything after an allowed Fail goes unseen; `AllowReply` is the same by what the server did (see below); `CommitWait` is the window in which `check-have` and `ihave-have` repeat an offer the server deferred (0: 5s, negative: ask once); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `StrictOverviewFmt`: require preferred overview metadata names |
+| `type Options struct { Addr, User, Pass, PostGroup string; TLS *tls.Config; StartTLS *tls.Config; Deadline time.Duration; Skip []string; Allow map[string]string; AllowReply []AllowReply; CommitWait time.Duration; ReportOnly bool; Workers int; MaxLine, MaxBlock int; StrictOverviewFmt bool }` | `User` empty: auth checks skipped; `PostGroup` empty: no check posts; `TLS` non-nil: TLS from the first byte (the STARTTLS checks are then skipped); `StartTLS` is the client config of the STARTTLS handshake (nil: not verified and the Pass says so; `&tls.Config{RootCAs: pool}` verifies); `Allow` maps a check name to a substring: a Fail of that check whose Detail contains it becomes a Skip "allowed: <Detail>" (known server bugs, without dropping the rest of the check; `Skip` drops the whole check). Use a specific substring: a check stops at its first mistake, so everything after an allowed Fail goes unseen; `AllowReply` is the same by what the server did (see below); `CommitWait` is the window in which `check-have` and `ihave-have` repeat an offer the server deferred (0: 5s, negative: ask once); `Deadline` 0: `testkit.Deadline()`; `Workers` 0: 4 checks at a time; `MaxLine` caps one line the server sends (0: 64 KiB, <0 none) and `MaxBlock` one multi-line reply (0: 64 MiB, <0 none), and a block must end within `BlockWindow` (3) times `Deadline`: over a cap the check fails with a Detail saying so, never a hang; `StrictOverviewFmt`: require preferred overview metadata names |
 | `type AllowReply struct { Check, Cmd string; Code int }` | an `Options.AllowReply` entry: allows a Fail of check `Check` that is a wrong reply with code `Code` to command `Cmd` (see below) |
 | `type Result struct { Name string; Status Status; Detail, RFC, Missing, Cmd string; Code int }`, `Pass`, `Fail`, `Skip` | one check; `Detail` says why it failed or was skipped (on Pass an occasional note); on a Skip for a capability the server does not advertise, `Missing` names it ("NEWNEWS", "STREAMING", "LIST ACTIVE.TIMES") and `Detail` reads "<Missing> not advertised": match skips on `Missing`; `Cmd` and `Code` are set on a Fail that is a wrong reply code to a command (and stay on one that `Allow`/`AllowReply` turned into a Skip), empty and 0 otherwise |
 | `type Report struct { Results []Result; Capabilities []string }`; `Failed()`, `Counts()`, `String()`, `ByName()` | `Capabilities` is the list read right after the greeting, before MODE READER or AUTHINFO; `String()` ends a Fail line that is a wrong reply with `[reply: CMD code]` (e.g. `[reply: IHAVE 335]`) |
@@ -633,6 +661,8 @@ go run github.com/go-while/nntp-testkit/cmd/nntp-conformance -addr 127.0.0.1:111
 | `-allow-reply name:CMD=code` | repeatable: `Options.AllowReply`: a Fail of check `name` that is a wrong reply with `code` to a command starting with `CMD` (words case-insensitive) becomes a Skip "allowed: ..."; `CMD` or `=code` may be left out, not both (`help:HELP`, `ihave-have:IHAVE=335`, `mode-stream:=502`); the code is 100-599, an unknown check is a usage error; the report and `-json` show the `cmd` and `code` of a Fail |
 | `-commit-wait d` | how long `check-have` and `ihave-have` re-offer an article the server deferred (431/436) while it commits it asynchronously; default 5s (0), negative: do not retry |
 | `-deadline` | hang guard per read and write, default `10s` |
+| `-max-line n` | longest line the server may send, line end included, in bytes; default 0 = 64 KiB, negative: no cap (`Options.MaxLine`) |
+| `-max-block n` | largest multi-line reply the server may send, in bytes; default 0 = 64 MiB, negative: no cap (`Options.MaxBlock`); a block must also end within 3 times `-deadline` |
 | `-workers` | checks at the same time, each on its own connection, default 4; lower it for a server that allows fewer connections (a refused dial is a Fail) |
 | `-skip a,b` | check names to leave out (an unknown name is a usage error) |
 | `-json` | the report as JSON (`results` with `name`, `status`, `rfc`, `detail` and, for a skip for a missing capability, `missing`, for a wrong reply `cmd` and `code`; `capabilities`; `pass`/`fail`/`skip` counts) instead of text |
@@ -686,10 +716,11 @@ terminating `.`; `client.Stuff` (or the client's send) adds both.
 | `Bytes()`, `String()`, `Lines()`, `BodyLines()`, `Clone()`, `Canon()` | the wire form, and CRLF-split lines (what `client.Stuff` takes); `Canon()` is `Parse(Bytes())`: a bare LF inside a field is a line end on the wire, so it splits the field |
 | `Parse(raw) *Article` / `ParseDotBlock(raw)` / `ParseLines(lines)` | split at the first empty line (CRLF or LF), keep every header line and the body as they are; `Parse(b).Bytes()` equals `b` for any `b`. `ParseDotBlock` takes the client's `RawUntilDot` bytes (drops the terminator and the stuffing dots, nothing else), the right way to read a served article back; `ParseLines` on `ReadDotLines` output loses bare LF and CR-before-CRLF |
 | `Compare(sent, got, DiffOptions) Diff`, `ExpectSame(tb, sent, got, opts)` | the header diff: fields added, lost, changed (unfolded values) or reordered, ignoring what servers touch (`DefaultAllowed()`: Path, Xref, Injection-Info, Injection-Date, NNTP-Posting-Host, NNTP-Posting-Date, Lines, X-Trace, X-Complaints-To, Organization, plus `Allow`; `Strict` drops the defaults; `IgnoreOrder` drops the Reordered report), and the body byte for byte (`IgnoreTrailingSpace` to relax); both sides are canonicalised, folds count as one space, `CaseSensitiveNames` checks the spelling; a server that normalises bare CR/LF cannot be compared byte for byte. `PathExtends(sent, got)`: the sent Path entries are the tail of the served ones |
-| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line`, `max-line`, `long-message-id`, `folded-subject`, `folded-path`, `lf-only`, `no-colon`, `dup-header`, `empty-path`, `empty-subject`, ... (`Case.Invalid` marks the RFC-breaking ones) |
+| `Corpus() []Case`, `CaseNames()`, `CaseByName(name)`; `Case.Article(tb, group)` | tricky articles by name: `latin1`, `utf8`, `nul`, `bare-cr`, `bare-lf`, `dot-lines`, `long-line` (100000 bytes: over the kit's default 64 KiB line cap, so raise the client's `Conn.MaxLine` and the fake server's `Options.MaxLine` for it), `max-line`, `long-message-id`, `folded-subject`, `folded-path`, `lf-only`, `no-colon`, `dup-header`, `empty-path`, `empty-subject`, ... (`Case.Invalid` marks the RFC-breaking ones) |
 | `Cancel(tb, Options, target)`, `Newgroup(tb, Options, group, moderated)`, `Rmgroup(tb, Options, group)` | control messages: the `Control` and `cmsg` Subject headers and a body, no PGP signature; `Cancel`'s Newsgroups is `Options.Newsgroups`, "test" when empty |
 
 ```go
+cl.MaxLine = 1 << 20 // long-line is 100000 bytes, over the default 64 KiB line cap
 for _, c := range article.Corpus() {
 	t.Run(c.Name, func(t *testing.T) {
 		sent := c.Article(t, "test")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"compress/flate"
 	"crypto/tls"
 	"errors"
@@ -64,13 +65,25 @@ func (r *recorder) article(block []string, wire []byte) {
 }
 
 // The limits of what a raw connection reads (a client or a DEFLATE bomb cannot fill the memory):
-// one line, one dot block, and everything read on one connection. A connection that goes over
-// one is closed and a note says so.
+// one line (Options.MaxLine, default 64 KiB, the line end counts; <0 no cap: the same as in the
+// other modes), one dot block, and everything read on one connection. A connection that goes
+// over one is closed and a note says so.
 const (
-	maxLine  = 1 << 20
 	maxBlock = 16 << 20
 	maxConn  = 64 << 20
 )
+
+// rawMaxLine is the line cap of raw mode for Options.MaxLine v: 0 means fakeserver.DefaultMaxLine,
+// negative none (returned as 0).
+func rawMaxLine(v int) int {
+	switch {
+	case v == 0:
+		return fakeserver.DefaultMaxLine
+	case v < 0:
+		return 0
+	}
+	return v
+}
 
 var errTooLong = errors.New("line longer than the limit")
 
@@ -79,6 +92,7 @@ type rawConn struct {
 	c        *fakeserver.Conn
 	rec      *recorder
 	deadline time.Duration // Options.Deadline: bounds every wait, read and write
+	maxLine  int           // longest line with its line end; 0: no cap
 	conn     net.Conn
 	r        *bufio.Reader
 	total    int // bytes read so far
@@ -95,7 +109,7 @@ func (rc *rawConn) tcp() *net.TCPConn {
 
 // readWire reads one line with its line end. A timed read waits at most the Deadline for it
 // (the read of a line the script expects); an untimed one waits for the client (hang, the lines
-// after the script) and ends with the connection. A line over maxLine or a connection over
+// after the script) and ends with the connection. A line over the line cap or a connection over
 // maxConn ends the read with a note.
 func (rc *rawConn) readWire(timed bool) ([]byte, error) {
 	if timed {
@@ -105,34 +119,37 @@ func (rc *rawConn) readWire(timed bool) ([]byte, error) {
 	}
 	var line []byte
 	for {
-		part, err := rc.r.ReadSlice('\n')
-		line = append(line, part...)
-		rc.total += len(part)
-		switch {
-		case err == nil:
-			if rc.total > maxConn {
-				rc.rec.note("read: over %d bytes on one connection, closed", maxConn)
-				return line, errTooLong
+		if rc.r.Buffered() == 0 {
+			if _, err := rc.r.Peek(1); err != nil { // waits for data without consuming
+				var ce flate.CorruptInputError
+				switch {
+				case errors.Is(err, os.ErrDeadlineExceeded):
+					rc.rec.note("read: nothing from the client within the Deadline (%v)", rc.deadline)
+				case errors.As(err, &ce):
+					rc.rec.note("read: %v", err)
+				}
+				return line, err
 			}
-			return line, nil
-		case errors.Is(err, bufio.ErrBufferFull):
-		case errors.Is(err, os.ErrDeadlineExceeded):
-			rc.rec.note("read: nothing from the client within the Deadline (%v)", rc.deadline)
-			return line, err
-		default:
-			var ce flate.CorruptInputError
-			if errors.As(err, &ce) {
-				rc.rec.note("read: %v", err)
-			}
-			return line, err
 		}
-		if len(line) > maxLine {
-			rc.rec.note("read: a line over %d bytes, connection closed", maxLine)
+		// check the caps on what has arrived, without waiting for an LF or a full buffer
+		b, _ := rc.r.Peek(rc.r.Buffered())
+		n, found := len(b), false
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			n, found = i+1, true
+		}
+		if rc.maxLine > 0 && (len(line)+n > rc.maxLine || (!found && len(line)+n == rc.maxLine)) {
+			rc.rec.note("read: a line over %d bytes, connection closed", rc.maxLine)
 			return line, errTooLong
 		}
+		line = append(line, b[:n]...)
+		_, _ = rc.r.Discard(n)
+		rc.total += n
 		if rc.total > maxConn {
 			rc.rec.note("read: over %d bytes on one connection, closed", maxConn)
 			return line, errTooLong
+		}
+		if found {
+			return line, nil
 		}
 	}
 }
@@ -180,7 +197,7 @@ func (rc *rawConn) writeChunk(ch rawChunk) error {
 // rawHandler runs the steps on every connection, on Conn.Raw(). After the last step it records
 // every line and answers it with a 500, so a client that sends more than the script expects
 // shows up in mismatches.
-func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline time.Duration) func(*fakeserver.Conn) {
+func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline time.Duration, maxLine int) func(*fakeserver.Conn) {
 	res := make([]*regexp.Regexp, len(steps))
 	for i, st := range steps {
 		if st.Expect != nil {
@@ -188,7 +205,7 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline tim
 		}
 	}
 	return func(c *fakeserver.Conn) {
-		rc := &rawConn{c: c, rec: rec, deadline: deadline, conn: c.Raw()}
+		rc := &rawConn{c: c, rec: rec, deadline: deadline, maxLine: maxLine, conn: c.Raw()}
 		if t := rc.tcp(); t != nil {
 			_ = t.SetNoDelay(true)
 		}

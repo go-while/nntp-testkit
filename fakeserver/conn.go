@@ -2,6 +2,7 @@ package fakeserver
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -15,6 +16,40 @@ import (
 
 // errDropInUpload is what ReadDotBlockRaw returns when Faults.DropInUpload cut the block.
 var errDropInUpload = errors.New("fakeserver: Faults.DropInUpload")
+
+// ErrLineTooLong is what Conn.ReadLine, ReadDotBlock and ReadDotBlockRaw return when a client
+// line is longer than Options.MaxLine (the line end counts); the connection is closed after
+// the handler returns and Server.Notes() has a note.
+var ErrLineTooLong = errors.New("fakeserver: client line longer than Options.MaxLine")
+
+// ErrBlockTooLong is what ReadDotBlock and ReadDotBlockRaw return when a client's dot block
+// holds more than Options.MaxBlock bytes before its "." terminator (same close and note).
+var ErrBlockTooLong = errors.New("fakeserver: client dot block larger than Options.MaxBlock")
+
+// DefaultMaxLine is the cap of one client line (the line end included) when Options.MaxLine is
+// 0: 64 KiB. DefaultMaxBlock is the cap of one dot block when Options.MaxBlock is 0: 64 MiB.
+// They only stop a client that never ends a line or a block from growing the test process
+// without bound; they are not RFC limits (RFC 3977 3.1: commands 512 bytes; RFC 5322 2.1.1:
+// 998 characters per article line).
+const (
+	DefaultMaxLine  = 64 << 10
+	DefaultMaxBlock = 64 << 20
+)
+
+// maxLine and maxBlock are the effective caps; 0 means none.
+func (c *Conn) maxLine() int { return capOf(c.s.o.MaxLine, DefaultMaxLine) }
+
+func (c *Conn) maxBlock() int { return capOf(c.s.o.MaxBlock, DefaultMaxBlock) }
+
+func capOf(v, def int) int {
+	switch {
+	case v == 0:
+		return def
+	case v < 0:
+		return 0
+	}
+	return v
+}
 
 // readerSize is the read buffer of a server-side connection (bufio grows lines beyond it).
 const readerSize = 64 << 10
@@ -36,6 +71,7 @@ type Conn struct {
 
 	cmd     string // command of the last client line read with ReadLine (the key of the byte-level faults)
 	faulted bool   // a fault closes the connection now (Faults.Abort decides how)
+	capped  error  // ErrLineTooLong or ErrBlockTooLong once a cap was hit: every later read returns it
 
 	shape     CompressShape // the shape of the stream compressAfter starts (the handler's CompressShape)
 	shapeOn   bool          // Store/Peer: COMPRESS is offered, so a 206 to it starts compression
@@ -144,18 +180,27 @@ func (c *Conn) ReadDotBlock() ([]string, error) {
 func (c *Conn) ReadDotBlockRaw() ([]string, []byte, error) {
 	block := []string{}
 	raw := []byte{}
+	maxBlock := c.maxBlock()
 	limit, cut := c.s.o.Faults.DropInUpload[c.cmd]
 	for n := 0; ; n++ {
 		if cut && n >= limit {
 			c.faulted = true
 			return block, raw, errDropInUpload
 		}
-		line, wire, err := c.readRawLine()
+		budget := 0 // what is left of MaxBlock, plus the "." line: bounds a line without an LF too
+		if maxBlock > 0 {
+			budget = maxBlock - len(raw) + len(".\r\n")
+		}
+		line, wire, err := c.readCapped(c.maxLine(), budget)
 		if err != nil {
 			return block, raw, err
 		}
 		if line == "." {
 			break
+		}
+		if maxBlock > 0 && len(raw)+len(wire) > maxBlock {
+			c.s.note("conn %d: a dot block over Options.MaxBlock (%d bytes), connection closed", c.id, maxBlock)
+			return block, raw, c.capHit(ErrBlockTooLong)
 		}
 		block = append(block, line)
 		raw = append(raw, wire...)
@@ -181,15 +226,54 @@ func (c *Conn) readRaw() (string, error) {
 	return line, err
 }
 
-// readRawLine is readRaw that also returns the line with its line end as it arrived.
+// readRawLine is readRaw that also returns the line with its line end as it arrived. A line
+// longer than Options.MaxLine (line end included) ends the read with ErrLineTooLong and a note
+// (Server.Notes).
 func (c *Conn) readRawLine() (line, wire string, err error) {
-	wire, err = c.r.ReadString('\n')
-	if err != nil {
-		c.markGone()
-		return "", "", err
+	return c.readCapped(c.maxLine(), 0)
+}
+
+// readCapped reads one line with the caps maxLine (ErrLineTooLong) and budget (what is left of
+// a dot block: ErrBlockTooLong); <= 0 means none. It takes what has arrived and checks the caps
+// as the bytes come in, so a line over a cap is given up at once, without waiting for its LF or
+// a full buffer, and is never held whole.
+func (c *Conn) readCapped(maxLine, budget int) (line, wire string, err error) {
+	if c.capped != nil {
+		return "", "", c.capped
 	}
-	line = strings.TrimSuffix(wire, "\n")
-	return strings.TrimSuffix(line, "\r"), wire, nil
+	var acc []byte
+	for {
+		if c.r.Buffered() == 0 {
+			if _, rerr := c.r.Peek(1); rerr != nil { // waits for data without consuming
+				c.markGone()
+				return "", "", rerr
+			}
+		}
+		b, _ := c.r.Peek(c.r.Buffered())
+		n, found := len(b), false
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			n, found = i+1, true
+		}
+		// over: longer than the cap with its LF, or as long as the cap without an LF yet
+		over := func(limit int) bool {
+			return limit > 0 && (len(acc)+n > limit || (!found && len(acc)+n == limit))
+		}
+		switch {
+		case over(maxLine):
+			c.s.note("conn %d: a client line over Options.MaxLine (%d bytes), connection closed", c.id, maxLine)
+			return "", "", c.capHit(ErrLineTooLong)
+		case over(budget):
+			c.s.note("conn %d: a dot block over Options.MaxBlock (%d bytes), connection closed", c.id, c.maxBlock())
+			return "", "", c.capHit(ErrBlockTooLong)
+		}
+		acc = append(acc, b[:n]...)
+		_, _ = c.r.Discard(n)
+		if found {
+			wire = string(acc)
+			line = strings.TrimSuffix(wire, "\n")
+			return strings.TrimSuffix(line, "\r"), wire, nil
+		}
+	}
 }
 
 // drain reads and records lines until EOF/error.
@@ -211,6 +295,19 @@ func (c *Conn) sleep(d time.Duration) bool {
 	case <-c.s.done:
 		return false
 	}
+}
+
+// capHit ends the connection after a line or block over its cap: it is closed at once, also
+// when a custom Handler ignores the error and goes on, and every later read returns err (the
+// rest of the oversized line or block is never read as commands).
+func (c *Conn) capHit(err error) error {
+	c.capped = err
+	c.markGone()
+	if d, ok := c.conn.(*deflateConn); ok && d.pr != nil {
+		_ = d.pr.Close() // ends the inflater goroutine, which may block in a write to the pipe
+	}
+	_ = c.raw.Close()
+	return err
 }
 
 func (c *Conn) markGone() {

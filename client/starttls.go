@@ -98,7 +98,8 @@ func (c *Conn) TryUpgradeTLS(raw net.Conn, cfg *tls.Config) (*Conn, error) {
 		return nil, fmt.Errorf("STARTTLS handshake: %w", err)
 	}
 	return &Conn{Conn: tc, R: bufio.NewReaderSize(tc, readerSize), Greeting: c.Greeting,
-		Deadline: c.Deadline, Strict: c.Strict, tb: c.tb}, nil
+		Deadline: c.Deadline, Strict: c.Strict, MaxLine: c.MaxLine, MaxBlock: c.MaxBlock,
+		BlockTime: c.BlockTime, tb: c.tb}, nil
 }
 
 // UpgradeTLS is TryUpgradeTLS that fails tb on any error and registers tb.Cleanup(Close) for
