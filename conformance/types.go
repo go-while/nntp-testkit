@@ -270,7 +270,8 @@ func (c check) failf(f string, a ...any) Result { return c.fail(fmt.Sprintf(f, a
 
 // check is one conformance check. Run opens a session for it (the connection, the greeting and
 // the capability list) and calls Run; Needs names a capability keyword (e.g. "READER", "OVER",
-// "STREAMING") the server must advertise, else the check is skipped; Posts marks checks that
+// "STREAMING") the server must advertise, else the check is skipped (tested again after MODE
+// READER or the login of Options.User; every check with Needs calls ready); Posts marks checks that
 // modify the server and need Options.PostGroup; Auth marks checks that need Options.User.
 //
 // Each slice contributes its checks through a function returning []check (readerChecks,

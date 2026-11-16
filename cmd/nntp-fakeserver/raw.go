@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-while/nntp-testkit/fakeserver"
+	"github.com/go-while/nntp-testkit/internal/inflate"
 )
 
 // recorder holds what raw mode saw (the fakeserver records the other modes; a raw step reads
@@ -270,7 +272,17 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline tim
 				rc.conn = c.Raw()
 				rc.r = bufio.NewReader(rc.conn)
 			case "inflate":
-				rc.r = bufio.NewReader(flate.NewReader(rc.r))
+				// the kit's streaming inflater, not compress/flate: that one holds the bytes
+				// of a Z_PARTIAL_FLUSH back until more input comes (see internal/inflate)
+				pr, pw := io.Pipe()
+				go func(src *bufio.Reader) {
+					_ = pw.CloseWithError(inflate.Run(src, func(b []byte) error {
+						_, err := pw.Write(b)
+						return err
+					}))
+				}(rc.r)
+				defer pr.Close() // ends the inflater when the handler returns first
+				rc.r = bufio.NewReader(pr)
 			}
 		}
 		for { // the lines after the script: no read deadline either

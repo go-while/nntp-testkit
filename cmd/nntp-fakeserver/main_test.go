@@ -435,6 +435,60 @@ func TestRawInflate(t *testing.T) {
 	}
 }
 
+// TestRawInflatePartialFlush: a client that flushes like zlib's Z_PARTIAL_FLUSH (a fixed
+// block, then an empty fixed block, no sync marker) is read at once. compress/flate held the
+// command back until more input came, so the script waited until its Deadline.
+func TestRawInflatePartialFlush(t *testing.T) {
+	p := startProc(t, `{"Mode": "raw", "Raw": [{"Send": [{"Text": "200 hi\r\n"}]},
+	  {"Expect": "COMPRESS DEFLATE", "Send": [{"Text": "206 ok\r\n"}], "Then": "inflate"},
+	  {"Expect": "DATE", "Send": [{"Text": "111 20200102030405\r\n"}]}]}`)
+	c := p.dial()
+	cmd(t, c, 206, "COMPRESS DEFLATE")
+	if err := c.Send(string(partialFlush("DATE\r\n"))); err != nil {
+		t.Fatal(err)
+	}
+	if code, line, err := c.ReadStatus(); err != nil || code != 111 {
+		t.Fatalf("DATE through a partial flush: %d %q %v", code, line, err)
+	}
+	s, _ := p.finish()
+	if want := []string{"COMPRESS DEFLATE", "DATE"}; !slices.Equal(s.Lines, want) || len(s.Mismatches) != 0 {
+		t.Errorf("lines %q mismatches %q", s.Lines, s.Mismatches)
+	}
+}
+
+// partialFlush encodes text (bytes below 144 only) as a non-final fixed-Huffman block of
+// literals and an empty fixed block, padded to a byte: what zlib writes for Z_PARTIAL_FLUSH.
+func partialFlush(text string) []byte {
+	var out []byte
+	var acc uint32
+	var n uint
+	bits := func(v uint32, k uint) { // LSB first
+		acc |= v << n
+		for n += k; n >= 8; n -= 8 {
+			out = append(out, byte(acc))
+			acc >>= 8
+		}
+	}
+	code := func(c uint32, k uint) { // a Huffman code, MSB first
+		var r uint32
+		for i := uint(0); i < k; i++ {
+			r = r<<1 | (c>>i)&1
+		}
+		bits(r, k)
+	}
+	bits(0b010, 3) // BFINAL 0, BTYPE 01
+	for _, b := range []byte(text) {
+		code(0x30+uint32(b), 8)
+	}
+	code(0, 7)     // end of block
+	bits(0b010, 3) // the empty fixed block
+	code(0, 7)
+	if n > 0 {
+		out = append(out, byte(acc))
+	}
+	return out
+}
+
 // TestRawHang: hang reads and never answers, and does not close.
 func TestRawHang(t *testing.T) {
 	p := startProc(t, `{"Mode": "raw", "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "QUIT", "Then": "hang"}]}`)

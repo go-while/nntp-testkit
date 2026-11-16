@@ -485,6 +485,39 @@ func TestRunNeedsModeReader(t *testing.T) {
 	}
 }
 
+// TestRunNeedsAfterLogin: a server that lists READER only after AUTHINFO gets its reader
+// checks run when Options.User is set (they were skipped before the login could happen), and
+// skipped when the login does not bring the capability.
+func TestRunNeedsAfterLogin(t *testing.T) {
+	steps := func(after string) fakeserver.Options {
+		return fakeserver.Options{Script: []fakeserver.Step{
+			{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", "AUTHINFO USER", "."}},
+			{Expect: "AUTHINFO USER u", Reply: []string{"381 more"}},
+			{Expect: "AUTHINFO PASS p", Reply: []string{"281 ok"}},
+			{Expect: "CAPABILITIES", Reply: []string{"101 caps", "VERSION 2", after, "."}},
+		}}
+	}
+	ran := false
+	c := check{Name: "needs-reader", RFC: "test", Needs: "READER", Run: func(s *session, c check) Result {
+		if r, ok := s.ready(c); !ok {
+			return r
+		}
+		ran = true
+		return c.pass()
+	}}
+	srv := fakeserver.New(t, steps("READER"))
+	r := runChecks(Options{Addr: srv.Addr(), User: "u", Pass: "p"}, []check{c})[0]
+	if r.Status != Pass || !ran {
+		t.Errorf("READER after login: %s %q (ran %v), want PASS", r.Status, r.Detail, ran)
+	}
+	ran = false
+	srv = fakeserver.New(t, steps("POST"))
+	r = runChecks(Options{Addr: srv.Addr(), User: "u", Pass: "p"}, []check{c})[0]
+	if r.Status != Skip || r.Missing != "READER" || ran {
+		t.Errorf("no READER after login: %s %q (ran %v), want SKIP", r.Status, r.Detail, ran)
+	}
+}
+
 // TestRunVerbose: RunVerbose logs every result that is not a Skip, one line each, then
 // reports the Fails as Run does; ByName finds each result.
 func TestRunVerbose(t *testing.T) {

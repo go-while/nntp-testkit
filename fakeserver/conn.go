@@ -59,6 +59,18 @@ func command(line string) string {
 	return strings.ToUpper(f[0])
 }
 
+// cutWord splits s into its first word and the rest: leading spaces and tabs are skipped, the
+// word ends at the next space or tab, and exactly that one separator is dropped, so the rest
+// keeps its bytes (a password with repeated or trailing spaces). rest is "" without a separator.
+func cutWord(s string) (word, rest string) {
+	s = strings.TrimLeft(s, " \t")
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return s, ""
+	}
+	return s[:i], s[i+1:]
+}
+
 // lineKey is the key of Faults.OverrideLine for a client line: the command upper-cased and the
 // arguments as sent, joined by single spaces.
 func lineKey(line string) string {

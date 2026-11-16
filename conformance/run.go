@@ -208,7 +208,8 @@ func runPhase(o Options, checks []check, idx []int, out []Result) {
 // (Options.Skip, Auth without Options.User, Posts without Options.PostGroup); then the session
 // is dialed (a dial error is turned into a Result by sessionFailed), CAPABILITIES is read, and
 // c is skipped when the server does not advertise c.Needs, unless it advertises MODE-READER
-// (the check's ready switches the mode and tests Needs again). A panic in the check is a Fail.
+// or Options.User is set (the check's ready switches the mode or logs in, reads the
+// capabilities again and tests Needs then). A panic in the check is a Fail.
 func runOne(o Options, c check) (r Result) {
 	defer func() { r = o.allowed(r) }()
 	switch {
@@ -231,7 +232,9 @@ func runOne(o Options, c check) (r Result) {
 		return sessionFailed(c, err)
 	}
 	_, _ = s.capabilities() // a failure stays in s.capsErr; the capabilities check reports it
-	if c.Needs != "" && !s.has(c.Needs) && !s.has("MODE-READER") {
+	// with Options.User the check's ready logs in and reads the capabilities again before it
+	// tests Needs: a server may list its reader capabilities only after AUTHINFO
+	if c.Needs != "" && !s.has(c.Needs) && !s.has("MODE-READER") && o.User == "" {
 		return c.notAdvertised(c.Needs)
 	}
 	r = c.Run(s, c)
