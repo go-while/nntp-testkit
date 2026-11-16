@@ -330,7 +330,7 @@ Handler; New and Start copy the maps.
 | `CloseAfter int` | close the connection after the reply to the N-th client line |
 | `Override map[string][]string` | write these reply lines instead of the normal reply |
 | `DropInMultiline map[string]int` | close after N lines of that command's reply (status line counted; 0 = before anything) |
-| `OverrideLine map[string][]string` | `Override` for one client line, e.g. `"ARTICLE 2"`: one 430 in a pipeline; the key is the command upper-cased and the arguments joined by single spaces; wins over `Override` |
+| `OverrideLine map[string][]string` | `Override` for one client line, e.g. `"ARTICLE 2"`: one 430 in a pipeline; the key is the command upper-cased, a keyword first argument upper-cased too (`LIST OVERVIEW.FMT`, `MODE READER`, `AUTHINFO USER`, the header name of `HDR`), the other arguments as sent (group names and message-ids keep their case), joined by single spaces; wins over `Override` |
 | `Drip map[string]time.Duration` | write the reply one byte at a time with this pause between bytes: a slow server that a per-read timeout never sees as stalled |
 | `Endless map[string]bool` | write the reply without its `.` terminator, then `<n> endless` lines until the client closes, the server is closed or the Deadline passes; then close |
 | `LongLine map[string]int` | insert one line of N `x` bytes after the status line (in a multi-line reply: as its first block line) |

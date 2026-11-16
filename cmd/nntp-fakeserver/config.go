@@ -207,7 +207,7 @@ func isEmpty(v reflect.Value) bool {
 
 // checkFaults rejects a command key of Faults that is not upper case: the kit looks commands up
 // upper-cased, so {"Delay": {"date": 100}} would never fire. OverrideLine is exempt, the kit
-// normalises its keys (whole client lines, "article 2" is fine).
+// normalises its keys (whole client lines: "article 2" and "list overview.fmt" are fine).
 func checkFaults(f fakeserver.Faults) error {
 	v := reflect.ValueOf(f)
 	for i := range v.NumField() {
