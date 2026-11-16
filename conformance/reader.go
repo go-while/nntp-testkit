@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-while/nntp-testkit/client"
 )
@@ -90,11 +91,11 @@ func readerChecks() []check {
 
 // sessionFailed is the result of check c when no session could be opened for it (dial gave
 // err). A wire mistake in the greeting (bare LF, bare CR, no line end) is the greeting
-// check's Fail; every other check is then skipped with the reason, so one broken greeting is
-// reported once. Any other dial error fails c.
+// check's Fail (a greeting line over Options.MaxLine is one too); every other check is then
+// skipped with the reason, so one broken greeting is reported once. Any other dial error fails c.
 func sessionFailed(c check, err error) Result {
 	var se *client.StrictError
-	if errors.As(err, &se) {
+	if errors.As(err, &se) || errors.Is(err, client.ErrLineTooLong) {
 		if c.Name == "greeting" {
 			return c.fail(describe(err))
 		}
@@ -107,9 +108,25 @@ func sessionFailed(c check, err error) Result {
 func describe(err error) string {
 	var se *client.StrictError
 	if errors.As(err, &se) {
-		return se.Kind.String() + ": " + err.Error()
+		return shorten(se.Kind.String() + ": " + err.Error())
 	}
-	return err.Error()
+	return shorten(err.Error())
+}
+
+// maxDetail is the most a Detail quotes of a server's bytes: the lines that went over a cap
+// (Options.MaxLine) are quoted by the client's errors in full.
+const maxDetail = 1000
+
+// shorten cuts s to maxDetail bytes (at a rune boundary) and says how much it left out.
+func shorten(s string) string {
+	if len(s) <= maxDetail {
+		return s
+	}
+	cut := maxDetail
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s... (%d more bytes)", s[:cut], len(s)-cut)
 }
 
 // ---- exchange helpers ----
@@ -121,13 +138,13 @@ func (s *session) expect(want []int, format string, args ...any) (int, string, e
 	code, line, err := s.cmd(format, args...)
 	if err != nil {
 		if line != "" {
-			return code, line, fmt.Errorf("%s: %s (line %q)", shown, describe(err), line)
+			return code, line, fmt.Errorf("%s: %s (line %q)", shown, describe(err), shorten(line))
 		}
 		return code, line, fmt.Errorf("%s: %s", shown, describe(err))
 	}
 	if !slices.Contains(want, code) {
 		s.mismatch(shown, code)
-		return code, line, fmt.Errorf("%s: got %q, want %v", shown, line, want)
+		return code, line, fmt.Errorf("%s: got %q, want %v", shown, shorten(line), want)
 	}
 	return code, line, nil
 }
@@ -562,7 +579,8 @@ func checkCapabilities(s *session, c check) Result {
 	slices.Sort(a)
 	slices.Sort(b)
 	if !slices.Equal(a, b) {
-		return c.failf("CAPABILITIES gave %q and then %q in the same state", first, lines)
+		return c.failf("CAPABILITIES gave %s and then %s in the same state",
+			shorten(fmt.Sprintf("%q", first)), shorten(fmt.Sprintf("%q", lines)))
 	}
 	r := c.pass()
 	if !slices.Equal(first, lines) {

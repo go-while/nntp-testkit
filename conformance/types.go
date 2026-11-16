@@ -32,6 +32,21 @@ type Options struct {
 
 	Deadline time.Duration // hang guard per read/write; 0: testkit.Deadline()
 
+	// MaxLine caps one line the server sends (the line end counts): 0 = 64 KiB
+	// (client.DefaultMaxLine), negative = no cap. A longer line fails the check that reads it
+	// (a Fail whose Detail says the line is over the cap, never a hang or a growing process).
+	// It is no RFC limit (status lines 512 bytes, article lines 998 characters; overview rows
+	// have none) and only stops runaway memory: raise it for a server whose legitimate rows
+	// are longer.
+	MaxLine int
+
+	// MaxBlock caps one multi-line reply of the server in bytes: 0 = 64 MiB
+	// (client.DefaultMaxBlock), negative = no cap. A multi-line block must also end within
+	// BlockWindow hang guards (3 times Deadline) in all, however often lines arrive; the read
+	// of the first CAPABILITIES block, which runs before the checks start, is bounded the same
+	// way. Over either bound the check fails with a Detail that says so.
+	MaxBlock int
+
 	// Skip lists check names (Result.Name) to leave out; they are reported as Skip.
 	Skip []string
 

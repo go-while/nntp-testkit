@@ -53,7 +53,7 @@
 //	{"Mode": "store",
 //	 "Options": {
 //	   "Greeting": "200 hello",
-//	   "Faults": {"Delay": {"BODY": 2500}, "DropInMultiline": {"ARTICLE": 2}, "LongLine": {"BODY": 65535}},
+//	   "Faults": {"Delay": {"BODY": 2500}, "DropInMultiline": {"ARTICLE": 2}, "LongLine": {"BODY": 65534}},
 //	   "StoreOpts": {"User": "u", "Pass": "p", "Compress": true, "StartTLS": {"HideCapability": true}}},
 //	 "Store": {
 //	   "Groups": [{"Name": "alt.test", "Description": "test group"}],
@@ -88,8 +88,9 @@
 // writes are bounded by Options.Deadline and end when the server closes (hang and the lines
 // after the script wait for the client without a limit): a client that stays silent longer than
 // the Deadline before an expected line is cut off, and a Sleep, Gap or SplitGap longer than the
-// Deadline is a config error. A line over 1 MiB, a dot block over 16 MiB or more than 64 MiB on
-// one connection close the connection and add a note. The script writes the greeting itself (a
+// Deadline is a config error. A line over Options.MaxLine (default 64 KiB, the line end counted),
+// a dot block over 16 MiB or more than 64 MiB on one connection close the connection and add
+// a note (Options.MaxBlock does not apply to raw mode). The script writes the greeting itself (a
 // first step with Expect null).
 //
 //	{"Mode": "raw", "Raw": [
@@ -250,7 +251,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	s := summary{
-		Lines: srv.Lines(), Mismatches: srv.Mismatches(), Articles: srv.Articles(), Notes: rec.notes,
+		Lines: srv.Lines(), Mismatches: srv.Mismatches(), Articles: srv.Articles(), Notes: append(srv.Notes(), rec.notes...),
 		Accepted: srv.Accepted(), Counts: srv.Counts(),
 		TLSHandshakes: srv.TLSHandshakes(), TLSFailed: srv.TLSFailed(), ServerNames: srv.TLSServerNames(),
 		MaxOpen: srv.MaxOpen(), Closed: srv.Closed(),
@@ -301,7 +302,7 @@ func start(cfg *config, store *fakeserver.Store, listen string, tlsCfg *tls.Conf
 		srv, err = fakeserver.Start(o)
 	case "raw":
 		o.NoGreeting = true // the script writes the greeting
-		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg, o.Deadline)
+		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg, o.Deadline, rawMaxLine(o.MaxLine))
 		srv, err = fakeserver.Start(o)
 	}
 	return srv, rec, err

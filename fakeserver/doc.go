@@ -18,12 +18,28 @@
 //		StoreOpts  StoreOptions
 //		Faults     Faults        // apply in Script and Store mode, to a LineHandler and to PeerHandler (copied at start); another Handler cannot use them
 //		Deadline   time.Duration // bounds WaitOpen/WaitLines/Close and caps Step.Delay, Faults.Delay, StallModeStream, GreetingDelay, HoldGreeting; server-side reads have no deadline (a TLS handshake, implicit or STARTTLS, is bounded by it); 0 = testkit.Deadline()
+//		MaxLine          int    // cap of one client line, line end included: 0 = DefaultMaxLine (64 KiB), <0 none; over it: ReadLine returns ErrLineTooLong, Notes() gets a note, the connection is closed
+//		MaxBlock         int    // cap of one dot block (ReadDotBlock, bytes before the "."): 0 = DefaultMaxBlock (64 MiB), <0 none; over it: ErrBlockTooLong, a note, close
 //		MaxConns         int    // >0: one more simultaneous connection gets MaxConnsGreeting and is closed (counts in Accepted, never in Open)
 //		MaxConnsGreeting string // default "502 Too many connections"
 //	}
 //	// Precedence: RawStall wins over everything. Otherwise the greeting is written unless
 //	// NoGreeting; then Handler when set, else Store when set, else Script (with NoGreeting and
 //	// no Handler the Script/Store is not run: lines are only recorded).
+//
+// Line and block caps: the server never holds more of a client's input than it must. A client
+// line (the line end counts) over Options.MaxLine, 64 KiB by default (DefaultMaxLine), and a
+// dot block over Options.MaxBlock, 64 MiB by default (DefaultMaxBlock), end the connection: the
+// reading method returns ErrLineTooLong or ErrBlockTooLong, the connection is closed at once
+// (also when a custom Handler ignores the error: every later read returns it again) and Notes()
+// records it (the cmd/nntp-fakeserver summary lists these under "notes"). The check is made on
+// the bytes as they arrive, so an endless line costs no memory and a line over a small cap is
+// given up without waiting for its LF; a line inside a dot block is also bounded by what is left
+// of MaxBlock, so the block cap holds when MaxLine is lifted. It applies to every mode (Script, Store, Peer, LineHandler),
+// to the lines of a dot block and to the inflated stream after COMPRESS. The caps are not RFC
+// limits (RFC 3977 3.1: 512 bytes for a command line; RFC 5322 2.1.1: 998 characters per
+// article line); they only stop runaway memory, so a test that sends longer lines on purpose
+// raises MaxLine (or sets it negative).
 //
 //	type Step struct { Expect string; ReadDot bool; Delay time.Duration; Reply []string; Hang, CloseAfter, Compress bool; CompressShape CompressShape }
 //	// Semantics as go-pugleaf's cliFakeStep: Expect is an anchored regexp ("" = any line); a
@@ -44,6 +60,7 @@
 //	func (s *Server) Articles() [][]string           // every dot block read (ReadDot steps, POST/TAKETHIS/IHAVE payloads), raw wire lines
 //	func (s *Server) ArticlesRaw() [][]byte          // the same blocks as the client wrote them: the exact bytes between the command and the "." terminator, stuffed, CRLF intact; article.ParseDotBlock takes an element
 //	func (s *Server) Mismatches() []string
+//	func (s *Server) Notes() []string                // what the server ran into itself: a client line over Options.MaxLine, a block over Options.MaxBlock (the connection was closed)
 //	func (s *Server) Accepted() int                  // connections accepted so far
 //	func (s *Server) Open() int                      // connections not yet gone
 //	func (s *Server) MaxOpen() int                   // the most connections open at once (rejected ones do not count)
@@ -56,7 +73,7 @@
 //	func (s *Server) Close()                         // closes listener and every connection, waits for the goroutines
 //
 //	type Conn struct { ... }                         // one server-side connection
-//	func (c *Conn) ReadLine() (string, error)        // CRLF/LF stripped; records the line and counts the command
+//	func (c *Conn) ReadLine() (string, error)        // CRLF/LF stripped; records the line and counts the command; ErrLineTooLong for a line over Options.MaxLine (read in fragments, never held whole)
 //	func (c *Conn) WriteLines(lines ...string) error // each + CRLF
 //	func (c *Conn) ReadDotBlock() ([]string, error)  // raw wire lines up to "."; recorded in Articles() and ArticlesRaw()
 //	func (c *Conn) ReadDotBlockRaw() ([]string, []byte, error) // the same, also the exact bytes of the block (not the "." line)

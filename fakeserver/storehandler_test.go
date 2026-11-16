@@ -771,6 +771,7 @@ func TestFaultEndless(t *testing.T) {
 func TestFaultLongLine(t *testing.T) {
 	const n = 2 << 20
 	_, c := storeServer(t, testStore(), StoreOptions{}, Faults{LongLine: map[string]int{"ARTICLE": n}})
+	c.MaxLine = -1 // the line is over the client's default cap
 	wantCode(t, c, "GROUP alt.test", 211)
 	_, lines := wantBlock(t, c, "ARTICLE 1", 220)
 	if len(lines) < 2 || len(lines[0]) != n || strings.Trim(lines[0], "x") != "" || lines[1] != "Subject: one" {

@@ -9,6 +9,9 @@
 //		Greeting string        // the greeting line read by Dial/ReadGreeting (CRLF stripped)
 //		Deadline time.Duration // hang guard per blocking step; 0 = testkit.Deadline()
 //		Strict   bool          // report wire mistakes (see below); Dial sets it
+//		MaxLine   int          // cap of one line read, line end included: 0 = DefaultMaxLine (64 KiB), <0 none; over it: ErrLineTooLong (errors.Is), raised while reading
+//		MaxBlock  int          // cap of one dot block in bytes: 0 = DefaultMaxBlock (64 MiB), <0 none; over it: *StrictError{NoTerminator} wrapping ErrBlockTooLong
+//		BlockTime time.Duration // longest a whole dot block may take: 0 = 10 hang guards, <0 none; over it: as for MaxBlock, the read of the line under way is cut then too
 //	}
 //	func Dial(tb testing.TB, addr string) *Conn            // DialWith(tb, addr, 0)
 //	func DialWith(tb testing.TB, addr string, deadline time.Duration) *Conn // dial + greeting within deadline (0 = testkit.Deadline()), sets Conn.Deadline, tb.Cleanup(Close); Strict; fails tb on error
@@ -108,6 +111,22 @@
 // except the caller's pause and DialUntil's 50 ms poll. Pipeline's guard slides: it is moved on
 // with every line read, so a stalled server fails after one deadline and a long batch does not;
 // a dot block also has the absolute bound above.
+//
+// Line and block caps: ReadLine (and so ReadStatus, TryCmd, ReadGreeting), TryReadDotLines,
+// TryRawUntilDot and TryPipeline never hold more than Conn.MaxLine bytes of one line (64 KiB by
+// default, the line end counted: DefaultMaxLine) nor more than Conn.MaxBlock bytes of one dot
+// block (64 MiB: DefaultMaxBlock), and a block must end within Conn.BlockTime (10 hang guards;
+// the hang guard itself is renewed by every line). A line over the cap fails the read with
+// ErrLineTooLong, raised as soon as the line is over (an endless line costs no memory); the
+// rest of that line stays unread, so close the Conn. A block over MaxBlock or BlockTime fails
+// with a *StrictError of Kind NoTerminator wrapping ErrBlockTooLong. The caps are not RFC
+// limits (RFC 3977 3.1: 512 bytes for a status line; RFC 5322 2.1.1: 998 characters per article
+// line; overview and header rows have no fixed limit) but a guard against runaway memory:
+// a test that reads an overlong line on purpose (Faults.LongLine, the reply corpus case
+// status-long-64k, the article corpus case long-line) sets MaxLine to a larger value or to -1. ExpectClosed has limits of
+// its own (16 lines / 64 KiB), TryReadUntilQuiet its limit argument (none when it is 0 or
+// less: then only the hang guard bounds it). The settings are
+// kept by TryStartTLS/TryUpgradeTLS, and conformance sets them from its Options.
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
 // (Kind BareLF), contains a bare CR (BareCR) or arrives without any line end before EOF

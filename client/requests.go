@@ -220,8 +220,9 @@ func MultiLine(cmd string, code int) bool {
 // that command is followed by a dot block (nil: MultiLine). The hang guard is the Conn's
 // deadline, moved on with every line read, so a stalled server fails after one deadline. A
 // block has an absolute bound as well, so a server that never sends the "." cannot keep the
-// test alive by trickling lines: it must end within 10 times the deadline and hold at most
-// 64 MiB, else the call fails. On an error the replies read so far are returned with it.
+// test alive by trickling lines: it must end within Conn.BlockTime (10 times the deadline) and
+// hold at most Conn.MaxBlock bytes (64 MiB), and no line may be over Conn.MaxLine, else the
+// call fails. On an error the replies read so far are returned with it.
 func (c *Conn) TryPipeline(cmds []string, multi func(cmd string, code int) bool) ([]Reply, error) {
 	if multi == nil {
 		multi = MultiLine
@@ -291,26 +292,31 @@ func (c *Conn) Pipeline(cmds []string, multi func(cmd string, code int) bool) []
 	return replies
 }
 
-// maxBlockBytes and blockFactor are the absolute bounds of a dot block in TryPipeline.
-const (
-	maxBlockBytes = 64 << 20
-	blockFactor   = 10
-)
-
-// readBlockBounded is TryReadDotLines with an absolute bound: the block must end within
-// blockFactor hang guards and hold at most maxBlockBytes, whatever the sliding guard says.
+// readBlockBounded is TryReadDotLines: a dot block with absolute bounds, whatever the sliding
+// hang guard says. It must end within Conn.BlockTime (default blockFactor hang guards; the read
+// deadline of every line is clamped to that moment, so one stalled or endless line cannot go
+// past it either) and hold at most Conn.MaxBlock bytes (default DefaultMaxBlock), and no line
+// may be longer than Conn.MaxLine (ErrLineTooLong).
 func (c *Conn) readBlockBounded() ([]string, error) {
-	limit := time.Now().Add(blockFactor * c.deadline())
+	until, maxBlock := c.blockUntil(), c.maxBlock()
 	size := 0
 	var out []string
 	for {
-		if time.Now().After(limit) || size > maxBlockBytes {
-			return out, &StrictError{Kind: NoTerminator, Err: fmt.Errorf(
-				"block still going after %d lines, %d bytes, %v (bound: %d times the deadline, %d bytes)",
-				len(out), size, blockFactor*c.deadline(), blockFactor, maxBlockBytes)}
+		if (!until.IsZero() && time.Now().After(until)) || (maxBlock > 0 && size > maxBlock) {
+			return out, c.blockErr(len(out), size)
 		}
-		line, err := c.ReadLine()
+		limit, fromBlock := c.lineLimit(size, maxBlock)
+		line, err := c.readLine(until, limit)
 		if err != nil {
+			if errors.Is(err, ErrLineTooLong) {
+				if fromBlock {
+					return out, c.blockErr(len(out), size)
+				}
+				return out, fmt.Errorf("after %d lines: %w", len(out), err)
+			}
+			if timedOut(err) && !until.IsZero() && !time.Now().Before(until) {
+				return out, c.blockErr(len(out), size)
+			}
 			var se *StrictError
 			if errors.As(err, &se) {
 				if se.Kind == NoCRLF {

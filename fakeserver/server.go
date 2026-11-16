@@ -42,6 +42,21 @@ type Options struct {
 	Faults     Faults        // fault hooks of Store and Script mode and LineHandler; copied by New/Start
 	Deadline   time.Duration // hang guard; 0 = testkit.Deadline(); also bounds every TLS handshake
 
+	// MaxLine caps one client line, the line end included (so a line of 65534 characters and
+	// CRLF is the longest that DefaultMaxLine lets through): 0 = DefaultMaxLine (64 KiB),
+	// negative = no cap. A client that sends more (an endless line) gets its connection closed
+	// and Notes() a note; the line is never held whole, and ReadLine returns ErrLineTooLong.
+	// It is no RFC limit (RFC 3977 3.1: 512 bytes for commands; RFC 5322 2.1.1: 998 characters
+	// per article line); it only stops runaway memory. It applies to every mode (Script,
+	// Store, Peer, LineHandler) and to the lines of a dot block.
+	MaxLine int
+
+	// MaxBlock caps one dot block a handler reads with ReadDotBlock (POST, IHAVE and TAKETHIS
+	// payloads, Step.ReadDot): the bytes before the "." terminator, line ends included. 0 =
+	// DefaultMaxBlock (64 MiB), negative = no cap. Over it: ErrBlockTooLong, a note, the
+	// connection is closed.
+	MaxBlock int
+
 	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
 	// closed, like a provider's per-account limit. It counts in Accepted but never in Open.
 	MaxConns         int
@@ -409,6 +424,7 @@ type Server struct {
 	articles    [][]string
 	articlesRaw [][]byte
 	mismatches  []string
+	notes       []string
 	counts      map[string]int
 	accepted    int
 	open        int
@@ -736,6 +752,23 @@ func (s *Server) Mismatches() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.mismatches...)
+}
+
+// note records something the server ran into itself (a client line over Options.MaxLine, a
+// dot block over Options.MaxBlock).
+func (s *Server) note(format string, a ...any) {
+	s.mu.Lock()
+	s.notes = append(s.notes, fmt.Sprintf(format, a...))
+	s.mu.Unlock()
+}
+
+// Notes returns what the server ran into itself, in order: a client line over Options.MaxLine
+// or a dot block over Options.MaxBlock (the connection was closed). Empty for a client that
+// stayed within the caps.
+func (s *Server) Notes() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.notes...)
 }
 
 // Accepted returns the number of accepted connections.
