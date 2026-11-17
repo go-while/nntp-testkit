@@ -3,12 +3,15 @@ package client
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // endlessServer returns a client Conn on one end of a net.Pipe and the number of bytes the other
@@ -450,10 +453,30 @@ func TestBlockErrBounds(t *testing.T) {
 		{Conn{Deadline: time.Second, BlockTime: -1}, "(bounds: 67108864 bytes, no time bound)"},
 		{Conn{Deadline: time.Second, MaxBlock: -1}, "(bounds: no byte bound, 10s)"},
 		{Conn{Deadline: time.Second, MaxBlock: -1, BlockTime: -1}, "(bounds: no byte bound, no time bound)"},
+		{Conn{}, fmt.Sprintf("(bounds: 67108864 bytes, %v)", blockFactor*testkit.Deadline())}, // the fallback guard
 	} {
 		err := tc.c.blockErr(2, 30)
 		if !errors.Is(err, ErrBlockTooLong) || !strings.HasSuffix(err.Error(), tc.want) {
 			t.Errorf("MaxBlock %d BlockTime %v: %v, want suffix %q", tc.c.MaxBlock, tc.c.BlockTime, err, tc.want)
+		}
+	}
+}
+
+// TestBlockErrBoundsReaders: the text reaches the caller through both block readers: a block cut
+// at MaxBlock with no time bound says so.
+func TestBlockErrBoundsReaders(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		c, _ := endlessServer(t, "", strings.Repeat("line of text\r\n", 400))
+		c.MaxBlock = 100 << 10
+		c.BlockTime = -1
+		var err error
+		if raw {
+			_, err = c.TryRawUntilDot()
+		} else {
+			_, err = c.TryReadDotLines()
+		}
+		if !errors.Is(err, ErrBlockTooLong) || !strings.Contains(err.Error(), "(bounds: 102400 bytes, no time bound)") {
+			t.Errorf("raw %v: %v", raw, err)
 		}
 	}
 }

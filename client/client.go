@@ -251,15 +251,24 @@ func capOf(v, def int) int {
 	return v
 }
 
-// blockUntil is the absolute end of a dot block that starts now; the zero time: no limit.
-func (c *Conn) blockUntil() time.Time {
+// blockLimit is how long a whole dot block may take: BlockTime, blockFactor hang guards when it
+// is 0, or no limit (ok false) when it is negative. blockUntil and the error text both use it.
+func (c *Conn) blockLimit() (d time.Duration, ok bool) {
 	switch {
 	case c.BlockTime < 0:
-		return time.Time{}
+		return 0, false
 	case c.BlockTime > 0:
-		return time.Now().Add(c.BlockTime)
+		return c.BlockTime, true
 	}
-	return time.Now().Add(blockFactor * c.deadline())
+	return blockFactor * c.deadline(), true
+}
+
+// blockUntil is the absolute end of a dot block that starts now; the zero time: no limit.
+func (c *Conn) blockUntil() time.Time {
+	if d, ok := c.blockLimit(); ok {
+		return time.Now().Add(d)
+	}
+	return time.Time{}
 }
 
 // blockBounds is the bounds of a block, for messages: the byte cap and the time cap, or "no
@@ -269,13 +278,10 @@ func (c *Conn) blockBounds() string {
 	if mb := c.maxBlock(); mb > 0 {
 		size = fmt.Sprintf("%d bytes", mb)
 	}
-	switch {
-	case c.BlockTime < 0:
-		return size + ", no time bound"
-	case c.BlockTime > 0:
-		return fmt.Sprintf("%s, %v", size, c.BlockTime)
+	if d, ok := c.blockLimit(); ok {
+		return fmt.Sprintf("%s, %v", size, d)
 	}
-	return fmt.Sprintf("%s, %v", size, blockFactor*c.deadline())
+	return size + ", no time bound"
 }
 
 // blockErr is the error of a block that went over MaxBlock or BlockTime.
