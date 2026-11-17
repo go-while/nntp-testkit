@@ -2,8 +2,8 @@ package conformance
 
 import (
 	"fmt"
-	"net"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
