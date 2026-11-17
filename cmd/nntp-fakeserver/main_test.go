@@ -967,8 +967,8 @@ func TestRawMaxBlock(t *testing.T) {
 		line, err := c.ReadLine()
 		s, _ := p.finish()
 		switch {
-		case tc.ok && (err != nil || line != "240 ok"):
-			t.Errorf("MaxBlock %d: %q %v, notes %q", tc.maxBlock, line, err, s.Notes)
+		case tc.ok && (err != nil || line != "240 ok" || len(s.Notes) != 0 || len(s.Articles) != 1 || !slices.Contains(s.Articles[0], strings.Repeat("y", 300))):
+			t.Errorf("MaxBlock %d: %q %v, notes %q, articles %d", tc.maxBlock, line, err, s.Notes, len(s.Articles))
 		case !tc.ok && (err == nil || len(s.Notes) != 1 || !strings.Contains(s.Notes[0], fmt.Sprintf("dot block: over %d bytes", tc.maxBlock))):
 			t.Errorf("MaxBlock %d: %q %v, notes %q", tc.maxBlock, line, err, s.Notes)
 		}

@@ -54,7 +54,8 @@ type Options struct {
 	// MaxBlock caps one dot block a handler reads with ReadDotBlock (POST, IHAVE and TAKETHIS
 	// payloads, Step.ReadDot): the bytes before the "." terminator, line ends included. 0 =
 	// DefaultMaxBlock (64 MiB), negative = no cap. Over it: ErrBlockTooLong, a note, the
-	// connection is closed.
+	// connection is closed. (The raw mode of cmd/nntp-fakeserver reads its own blocks and uses a
+	// default of 16 MiB for 0.)
 	MaxBlock int
 
 	// MaxConns > 0 limits the simultaneous connections: one more gets MaxConnsGreeting and is
