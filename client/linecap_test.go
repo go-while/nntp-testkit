@@ -355,15 +355,15 @@ func TestBlockCapWithoutLineCap(t *testing.T) {
 }
 
 // TestReadUntilQuietDefaultCap: with limit 0, TryReadUntilQuiet is bounded by MaxBlock: an
-// endless sender gives ErrBlockTooLong soon after the cap, exactly MaxBlock bytes then quiet is
-// fine, and MaxBlock < 0 lifts the bound (the hang guard ends the read).
+// endless sender gives ErrBlockTooLong soon after the cap with MaxBlock+1 bytes, exactly
+// MaxBlock bytes then quiet is fine, one byte more is not. MaxBlock < 0: see TestQuietBound.
 func TestReadUntilQuietDefaultCap(t *testing.T) {
 	t.Run("endless", func(t *testing.T) {
 		c, n := endlessServer(t, "", strings.Repeat("x", 8<<10))
 		c.MaxBlock = 100 << 10
 		got, err := c.TryReadUntilQuiet(time.Second, 0)
-		if !errors.Is(err, ErrBlockTooLong) || len(got) > c.MaxBlock+1 {
-			t.Errorf("err = %v, %d bytes, want ErrBlockTooLong and at most %d", err, len(got), c.MaxBlock+1)
+		if !errors.Is(err, ErrBlockTooLong) || len(got) != c.MaxBlock+1 || bytes.Count(got, []byte("x")) != len(got) {
+			t.Errorf("err = %v, %d bytes, want ErrBlockTooLong and %d bytes of x", err, len(got), c.MaxBlock+1)
 		}
 		bounded(t, n, int64(c.MaxBlock)+slack+10_000)
 	})
@@ -378,8 +378,8 @@ func TestReadUntilQuietDefaultCap(t *testing.T) {
 		switch {
 		case tc.ok && (err != nil || len(got) != tc.size):
 			t.Errorf("size %d: %d bytes, err %v", tc.size, len(got), err)
-		case !tc.ok && !errors.Is(err, ErrBlockTooLong):
-			t.Errorf("size %d: err = %v, want ErrBlockTooLong", tc.size, err)
+		case !tc.ok && (!errors.Is(err, ErrBlockTooLong) || string(got) != strings.Repeat("a", c.MaxBlock+1)):
+			t.Errorf("size %d: err = %v, %d bytes, want ErrBlockTooLong and %d bytes of a", tc.size, err, len(got), c.MaxBlock+1)
 		}
 	}
 }
