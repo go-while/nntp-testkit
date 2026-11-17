@@ -1,6 +1,7 @@
 package fakeserver
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
 // capDial connects to s and reads the greeting.
@@ -334,7 +336,12 @@ func TestCapErrorSticky(t *testing.T) {
 		done <- errs
 	}})
 	nc := capDial(t, s)
-	writeIgnoringClose(nc, []byte(strings.Repeat("z", 300)+"\r\nDATE\r\n"))
+	// the line arrives in two parts: the first (under the cap, no LF) is consumed, the cap trips
+	// on the second, which stays unread; only a sticky error keeps a second read from returning
+	// that tail as a command line and "DATE" as the next one
+	writeIgnoringClose(nc, []byte(strings.Repeat("z", 60)))
+	time.Sleep(200 * time.Millisecond)
+	writeIgnoringClose(nc, []byte(strings.Repeat("z", 60)+"\r\nDATE\r\n"))
 	got, _ := io.ReadAll(nc)
 	var errs []error
 	select {
@@ -352,5 +359,80 @@ func TestCapErrorSticky(t *testing.T) {
 	}
 	if l := s.Lines(); len(l) != 0 {
 		t.Errorf("lines recorded after the cap: %q", l)
+	}
+}
+
+// TestCapErrorStickyUpgrades: the sticky cap error holds after COMPRESS and after STARTTLS too: a
+// line that arrives in two parts is cut, a custom Handler that ignores the error and reads on
+// gets it again (not the tail of the line or "DATE"), nothing it writes reaches the client, and
+// no line after the upgrade is recorded.
+func TestCapErrorStickyUpgrades(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	cfg := ca.Issue(t, tlscert.Options{}).ServerConfig()
+	for _, mode := range []string{"compress", "starttls"} {
+		t.Run(mode, func(t *testing.T) {
+			done := make(chan []error, 1)
+			s := New(t, Options{MaxLine: 100, Handler: func(c *Conn) {
+				line, err := c.ReadLine()
+				switch {
+				case err != nil:
+				case mode == "compress" && line == "COMPRESS DEFLATE":
+					_ = c.WriteLines("206 compressing")
+					err = c.StartCompress()
+				case mode == "starttls" && line == "STARTTLS":
+					_ = c.WriteLines("382 go ahead")
+					err = c.StartTLS(cfg)
+				default:
+					err = errors.New("unexpected line " + line)
+				}
+				if err != nil {
+					done <- []error{err}
+					return
+				}
+				var errs []error
+				for range 3 {
+					_, err := c.ReadLine()
+					errs = append(errs, err)
+					_ = c.WriteLines("200 still here")
+				}
+				done <- errs
+			}})
+			cl := client.Dial(t, s.Addr())
+			if mode == "compress" {
+				cl.Compress()
+			} else {
+				cl = cl.StartTLS(&tls.Config{RootCAs: ca.Pool, ServerName: "localhost", MinVersion: tls.VersionTLS12})
+			}
+			// in two parts, as in TestCapErrorSticky: only a sticky error keeps the tail of the
+			// line and "DATE" from being read as commands after the cut
+			if err := cl.Send(strings.Repeat("z", 60)); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			_ = cl.Send(strings.Repeat("z", 60) + "\r\nDATE\r\n") // may fail once the server closed
+			var errs []error
+			select {
+			case errs = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the handler is still reading: the cap error did not stick")
+			}
+			// the handler has written whatever it could before done; read it now
+			got, _ := cl.TryReadUntilQuiet(200*time.Millisecond, 4096)
+			if len(errs) != 3 {
+				t.Fatalf("handler: %v", errs)
+			}
+			for i, err := range errs {
+				if !errors.Is(err, ErrLineTooLong) {
+					t.Errorf("read %d: err = %v, want ErrLineTooLong", i, err)
+				}
+			}
+			if strings.Contains(string(got), "still here") {
+				t.Errorf("the handler's reply reached the client: %q", got)
+			}
+			want := map[string]string{"compress": "COMPRESS DEFLATE", "starttls": "STARTTLS"}[mode]
+			if l := s.Lines(); len(l) != 1 || l[0] != want {
+				t.Errorf("lines %q, want only %q (nothing after the upgrade)", l, want)
+			}
+		})
 	}
 }
