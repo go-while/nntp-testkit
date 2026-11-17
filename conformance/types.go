@@ -50,7 +50,8 @@ type Options struct {
 	// BlockTime is the longest one multi-line reply of the server may take in all, however
 	// often its lines arrive: 0 = BlockWindow times Deadline (3 hang guards), negative = no
 	// limit: then only MaxBlock and the hang guard of each line bound a reply, so a server that
-	// trickles lines can hold the check until MaxBlock is reached. Raise it for a slow link with
+	// trickles lines can hold the check until MaxBlock is reached. A BlockTime below Deadline
+	// also cuts a single slow line inside a block at that moment. Raise it for a slow link with
 	// big LIST or OVER replies rather than raising Deadline, which lengthens every single read.
 	BlockTime time.Duration
 

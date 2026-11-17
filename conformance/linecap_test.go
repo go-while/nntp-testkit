@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"fmt"
+	"net"
 	"io"
 	"strings"
 	"testing"
@@ -167,6 +168,14 @@ func TestBlockTimeOption(t *testing.T) {
 		if got := tc.o.blockTime(time.Second); got != tc.want {
 			t.Errorf("BlockTime %v: %v, want %v", tc.o.BlockTime, got, tc.want)
 		}
+		// newClient, which every session client (plain, TLS, the STARTTLS re-wrap) comes from,
+		// puts that value on the client.Conn, a negative one included
+		cl, sv := net.Pipe()
+		if got := tc.o.newClient(cl, time.Second).BlockTime; got != tc.want {
+			t.Errorf("BlockTime %v: client.Conn.BlockTime %v, want %v", tc.o.BlockTime, got, tc.want)
+		}
+		_ = cl.Close()
+		_ = sv.Close()
 	}
 }
 
