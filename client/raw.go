@@ -27,10 +27,9 @@ func timedOut(err error) bool {
 // wins over io.EOF when the server closes after going over. The rest of the stream stays
 // unread, so close the Conn after it. A closed connection gives the bytes read so far and
 // io.EOF itself, so `err == io.EOF` tells "the server closed or crashed" from "the server went
-// quiet". A read
-// error other than a timeout is returned as it is. Whatever the server sends, the call ends
-// after one hang guard (the Conn's Deadline) with an error. Nothing is interpreted: no strict
-// checks, no line ends.
+// quiet". A read error other than a timeout is returned as it is. Whatever the server sends,
+// the call ends after one hang guard (the Conn's Deadline) with an error. Nothing is
+// interpreted: no strict checks, no line ends.
 func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) {
 	var out []byte
 	start := time.Now()
