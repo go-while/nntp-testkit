@@ -89,9 +89,9 @@
 // after the script wait for the client without a limit): a client that stays silent longer than
 // the Deadline before an expected line is cut off, and a Sleep, Gap or SplitGap longer than the
 // Deadline is a config error. A line over Options.MaxLine (default 64 KiB, the line end counted),
-// a dot block over Options.MaxBlock (raw mode's default 16 MiB; negative: no cap) or more than
-// 64 MiB on one connection close the connection and add a note. The script writes the greeting itself (a
-// first step with Expect null).
+// a dot block over Options.MaxBlock (raw mode's default 16 MiB; negative: no block cap) or more
+// than 64 MiB on one connection (which also ends a larger block) close the connection and add a
+// note. The script writes the greeting itself (a first step with Expect null).
 //
 //	{"Mode": "raw", "Raw": [
 //	  {"Send": [{"Text": "200 raw ready\r\n"}]},
