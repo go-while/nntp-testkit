@@ -19,8 +19,10 @@ func timedOut(err error) bool {
 }
 
 // TryReadUntilQuiet reads raw bytes (the bytes buffered in R first) until the server has been
-// silent for quiet or limit bytes have been read (limit <= 0: no limit), and returns them with
-// a nil error. A closed connection gives the bytes read so far and io.EOF itself, so
+// silent for quiet or limit bytes have been read, and returns them with a nil error. With limit
+// <= 0 the bound is Conn.MaxBlock (default DefaultMaxBlock, 64 MiB; negative: none): a server
+// that sends more than that before it goes quiet gives the bytes read and an error wrapping
+// ErrBlockTooLong. A closed connection gives the bytes read so far and io.EOF itself, so
 // `err == io.EOF` tells "the server closed or crashed" from "the server went quiet". A read
 // error other than a timeout is returned as it is. Whatever the server sends, the call ends
 // after one hang guard (the Conn's Deadline) with an error. Nothing is interpreted: no strict
@@ -29,14 +31,20 @@ func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error)
 	var out []byte
 	start := time.Now()
 	defer c.bump()
+	maxOut, capped := limit, false
+	if limit <= 0 {
+		if mb := c.maxBlock(); mb > 0 {
+			maxOut, capped = mb+1, true // one byte more tells "over the cap" from "exactly the cap"
+		}
+	}
 	chunk := make([]byte, 32<<10)
-	for limit <= 0 || len(out) < limit {
+	for maxOut <= 0 || len(out) < maxOut {
 		if time.Since(start) > c.deadline() {
 			return out, fmt.Errorf("server still sending after %v (%d bytes read)", c.deadline(), len(out))
 		}
 		p := chunk
-		if limit > 0 && limit-len(out) < len(p) {
-			p = p[:limit-len(out)]
+		if maxOut > 0 && maxOut-len(out) < len(p) {
+			p = p[:maxOut-len(out)]
 		}
 		// each read waits for quiet, or for what is left of the hang guard when that is less
 		guard := false
@@ -58,6 +66,9 @@ func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error)
 			}
 			return out, err
 		}
+	}
+	if capped {
+		return out, fmt.Errorf("%w: server still sending after %d bytes (Conn.MaxBlock; pass a limit or set MaxBlock < 0)", ErrBlockTooLong, len(out)-1)
 	}
 	return out, nil
 }

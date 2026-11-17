@@ -352,3 +352,54 @@ func TestBlockCapWithoutLineCap(t *testing.T) {
 		bounded(t, n, int64(c.MaxBlock)+slack+10_000)
 	}
 }
+
+// TestReadUntilQuietDefaultCap: with limit 0, TryReadUntilQuiet is bounded by MaxBlock: an
+// endless sender gives ErrBlockTooLong soon after the cap, exactly MaxBlock bytes then quiet is
+// fine, and MaxBlock < 0 lifts the bound (the hang guard ends the read).
+func TestReadUntilQuietDefaultCap(t *testing.T) {
+	t.Run("endless", func(t *testing.T) {
+		c, n := endlessServer(t, "", strings.Repeat("x", 8<<10))
+		c.MaxBlock = 100 << 10
+		got, err := c.TryReadUntilQuiet(time.Second, 0)
+		if !errors.Is(err, ErrBlockTooLong) || len(got) > c.MaxBlock+1 {
+			t.Errorf("err = %v, %d bytes, want ErrBlockTooLong and at most %d", err, len(got), c.MaxBlock+1)
+		}
+		bounded(t, n, int64(c.MaxBlock)+slack+10_000)
+	})
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{1000, true}, {1001, false}} {
+		p := newPeer(t, scripted("200 hi\r\n"+strings.Repeat("a", tc.size)))
+		c := Dial(t, p.addr())
+		c.MaxBlock = 1000
+		got, err := c.TryReadUntilQuiet(200*time.Millisecond, 0)
+		switch {
+		case tc.ok && (err != nil || len(got) != tc.size):
+			t.Errorf("size %d: %d bytes, err %v", tc.size, len(got), err)
+		case !tc.ok && !errors.Is(err, ErrBlockTooLong):
+			t.Errorf("size %d: err = %v, want ErrBlockTooLong", tc.size, err)
+		}
+	}
+	t.Run("no cap", func(t *testing.T) {
+		// a slow trickle (an endless fast sender without any cap would fill the memory)
+		cl, sv := net.Pipe()
+		go func() {
+			defer sv.Close()
+			for {
+				if _, err := sv.Write([]byte("x")); err != nil {
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+		c := NewConn(cl)
+		t.Cleanup(c.Close)
+		c.MaxBlock = -1
+		c.Deadline = 300 * time.Millisecond
+		_, err := c.TryReadUntilQuiet(time.Second, 0)
+		if err == nil || errors.Is(err, ErrBlockTooLong) {
+			t.Errorf("err = %v, want the hang guard's error", err)
+		}
+	})
+}

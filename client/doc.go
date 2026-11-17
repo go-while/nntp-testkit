@@ -99,7 +99,7 @@
 //
 // Raw I/O (raw.go): nothing is interpreted, no strict checks.
 //
-//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: none); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
+//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: Conn.MaxBlock, over it ErrBlockTooLong); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
 //	func (c *Conn) ReadUntilQuiet(quiet time.Duration, limit int) (data []byte, eof bool) // fails tb on an error other than EOF
 //	func (c *Conn) ExpectClosed(d time.Duration) ([]string, error)  // the peer closes within d (0 = hang guard); the lines it sent before, CRLF stripped (a partial last line included); EOF and ECONNRESET count as closed; error on timeout, more than 16 lines or 64 KiB, or another read error (lines returned too)
 //	func (c *Conn) MustClosed(d time.Duration) []string             // ExpectClosed; fails tb on an error
@@ -124,8 +124,8 @@
 // line; overview and header rows have no fixed limit) but a guard against runaway memory:
 // a test that reads an overlong line on purpose (Faults.LongLine, the reply corpus case
 // status-long-64k, the article corpus case long-line) sets MaxLine to a larger value or to -1. ExpectClosed has limits of
-// its own (16 lines / 64 KiB), TryReadUntilQuiet its limit argument (none when it is 0 or
-// less: then only the hang guard bounds it). The settings are
+// its own (16 lines / 64 KiB), TryReadUntilQuiet its limit argument (MaxBlock when it is 0 or
+// less). The settings are
 // kept by TryStartTLS/TryUpgradeTLS, and conformance sets them from its Options.
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF
