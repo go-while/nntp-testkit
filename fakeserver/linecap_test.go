@@ -1,6 +1,7 @@
 package fakeserver
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-while/nntp-testkit/client"
+	"github.com/go-while/nntp-testkit/tlscert"
 )
 
 // capDial connects to s and reads the greeting.
@@ -352,5 +354,73 @@ func TestCapErrorSticky(t *testing.T) {
 	}
 	if l := s.Lines(); len(l) != 0 {
 		t.Errorf("lines recorded after the cap: %q", l)
+	}
+}
+
+// TestCapErrorStickyUpgrades: the sticky cap error holds after COMPRESS and after STARTTLS too: a
+// custom Handler that ignores the error and reads on gets it again, nothing it writes reaches
+// the client, and no line after the upgrade is recorded.
+func TestCapErrorStickyUpgrades(t *testing.T) {
+	ca := tlscert.NewCA(t)
+	cfg := ca.Issue(t, tlscert.Options{}).ServerConfig()
+	for _, mode := range []string{"compress", "starttls"} {
+		t.Run(mode, func(t *testing.T) {
+			done := make(chan []error, 1)
+			s := New(t, Options{MaxLine: 100, Handler: func(c *Conn) {
+				line, err := c.ReadLine()
+				switch {
+				case err != nil:
+				case mode == "compress" && line == "COMPRESS DEFLATE":
+					_ = c.WriteLines("206 compressing")
+					err = c.StartCompress()
+				case mode == "starttls" && line == "STARTTLS":
+					_ = c.WriteLines("382 go ahead")
+					err = c.StartTLS(cfg)
+				default:
+					err = errors.New("unexpected line " + line)
+				}
+				if err != nil {
+					done <- []error{err}
+					return
+				}
+				var errs []error
+				for range 3 {
+					_, err := c.ReadLine()
+					errs = append(errs, err)
+					_ = c.WriteLines("200 still here")
+				}
+				done <- errs
+			}})
+			cl := client.Dial(t, s.Addr())
+			if mode == "compress" {
+				cl.Compress()
+			} else {
+				cl = cl.StartTLS(&tls.Config{RootCAs: ca.Pool, ServerName: "localhost", MinVersion: tls.VersionTLS12})
+			}
+			if err := cl.Send(strings.Repeat("z", 300) + "\r\nDATE\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := cl.TryReadUntilQuiet(500*time.Millisecond, 4096)
+			var errs []error
+			select {
+			case errs = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the handler is still reading: the cap error did not stick")
+			}
+			if len(errs) != 3 {
+				t.Fatalf("handler: %v", errs)
+			}
+			for i, err := range errs {
+				if !errors.Is(err, ErrLineTooLong) {
+					t.Errorf("read %d: err = %v, want ErrLineTooLong", i, err)
+				}
+			}
+			if strings.Contains(string(got), "still here") {
+				t.Errorf("the handler's reply reached the client: %q", got)
+			}
+			if l := s.Lines(); len(l) != 1 {
+				t.Errorf("lines recorded after the upgrade: %q", l)
+			}
+		})
 	}
 }
