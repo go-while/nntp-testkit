@@ -416,3 +416,23 @@ func TestQuoteCut(t *testing.T) {
 		t.Errorf("long: %d bytes, %.60s", len(got), got)
 	}
 }
+
+// TestReadUntilQuietMessageCut: ReadUntilQuiet's failure after the cap quotes a short part of
+// the data, not all of it (a Conn without tb panics with the message).
+func TestReadUntilQuietMessageCut(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n"+strings.Repeat("z", 5000)))
+	c, err := TryDial(p.addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.MaxBlock = 2000
+	var msg string
+	func() {
+		defer func() { msg, _ = recover().(string) }()
+		c.ReadUntilQuiet(200*time.Millisecond, 0)
+	}()
+	if !strings.Contains(msg, "more than 2000 bytes") || !strings.Contains(msg, "more bytes)") || len(msg) > 1000 {
+		t.Errorf("message (%d bytes): %.200q", len(msg), msg)
+	}
+}

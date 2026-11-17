@@ -23,8 +23,8 @@ const readerSize = 1 << 20
 // is 0: 64 KiB. DefaultMaxBlock is the cap of one dot block (un-stuffed lines and 2 bytes per
 // line end) when Conn.MaxBlock is 0: 64 MiB, and of a TryReadUntilQuiet with limit 0. They only
 // stop a server that never ends a line, a block or a raw stream from growing the test process
-// without bound; they are not RFC limits (RFC 3977 3.1:
-// 512 bytes for a status line; RFC 5322 2.1.1: 998 characters per article line; OVER and HDR
+// without bound; they are not RFC limits (RFC 3977 3.1: 512 bytes for a status line; RFC 5322
+// 2.1.1: 998 characters per article line; OVER and HDR
 // rows have no fixed limit).
 const (
 	DefaultMaxLine  = 64 << 10
