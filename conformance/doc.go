@@ -43,8 +43,9 @@
 // that streams lines without the "." terminator, or an endless line, can neither grow the
 // process nor hold Check: this holds for the CAPABILITIES block read before the checks start as
 // well. A negative BlockTime lifts the time bound: then only MaxBlock and the hang guard of each
-// line bound a reply, and a server that trickles lines can hold a check until MaxBlock. A greeting line over the
-// cap is the greeting check's Fail (the other checks are skipped, as for a bare LF). The caps
+// line bound a reply, and a server that trickles lines can hold a check until MaxBlock. A
+// greeting line over the cap is the greeting check's Fail (the other checks are skipped, as for
+// a bare LF). The caps
 // are no RFC limits, only a guard: raise MaxLine for a server whose legitimate lines are
 // longer. A Detail quotes at most one server line, so at most MaxLine bytes; the reply
 // descriptions (a status line, the start of a block) and quoted lists are cut at 1000 bytes.
