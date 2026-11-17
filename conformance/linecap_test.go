@@ -1,7 +1,9 @@
 package conformance
 
 import (
+	"fmt"
 	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -148,5 +150,73 @@ func TestLongGreeting(t *testing.T) {
 	}
 	if res := r.ByName()["capabilities"]; res.Status != Skip {
 		t.Errorf("capabilities: %v %q", res.Status, res.Detail)
+	}
+}
+
+// TestBlockTimeOption: Options.BlockTime sets how long one multi-line reply may take: 0 keeps
+// BlockWindow hang guards, a positive value replaces it, a negative one lifts it.
+func TestBlockTimeOption(t *testing.T) {
+	for _, tc := range []struct {
+		o    Options
+		want time.Duration
+	}{
+		{Options{}, BlockWindow * time.Second},
+		{Options{BlockTime: time.Minute}, time.Minute},
+		{Options{BlockTime: -1}, -1},
+		{Options{BlockTime: time.Millisecond}, time.Millisecond}, // shorter than the deadline
+	} {
+		if got := tc.o.blockTime(time.Second); got != tc.want {
+			t.Errorf("BlockTime %v: %v, want %v", tc.o.BlockTime, got, tc.want)
+		}
+		// newClient, which every session client (plain, TLS, the STARTTLS re-wrap) comes from,
+		// puts that value on the client.Conn, a negative one included
+		cl, sv := net.Pipe()
+		if got := tc.o.newClient(cl, time.Second).BlockTime; got != tc.want {
+			t.Errorf("BlockTime %v: client.Conn.BlockTime %v, want %v", tc.o.BlockTime, got, tc.want)
+		}
+		_ = cl.Close()
+		_ = sv.Close()
+	}
+}
+
+// TestSlowCapabilitiesBlock: a valid CAPABILITIES block of 100 distinct lines, one every 10 ms
+// (about 1 s in all, the same list every time), fails as cut by the default window (3 hang
+// guards of 200 ms) and passes when BlockTime is raised or lifted.
+func TestSlowCapabilitiesBlock(t *testing.T) {
+	s := hostile(t, fakeserver.Options{}, func(c *fakeserver.Conn, line string) bool {
+		if !strings.HasPrefix(line, "CAPABILITIES") {
+			return c.WriteLines("500 what?") == nil
+		}
+		if c.WriteLines("101 caps", "VERSION 2") != nil {
+			return false
+		}
+		for i := range 100 {
+			if c.WriteLines(fmt.Sprintf("X-SLOW-%d", i)) != nil {
+				return false
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return c.WriteLines("READER", ".") == nil
+	})
+	const deadline = 200 * time.Millisecond
+	for _, tc := range []struct {
+		blockTime time.Duration
+		fail      bool
+	}{{0, true}, {10 * time.Second, false}, {-1, false}} {
+		var r Report
+		var err error
+		within(t, 15*time.Second, "Check", func() {
+			r, err = Check(Options{Addr: s.Addr(), Deadline: deadline, BlockTime: tc.blockTime, Skip: onlyChecks("capabilities")})
+		})
+		if err != nil {
+			t.Fatalf("BlockTime %v: %v", tc.blockTime, err)
+		}
+		res := r.ByName()["capabilities"]
+		switch {
+		case tc.fail && (res.Status != Fail || !strings.Contains(res.Detail, "dot block too long")):
+			t.Errorf("BlockTime %v: %v %q, want a Fail as cut", tc.blockTime, res.Status, res.Detail)
+		case !tc.fail && res.Status != Pass:
+			t.Errorf("BlockTime %v: %v %q, want Pass", tc.blockTime, res.Status, res.Detail)
+		}
 	}
 }
