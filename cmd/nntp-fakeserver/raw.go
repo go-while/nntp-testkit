@@ -66,12 +66,26 @@ func (r *recorder) article(block []string, wire []byte) {
 
 // The limits of what a raw connection reads (a client or a DEFLATE bomb cannot fill the memory):
 // one line (Options.MaxLine, default 64 KiB, the line end counts; <0 no cap: the same as in the
-// other modes), one dot block, and everything read on one connection. A connection that goes
-// over one is closed and a note says so.
+// other modes), one dot block (Options.MaxBlock, default rawDefaultMaxBlock, 16 MiB; <0 no cap),
+// and everything read on one connection (maxConn, always). A connection that goes over one is
+// closed and a note says so.
 const (
-	maxBlock = 16 << 20
-	maxConn  = 64 << 20
+	rawDefaultMaxBlock = 16 << 20
+	maxConn            = 64 << 20
 )
+
+// rawMaxBlock is the dot-block cap of raw mode for Options.MaxBlock v: 0 means
+// rawDefaultMaxBlock (raw mode's own default, smaller than fakeserver.DefaultMaxBlock), negative
+// none (returned as 0; maxConn still bounds the connection).
+func rawMaxBlock(v int) int {
+	switch {
+	case v == 0:
+		return rawDefaultMaxBlock
+	case v < 0:
+		return 0
+	}
+	return v
+}
 
 // rawMaxLine is the line cap of raw mode for Options.MaxLine v: 0 means fakeserver.DefaultMaxLine,
 // negative none (returned as 0).
@@ -197,7 +211,7 @@ func (rc *rawConn) writeChunk(ch rawChunk) error {
 // rawHandler runs the steps on every connection, on Conn.Raw(). After the last step it records
 // every line and answers it with a 500, so a client that sends more than the script expects
 // shows up in mismatches.
-func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline time.Duration, maxLine int) func(*fakeserver.Conn) {
+func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline time.Duration, maxLine, maxBlock int) func(*fakeserver.Conn) {
 	res := make([]*regexp.Regexp, len(steps))
 	for i, st := range steps {
 		if st.Expect != nil {
@@ -241,7 +255,7 @@ func rawHandler(steps []rawStep, rec *recorder, tlsCfg *tls.Config, deadline tim
 					if line != "." {
 						wire = append(wire, w...)
 					}
-					if len(wire) > maxBlock {
+					if maxBlock > 0 && len(wire) > maxBlock {
 						rec.note("dot block: over %d bytes, connection closed", maxBlock)
 						return
 					}

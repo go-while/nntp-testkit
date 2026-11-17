@@ -29,8 +29,10 @@ type config struct {
 
 	// Options is fakeserver.Options: Addr, Greeting, NoGreeting, RawStall, TLS (true: implicit
 	// TLS with the program's certificate), Script (mode script), StoreOpts (mode store), Faults,
-	// Deadline (ms), MaxConns, MaxConnsGreeting, MaxLine, MaxBlock (bytes; see fakeserver.Options; raw mode follows MaxLine
-	// but keeps its own 16 MiB block cap). Store and Handler are not settable.
+	// Deadline (ms), MaxConns, MaxConnsGreeting, MaxLine, MaxBlock (bytes; see fakeserver.Options).
+	// Raw mode follows both, with a MaxBlock default of 16 MiB, and keeps its 64 MiB connection
+	// cap, which also ends a block when MaxBlock is larger or negative. Store and Handler are not
+	// settable.
 	Options fakeserver.Options
 
 	Store       storeConfig            // mode store: what the store holds

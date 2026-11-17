@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -939,6 +940,50 @@ func TestRawLineNoWait(t *testing.T) {
 	s, _ := p.finish()
 	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over 64 bytes") {
 		t.Errorf("notes %q", s.Notes)
+	}
+}
+
+// TestRawMaxBlock: raw mode follows Options.MaxBlock for a ReadDot step. The block is 304 bytes
+// (the Expect step takes the Subject line; then "\r\n" and a 302-byte line): a cap of 304 lets it
+// through, 303 or 100 close the connection with a note, and 0 (raw mode's 16 MiB), 1000 and a
+// negative value pass it. TestRawMaxBlockMapping pins what 0 and a negative value mean.
+func TestRawMaxBlock(t *testing.T) {
+	cfg := func(maxBlock int) string {
+		return fmt.Sprintf(`{"Mode": "raw", "Options": {"MaxBlock": %d}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "POST", "Send": [{"Text": "340 go\r\n"}]}, {"Expect": "Subject: .*", "ReadDot": true, "Send": [{"Text": "240 ok\r\n"}]}]}`, maxBlock)
+	}
+	article := "Subject: x\r\n\r\n" + strings.Repeat("y", 300) + "\r\n.\r\n"
+	for _, tc := range []struct {
+		maxBlock int
+		ok       bool
+	}{{100, false}, {303, false}, {304, true}, {0, true}, {1000, true}, {-1, true}} {
+		p := startProc(t, cfg(tc.maxBlock))
+		c := p.dial()
+		if code, line := c.Cmd("POST"); code != 340 {
+			t.Fatalf("MaxBlock %d: POST: %q", tc.maxBlock, line)
+		}
+		if err := c.Send(article); err != nil {
+			t.Fatal(err)
+		}
+		line, err := c.ReadLine()
+		s, _ := p.finish()
+		switch {
+		case tc.ok && (err != nil || line != "240 ok" || len(s.Notes) != 0 || len(s.Articles) != 1 || !slices.Contains(s.Articles[0], strings.Repeat("y", 300))):
+			t.Errorf("MaxBlock %d: %q %v, notes %q, articles %d", tc.maxBlock, line, err, s.Notes, len(s.Articles))
+		case !tc.ok && (err == nil || len(s.Notes) != 1 || !strings.Contains(s.Notes[0], fmt.Sprintf("dot block: over %d bytes", tc.maxBlock))):
+			t.Errorf("MaxBlock %d: %q %v, notes %q", tc.maxBlock, line, err, s.Notes)
+		}
+	}
+}
+
+// TestRawMaxBlockMapping: Options.MaxBlock 0 is raw mode's own 16 MiB default, a negative value
+// means no block cap (0; maxConn still bounds the connection), others pass through.
+func TestRawMaxBlockMapping(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{
+		{0, 16 << 20}, {-1, 0}, {5, 5}, {64<<20 + 1, 64<<20 + 1},
+	} {
+		if got := rawMaxBlock(tc.in); got != tc.want {
+			t.Errorf("rawMaxBlock(%d) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
 

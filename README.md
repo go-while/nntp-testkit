@@ -99,7 +99,7 @@ many connections. It stays bounded.
 | where | setting (0 = default, negative = no cap) | when exceeded |
 |---|---|---|
 | `fakeserver.Options` | `MaxLine` (default `DefaultMaxLine`, 64 KiB), `MaxBlock` (`DefaultMaxBlock`, 64 MiB; one dot block read with `ReadDotBlock`) | `ReadLine` / `ReadDotBlock` return `ErrLineTooLong` / `ErrBlockTooLong`, `Server.Notes()` records it (the `notes` of the `nntp-fakeserver` summary), the connection is closed; every mode, also the inflated stream after COMPRESS |
-| `nntp-fakeserver` JSON config | `Options.MaxLine`, `Options.MaxBlock`; raw mode follows `MaxLine` (it also keeps its own 16 MiB block and 64 MiB connection caps) | a note and the close, as above |
+| `nntp-fakeserver` JSON config | `Options.MaxLine`, `Options.MaxBlock`; raw mode follows both (`MaxBlock` 0 means raw mode's own default of 16 MiB) and keeps its 64 MiB connection cap | a note and the close, as above |
 | `client.Conn` | `MaxLine` (`DefaultMaxLine`), `MaxBlock` (`DefaultMaxBlock`), `BlockTime` (0 = 10 hang guards) | `ErrLineTooLong` (`errors.Is`); a block over `MaxBlock` or `BlockTime`: `*StrictError` (NoTerminator) wrapping `ErrBlockTooLong`. Applies to `ReadLine` and so to `ReadStatus`, `TryCmd` and the greeting, to `TryReadDotLines`, `TryRawUntilDot` and `TryPipeline` |
 | `conformance.Options` / `-max-line`, `-max-block`, `-block-time` | `MaxLine`, `MaxBlock`; a block must end within `BlockTime` (0 = `BlockWindow` (3) times `Deadline`, <0 none) | a Fail whose Detail says "line too long" or "dot block too long"; also for the CAPABILITIES block read before the checks start |
 
