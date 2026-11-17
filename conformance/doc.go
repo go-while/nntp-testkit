@@ -38,8 +38,9 @@
 // Options.MaxLine and Options.MaxBlock cap what the checks read from the server: a line over
 // MaxLine bytes (line end included; default 64 KiB, negative: no cap) and a multi-line reply
 // over MaxBlock bytes (default 64 MiB) fail the check that reads it with a Detail that says so
-// ("line too long", "dot block too long"), and a block must end within BlockWindow (3) times
-// Options.Deadline whatever the pace of its lines, so a server that streams lines without the
+// ("line too long", "dot block too long"), and a block must end within Options.BlockTime
+// (default BlockWindow (3) times Options.Deadline; negative: no limit) whatever the pace of
+// its lines, so a server that streams lines without the
 // "." terminator, or an endless line, can neither grow the process nor hold Check: this holds
 // for the CAPABILITIES block read before the checks start as well. A greeting line over the
 // cap is the greeting check's Fail (the other checks are skipped, as for a bare LF). The caps

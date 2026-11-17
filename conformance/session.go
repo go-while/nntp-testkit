@@ -14,8 +14,8 @@ import (
 )
 
 // BlockWindow is how many hang guards (Options.Deadline) a multi-line reply of the server may
-// take in all: a block that is still going after that, whatever the pace of its lines, fails
-// the check (the guard of a single line is the Deadline itself).
+// take in all when Options.BlockTime is 0: a block that is still going after that, whatever
+// the pace of its lines, fails the check (the guard of a single line is the Deadline itself).
 const BlockWindow = 3
 
 // readerSize is the bufio size of a session's client (the client package keeps its own
@@ -114,7 +114,16 @@ func dial(o Options) (*session, error) {
 // Options.
 func (o Options) newClient(nc net.Conn, deadline time.Duration) *client.Conn {
 	return &client.Conn{Conn: nc, R: bufio.NewReaderSize(nc, readerSize), Deadline: deadline, Strict: true,
-		MaxLine: o.MaxLine, MaxBlock: o.MaxBlock, BlockTime: BlockWindow * deadline}
+		MaxLine: o.MaxLine, MaxBlock: o.MaxBlock, BlockTime: o.blockTime(deadline)}
+}
+
+// blockTime is the bound of one multi-line reply: Options.BlockTime, or BlockWindow hang
+// guards when it is 0; negative means none, as for client.Conn.BlockTime.
+func (o Options) blockTime(deadline time.Duration) time.Duration {
+	if o.BlockTime != 0 {
+		return o.BlockTime
+	}
+	return BlockWindow * deadline
 }
 
 // capabilities sends CAPABILITIES and stores the list (without the status line and the

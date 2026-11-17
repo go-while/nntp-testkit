@@ -150,3 +150,59 @@ func TestLongGreeting(t *testing.T) {
 		t.Errorf("capabilities: %v %q", res.Status, res.Detail)
 	}
 }
+
+// TestBlockTimeOption: Options.BlockTime sets how long one multi-line reply may take: 0 keeps
+// BlockWindow hang guards, a positive value replaces it, a negative one lifts it.
+func TestBlockTimeOption(t *testing.T) {
+	for _, tc := range []struct {
+		o    Options
+		want time.Duration
+	}{
+		{Options{}, BlockWindow * time.Second},
+		{Options{BlockTime: time.Minute}, time.Minute},
+		{Options{BlockTime: -1}, -1},
+	} {
+		if got := tc.o.blockTime(time.Second); got != tc.want {
+			t.Errorf("BlockTime %v: %v, want %v", tc.o.BlockTime, got, tc.want)
+		}
+	}
+}
+
+// TestSlowCapabilitiesBlock: a CAPABILITIES block that ends after about 1 s, one line every
+// 10 ms, is cut by the default window (3 hang guards of 200 ms) and passes when BlockTime is
+// raised or lifted.
+func TestSlowCapabilitiesBlock(t *testing.T) {
+	s := hostile(t, fakeserver.Options{}, func(c *fakeserver.Conn, line string) bool {
+		if !strings.HasPrefix(line, "CAPABILITIES") {
+			return c.WriteLines("500 what?") == nil
+		}
+		if c.WriteLines("101 caps", "VERSION 2") != nil {
+			return false
+		}
+		for end := time.Now().Add(time.Second); time.Now().Before(end); {
+			if c.WriteLines("X-SLOW") != nil {
+				return false
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return c.WriteLines("READER", ".") == nil
+	})
+	const deadline = 200 * time.Millisecond
+	for _, tc := range []struct {
+		blockTime time.Duration
+		fail      bool
+	}{{0, true}, {10 * time.Second, false}, {-1, false}} {
+		var r Report
+		var err error
+		within(t, 15*time.Second, "Check", func() {
+			r, err = Check(Options{Addr: s.Addr(), Deadline: deadline, BlockTime: tc.blockTime, Skip: onlyChecks("capabilities")})
+		})
+		if err != nil {
+			t.Fatalf("BlockTime %v: %v", tc.blockTime, err)
+		}
+		res := r.ByName()["capabilities"]
+		if tooLong := strings.Contains(res.Detail, "dot block too long"); tooLong != tc.fail {
+			t.Errorf("BlockTime %v: %v %q, want cut %v", tc.blockTime, res.Status, res.Detail, tc.fail)
+		}
+	}
+}

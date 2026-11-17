@@ -68,6 +68,8 @@ func TestRunExitCodes(t *testing.T) {
 		{name: "closed-port", args: []string{"-addr", closedAddr(t)}, code: 2, stderr: "refused"},
 		{name: "help", args: []string{"-h"}, code: 0, stderr: "quit-eof"},
 		{name: "workers", args: []string{"-addr", good.Addr(), "-workers", "1"}, code: 0, stdout: "0 fail"},
+		{name: "block-time", args: []string{"-addr", good.Addr(), "-block-time", "1m"}, code: 0, stdout: "0 fail"},
+		{name: "bad-block-time", args: []string{"-addr", good.Addr(), "-block-time", "soon"}, code: 2, stderr: "block-time"},
 		{name: "bad-workers", args: []string{"-addr", good.Addr(), "-workers", "0"}, code: 2, stderr: "-workers must be positive"},
 		{name: "tls-no-host", args: []string{"-addr", ":119", "-tls"}, code: 2, stderr: "-tls needs a host"},
 		{name: "unavailable", args: []string{"-addr", busy.Addr()}, code: 1, stdout: "service unavailable: 502"},

@@ -42,10 +42,16 @@ type Options struct {
 
 	// MaxBlock caps one multi-line reply of the server in bytes: 0 = 64 MiB
 	// (client.DefaultMaxBlock), negative = no cap. A multi-line block must also end within
-	// BlockWindow hang guards (3 times Deadline) in all, however often lines arrive; the read
-	// of the first CAPABILITIES block, which runs before the checks start, is bounded the same
-	// way. Over either bound the check fails with a Detail that says so.
+	// BlockTime in all, however often lines arrive; the read of the first CAPABILITIES block,
+	// which runs before the checks start, is bounded the same way. Over either bound the check
+	// fails with a Detail that says so.
 	MaxBlock int
+
+	// BlockTime is the longest one multi-line reply of the server may take in all, however
+	// often its lines arrive: 0 = BlockWindow times Deadline (3 hang guards), negative = no
+	// limit (MaxBlock still holds). Raise it for a slow link with big LIST or OVER replies
+	// rather than raising Deadline, which lengthens every single read.
+	BlockTime time.Duration
 
 	// Skip lists check names (Result.Name) to leave out; they are reported as Skip.
 	Skip []string

@@ -4,7 +4,7 @@
 //	nntp-conformance -addr host:port [-user u -pass p] [-group g] [-tls [-tls-insecure]]
 //	                 [-ca ca.pem] [-servername name] [-starttls-verify] [-allow name=substring]...
 //	                 [-allow-reply name:CMD=code]... [-commit-wait 5s]
-//	                 [-deadline 10s] [-max-line 65536] [-max-block 67108864] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
+//	                 [-deadline 10s] [-max-line 65536] [-max-block 67108864] [-block-time 30s] [-workers 4] [-skip name,name] [-json] [-strict-overview-fmt]
 //
 // The STARTTLS checks (RFC 4642) handshake without verifying the certificate unless
 // -starttls-verify or -ca is given (then against -ca, else the system roots, with -servername or
@@ -126,7 +126,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	starttlsVerify := fs.Bool("starttls-verify", false, "verify the certificate in the STARTTLS checks (against -ca, else the system roots); off: handshake without verification, noted in the report")
 	deadline := fs.Duration("deadline", 10*time.Second, "hang guard per read and write")
 	maxLine := fs.Int("max-line", 0, "longest line the server may send, line end included, in bytes (a longer one fails the check that reads it); 0: 64 KiB, negative: no cap")
-	maxBlock := fs.Int("max-block", 0, "largest multi-line reply the server may send, in bytes (a block must also end within 3 times -deadline); 0: 64 MiB, negative: no cap")
+	maxBlock := fs.Int("max-block", 0, "largest multi-line reply the server may send, in bytes (a block must also end within -block-time); 0: 64 MiB, negative: no cap")
+	blockTime := fs.Duration("block-time", 0, "longest one multi-line reply may take in all, however often its lines arrive (for a slow link with big LIST or OVER replies, instead of a longer -deadline); 0: 3 times -deadline, negative: no limit")
 	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
@@ -171,7 +172,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if (*useTLS || *insecure) && host == "" {
 		return usage("-tls needs a host in -addr (the TLS ServerName)")
 	}
-	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline, Workers: *workers, MaxLine: *maxLine, MaxBlock: *maxBlock}
+	o := conformance.Options{Addr: *addr, User: *user, Pass: *pass, PostGroup: *group, Deadline: *deadline, Workers: *workers, MaxLine: *maxLine, MaxBlock: *maxBlock, BlockTime: *blockTime}
 	o.StrictOverviewFmt = *strictOverview
 	names := conformance.Names()
 	for n := range allow {
