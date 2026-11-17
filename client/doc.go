@@ -10,7 +10,7 @@
 //		Deadline time.Duration // hang guard per blocking step; 0 = testkit.Deadline()
 //		Strict   bool          // report wire mistakes (see below); Dial sets it
 //		MaxLine   int          // cap of one line read, line end included: 0 = DefaultMaxLine (64 KiB), <0 none; over it: ErrLineTooLong (errors.Is), raised while reading
-//		MaxBlock  int          // cap of one dot block, and of TryReadUntilQuiet with limit 0, in bytes: 0 = DefaultMaxBlock (64 MiB), <0 none; over it: *StrictError{NoTerminator} wrapping ErrBlockTooLong (TryReadUntilQuiet: ErrBlockTooLong wrapped directly)
+//		MaxBlock  int          // cap of one dot block, and of TryReadUntilQuiet with limit <= 0, in bytes: 0 = DefaultMaxBlock (64 MiB), <0 none; over it: *StrictError{NoTerminator} wrapping ErrBlockTooLong (TryReadUntilQuiet: ErrBlockTooLong wrapped directly)
 //		BlockTime time.Duration // longest a whole dot block may take: 0 = 10 hang guards, <0 none; over it: as for MaxBlock, the read of the line under way is cut then too
 //	}
 //	func Dial(tb testing.TB, addr string) *Conn            // DialWith(tb, addr, 0)
@@ -120,7 +120,7 @@
 // ErrLineTooLong, raised as soon as the line is over (an endless line costs no memory); the
 // rest of that line stays unread, so close the Conn. A block over MaxBlock or BlockTime fails
 // with a *StrictError of Kind NoTerminator wrapping ErrBlockTooLong; a TryReadUntilQuiet with
-// limit 0 over MaxBlock fails with ErrBlockTooLong wrapped directly. The caps are not RFC
+// limit <= 0 over MaxBlock fails with ErrBlockTooLong wrapped directly. The caps are not RFC
 // limits (RFC 3977 3.1: 512 bytes for a status line; RFC 5322 2.1.1: 998 characters per article
 // line; overview and header rows have no fixed limit) but a guard against runaway memory:
 // a test that reads an overlong line on purpose (Faults.LongLine, the reply corpus case
