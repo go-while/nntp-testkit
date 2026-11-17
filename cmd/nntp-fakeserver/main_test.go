@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -939,6 +940,37 @@ func TestRawLineNoWait(t *testing.T) {
 	s, _ := p.finish()
 	if len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "a line over 64 bytes") {
 		t.Errorf("notes %q", s.Notes)
+	}
+}
+
+// TestRawMaxBlock: raw mode follows Options.MaxBlock for a ReadDot step: a block over a set cap
+// closes the connection with a note; 0 keeps raw mode's 16 MiB default and a negative value
+// lifts the block cap, so the same 300-byte article passes with those and with a larger cap.
+func TestRawMaxBlock(t *testing.T) {
+	cfg := func(maxBlock int) string {
+		return fmt.Sprintf(`{"Mode": "raw", "Options": {"MaxBlock": %d}, "Raw": [{"Send": [{"Text": "200 hi\r\n"}]}, {"Expect": "POST", "Send": [{"Text": "340 go\r\n"}]}, {"Expect": "Subject: .*", "ReadDot": true, "Send": [{"Text": "240 ok\r\n"}]}]}`, maxBlock)
+	}
+	article := "Subject: x\r\n\r\n" + strings.Repeat("y", 300) + "\r\n.\r\n"
+	for _, tc := range []struct {
+		maxBlock int
+		ok       bool
+	}{{100, false}, {0, true}, {1000, true}, {-1, true}} {
+		p := startProc(t, cfg(tc.maxBlock))
+		c := p.dial()
+		if code, line := c.Cmd("POST"); code != 340 {
+			t.Fatalf("MaxBlock %d: POST: %q", tc.maxBlock, line)
+		}
+		if err := c.Send(article); err != nil {
+			t.Fatal(err)
+		}
+		line, err := c.ReadLine()
+		s, _ := p.finish()
+		switch {
+		case tc.ok && (err != nil || line != "240 ok"):
+			t.Errorf("MaxBlock %d: %q %v, notes %q", tc.maxBlock, line, err, s.Notes)
+		case !tc.ok && (err == nil || len(s.Notes) != 1 || !strings.Contains(s.Notes[0], "dot block: over 100 bytes")):
+			t.Errorf("MaxBlock %d: %q %v, notes %q", tc.maxBlock, line, err, s.Notes)
+		}
 	}
 }
 

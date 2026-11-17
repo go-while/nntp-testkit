@@ -89,8 +89,8 @@
 // after the script wait for the client without a limit): a client that stays silent longer than
 // the Deadline before an expected line is cut off, and a Sleep, Gap or SplitGap longer than the
 // Deadline is a config error. A line over Options.MaxLine (default 64 KiB, the line end counted),
-// a dot block over 16 MiB or more than 64 MiB on one connection close the connection and add
-// a note (Options.MaxBlock does not apply to raw mode). The script writes the greeting itself (a
+// a dot block over Options.MaxBlock (raw mode's default 16 MiB; negative: no cap) or more than
+// 64 MiB on one connection close the connection and add a note. The script writes the greeting itself (a
 // first step with Expect null).
 //
 //	{"Mode": "raw", "Raw": [
@@ -302,7 +302,7 @@ func start(cfg *config, store *fakeserver.Store, listen string, tlsCfg *tls.Conf
 		srv, err = fakeserver.Start(o)
 	case "raw":
 		o.NoGreeting = true // the script writes the greeting
-		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg, o.Deadline, rawMaxLine(o.MaxLine))
+		o.Handler = rawHandler(cfg.Raw, rec, tlsCfg, o.Deadline, rawMaxLine(o.MaxLine), rawMaxBlock(o.MaxBlock))
 		srv, err = fakeserver.Start(o)
 	}
 	return srv, rec, err
