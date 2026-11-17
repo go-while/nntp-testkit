@@ -10,7 +10,7 @@
 //		Deadline time.Duration // hang guard per blocking step; 0 = testkit.Deadline()
 //		Strict   bool          // report wire mistakes (see below); Dial sets it
 //		MaxLine   int          // cap of one line read, line end included: 0 = DefaultMaxLine (64 KiB), <0 none; over it: ErrLineTooLong (errors.Is), raised while reading
-//		MaxBlock  int          // cap of one dot block in bytes: 0 = DefaultMaxBlock (64 MiB), <0 none; over it: *StrictError{NoTerminator} wrapping ErrBlockTooLong
+//		MaxBlock  int          // cap of one dot block, and of TryReadUntilQuiet with limit <= 0, in bytes: 0 = DefaultMaxBlock (64 MiB), <0 none; over it: *StrictError{NoTerminator} wrapping ErrBlockTooLong (TryReadUntilQuiet: ErrBlockTooLong wrapped directly)
 //		BlockTime time.Duration // longest a whole dot block may take: 0 = 10 hang guards, <0 none; over it: as for MaxBlock, the read of the line under way is cut then too
 //	}
 //	func Dial(tb testing.TB, addr string) *Conn            // DialWith(tb, addr, 0)
@@ -99,7 +99,7 @@
 //
 // Raw I/O (raw.go): nothing is interpreted, no strict checks.
 //
-//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: none); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
+//	func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error) // bytes until silent for quiet, or limit bytes (limit <= 0: Conn.MaxBlock, over it ErrBlockTooLong); nil error for both; io.EOF itself when the server closed; ends after one hang guard anyway
 //	func (c *Conn) ReadUntilQuiet(quiet time.Duration, limit int) (data []byte, eof bool) // fails tb on an error other than EOF
 //	func (c *Conn) ExpectClosed(d time.Duration) ([]string, error)  // the peer closes within d (0 = hang guard); the lines it sent before, CRLF stripped (a partial last line included); EOF and ECONNRESET count as closed; error on timeout, more than 16 lines or 64 KiB, or another read error (lines returned too)
 //	func (c *Conn) MustClosed(d time.Duration) []string             // ExpectClosed; fails tb on an error
@@ -119,13 +119,14 @@
 // the hang guard itself is renewed by every line). A line over the cap fails the read with
 // ErrLineTooLong, raised as soon as the line is over (an endless line costs no memory); the
 // rest of that line stays unread, so close the Conn. A block over MaxBlock or BlockTime fails
-// with a *StrictError of Kind NoTerminator wrapping ErrBlockTooLong. The caps are not RFC
+// with a *StrictError of Kind NoTerminator wrapping ErrBlockTooLong; a TryReadUntilQuiet with
+// limit <= 0 over MaxBlock fails with ErrBlockTooLong wrapped directly. The caps are not RFC
 // limits (RFC 3977 3.1: 512 bytes for a status line; RFC 5322 2.1.1: 998 characters per article
 // line; overview and header rows have no fixed limit) but a guard against runaway memory:
 // a test that reads an overlong line on purpose (Faults.LongLine, the reply corpus case
 // status-long-64k, the article corpus case long-line) sets MaxLine to a larger value or to -1. ExpectClosed has limits of
-// its own (16 lines / 64 KiB), TryReadUntilQuiet its limit argument (none when it is 0 or
-// less: then only the hang guard bounds it). The settings are
+// its own (16 lines / 64 KiB), TryReadUntilQuiet its limit argument (MaxBlock when it is 0 or
+// less). The settings are
 // kept by TryStartTLS/TryUpgradeTLS, and conformance sets them from its Options.
 //
 // Strict mode: ReadLine reads raw bytes and returns a *StrictError when a line ends in a bare LF

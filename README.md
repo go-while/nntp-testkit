@@ -83,8 +83,8 @@ hung test; a passing test never waits on it. `fakeserver.Options.Deadline`, `cli
 
 A client under test that sends an endless line or dot block to the fake server, or a server under test that
 sends an endless line or an endless multi-line reply to the kit's client or the conformance checker, makes
-the test fail cleanly instead of growing the test process without bound. (Calls that take their own limit,
-such as `TryReadUntilQuiet` with a limit of 0, are bounded by the hang guard only.)
+the test fail cleanly instead of growing the test process without bound. `TryReadUntilQuiet` with a limit of 0 is
+bounded by `MaxBlock` as well.
 One line may hold 64 KiB (65536 bytes, **the line ending counted**: a 65534-character line plus CRLF
 passes, one character more does not) unless configured, a dot block 64 MiB. The caps are **not RFC
 enforcement** (RFC 3977 3.1: 512 bytes for a command or status line; RFC 5322 2.1.1: 998 characters per
@@ -105,7 +105,8 @@ many connections. It stays bounded.
 
 A test that reads a line over the cap on purpose (`Faults.LongLine`, the reply corpus case
 `status-long-64k`, whose status line is a little over 64 KiB) sets `client.Conn.MaxLine` to a larger
-value or to -1; `TryReadUntilQuiet` and `ExpectClosed` have limits of their own.
+value or to -1; `ExpectClosed` has limits of its own, and `TryReadUntilQuiet` takes a limit (`MaxBlock`
+when it is 0).
 
 ## Packages
 
@@ -174,7 +175,7 @@ The `doc.go` of each package holds the full contract; `go doc -all ./<package>` 
 | `TryPipeline(cmds, multi) ([]Reply, error)` / `Pipeline(...)`, `type Reply struct { Cmd string; Code int; Line string; Lines []string }`, `MultiLine(cmd, code) bool` | write all commands from a goroutine while reading the replies in order (no deadlock when the server stops reading); `multi(cmd, code)` says whether a dot block follows (nil: `MultiLine`; `Reply.Cmd` is the entry's first line); the deadline slides with every line, a dot block also ends within `BlockTime` (10 deadlines) and holds at most `MaxBlock` (64 MiB); no line over `MaxLine` |
 | `TryDialFrom(addr, localIP, deadline)` / `DialFrom(tb, addr, localIP)` | dial from a chosen source address (127.0.0.2) and read the greeting; skip the test where the OS cannot bind it (macOS without an alias) |
 | `TryDialUntil(addr, prefix, d)` / `DialUntil(tb, addr, prefix, d)` | redial every 50 ms until the greeting starts with `prefix` (a server that greets 400 while it starts); refused dials count as not yet |
-| `TryReadUntilQuiet(quiet, limit) ([]byte, error)` / `ReadUntilQuiet(...) (data, eof)` | raw bytes until the server is silent for `quiet` or `limit` bytes; `io.EOF` when the server closed |
+| `TryReadUntilQuiet(quiet, limit) ([]byte, error)` / `ReadUntilQuiet(...) (data, eof)` | raw bytes until the server is silent for `quiet` or `limit` bytes (`limit` <= 0: `Conn.MaxBlock`, over it an error wrapping `ErrBlockTooLong`); `io.EOF` when the server closed |
 | `ExpectClosed(d) ([]string, error)` / `MustClosed(d) []string` | the peer closes within `d`; the lines it sent before the close (QUIT 205, 400 then close); EOF and a reset count as closed |
 | `SendChunks(raw, n, pause) error`, `SendDrip(raw, pause)` | write `raw` n bytes (1) per write with a pause: split CRLF or the terminator across writes |
 | `type StrictError struct { Kind Kind; Line string; Bytes []byte; Err error }`, `type Kind int` | strict-mode error |

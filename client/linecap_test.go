@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"errors"
+	"math"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -350,5 +351,88 @@ func TestBlockCapWithoutLineCap(t *testing.T) {
 			t.Errorf("raw %v: err = %v, want ErrBlockTooLong", raw, err)
 		}
 		bounded(t, n, int64(c.MaxBlock)+slack+10_000)
+	}
+}
+
+// TestReadUntilQuietDefaultCap: with limit 0, TryReadUntilQuiet is bounded by MaxBlock: an
+// endless sender gives ErrBlockTooLong soon after the cap with MaxBlock+1 bytes, exactly
+// MaxBlock bytes then quiet is fine, one byte more is not. MaxBlock < 0: see TestQuietBound.
+func TestReadUntilQuietDefaultCap(t *testing.T) {
+	t.Run("endless", func(t *testing.T) {
+		c, n := endlessServer(t, "", strings.Repeat("x", 8<<10))
+		c.MaxBlock = 100 << 10
+		got, err := c.TryReadUntilQuiet(time.Second, 0)
+		if !errors.Is(err, ErrBlockTooLong) || len(got) != c.MaxBlock+1 || bytes.Count(got, []byte("x")) != len(got) {
+			t.Errorf("err = %v, %d bytes, want ErrBlockTooLong and %d bytes of x", err, len(got), c.MaxBlock+1)
+		}
+		bounded(t, n, int64(c.MaxBlock)+slack+10_000)
+	})
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{1000, true}, {1001, false}} {
+		p := newPeer(t, scripted("200 hi\r\n"+strings.Repeat("a", tc.size)))
+		c := Dial(t, p.addr())
+		c.MaxBlock = 1000
+		got, err := c.TryReadUntilQuiet(200*time.Millisecond, 0)
+		switch {
+		case tc.ok && (err != nil || len(got) != tc.size):
+			t.Errorf("size %d: %d bytes, err %v", tc.size, len(got), err)
+		case !tc.ok && (!errors.Is(err, ErrBlockTooLong) || string(got) != strings.Repeat("a", c.MaxBlock+1)):
+			t.Errorf("size %d: err = %v, %d bytes, want ErrBlockTooLong and %d bytes of a", tc.size, err, len(got), c.MaxBlock+1)
+		}
+	}
+}
+
+// TestQuietBound: the bound of TryReadUntilQuiet: an explicit limit, MaxBlock (+1) for limit 0,
+// none for MaxBlock < 0 or one that would overflow.
+func TestQuietBound(t *testing.T) {
+	for _, tc := range []struct {
+		maxBlock, limit, want int
+		capped                bool
+	}{
+		{0, 5, 5, false},
+		{100, 5, 5, false},
+		{0, 0, DefaultMaxBlock + 1, true},
+		{1000, 0, 1001, true},
+		{1000, -1, 1001, true},
+		{-1, 0, 0, false},
+		{math.MaxInt, 0, 0, false},
+	} {
+		c := &Conn{MaxBlock: tc.maxBlock}
+		if got, capped := c.quietBound(tc.limit); got != tc.want || capped != tc.capped {
+			t.Errorf("MaxBlock %d limit %d: %d %v, want %d %v", tc.maxBlock, tc.limit, got, capped, tc.want, tc.capped)
+		}
+	}
+}
+
+// TestQuoteCut: an error message quotes at most 256 bytes of the data.
+func TestQuoteCut(t *testing.T) {
+	if got := quote([]byte("ab")); got != `"ab"` {
+		t.Errorf("short: %s", got)
+	}
+	got := quote(bytes.Repeat([]byte{0xff}, 1000))
+	if !strings.HasSuffix(got, "... (744 more bytes)") || len(got) > 256*4+40 {
+		t.Errorf("long: %d bytes, %.60s", len(got), got)
+	}
+}
+
+// TestReadUntilQuietMessageCut: ReadUntilQuiet's failure after the cap quotes a short part of
+// the data, not all of it (a Conn without tb panics with the message).
+func TestReadUntilQuietMessageCut(t *testing.T) {
+	p := newPeer(t, scripted("200 hi\r\n"+strings.Repeat("z", 5000)))
+	c, err := TryDial(p.addr(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.MaxBlock = 2000
+	var msg string
+	func() {
+		defer func() { msg, _ = recover().(string) }()
+		c.ReadUntilQuiet(200*time.Millisecond, 0)
+	}()
+	if !strings.Contains(msg, "more than 2000 bytes") || !strings.Contains(msg, "more bytes)") || len(msg) > 1000 {
+		t.Errorf("message (%d bytes): %.200q", len(msg), msg)
 	}
 }
