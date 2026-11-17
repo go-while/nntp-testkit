@@ -463,8 +463,35 @@ func TestBlockErrBounds(t *testing.T) {
 }
 
 // TestBlockErrBoundsReaders: the text reaches the caller through both block readers: a block cut
-// at MaxBlock with no time bound says so.
+// at MaxBlock with no time bound says so, and one cut at BlockTime with no byte bound too.
 func TestBlockErrBoundsReaders(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		// time cut: one short line every 20 ms, forever; MaxBlock lifted, BlockTime 300 ms
+		cl, sv := net.Pipe()
+		go func() {
+			defer sv.Close()
+			for {
+				if _, err := sv.Write([]byte("tick\r\n")); err != nil {
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}()
+		c := NewConn(cl)
+		c.Deadline = 10 * time.Second
+		c.MaxBlock = -1
+		c.BlockTime = 300 * time.Millisecond
+		var err error
+		if raw {
+			_, err = c.TryRawUntilDot()
+		} else {
+			_, err = c.TryReadDotLines()
+		}
+		c.Close()
+		if !errors.Is(err, ErrBlockTooLong) || !strings.Contains(err.Error(), "(bounds: no byte bound, 300ms)") {
+			t.Errorf("time cut, raw %v: %v", raw, err)
+		}
+	}
 	for _, raw := range []bool{false, true} {
 		c, _ := endlessServer(t, "", strings.Repeat("line of text\r\n", 400))
 		c.MaxBlock = 100 << 10
