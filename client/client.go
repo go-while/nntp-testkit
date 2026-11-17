@@ -21,8 +21,9 @@ const readerSize = 1 << 20
 
 // DefaultMaxLine is the cap of one line a Conn reads (the line end included) when Conn.MaxLine
 // is 0: 64 KiB. DefaultMaxBlock is the cap of one dot block (un-stuffed lines and 2 bytes per
-// line end) when Conn.MaxBlock is 0: 64 MiB. They only stop a server that never ends a line or
-// a block from growing the test process without bound; they are not RFC limits (RFC 3977 3.1:
+// line end) when Conn.MaxBlock is 0: 64 MiB, and of a TryReadUntilQuiet with limit 0. They only
+// stop a server that never ends a line, a block or a raw stream from growing the test process
+// without bound; they are not RFC limits (RFC 3977 3.1:
 // 512 bytes for a status line; RFC 5322 2.1.1: 998 characters per article line; OVER and HDR
 // rows have no fixed limit).
 const (
@@ -42,7 +43,8 @@ var ErrLineTooLong = errors.New("line too long")
 
 // ErrBlockTooLong is the error inside the *StrictError (Kind NoTerminator) that a dot block
 // reader returns when a block goes over Conn.MaxBlock bytes or lasts longer than Conn.BlockTime
-// (the "." terminator never came); errors.Is finds it.
+// (the "." terminator never came); errors.Is finds it. TryReadUntilQuiet with limit 0 wraps it
+// directly (no *StrictError) when the server sends more than MaxBlock bytes.
 var ErrBlockTooLong = errors.New("dot block too long")
 
 // Conn is a raw NNTP test client with a hang guard per blocking step. The fields are exported
@@ -59,9 +61,10 @@ type Conn struct {
 	// included: 0 = DefaultMaxLine (64 KiB), negative = no cap. A longer line fails the read
 	// with ErrLineTooLong as soon as it is over the cap.
 	MaxLine int
-	// MaxBlock caps a dot block read by TryReadDotLines, TryRawUntilDot and TryPipeline, in
-	// bytes: 0 = DefaultMaxBlock (64 MiB), negative = no cap. Over it the read fails with a
-	// *StrictError (NoTerminator) wrapping ErrBlockTooLong.
+	// MaxBlock caps a dot block read by TryReadDotLines, TryRawUntilDot and TryPipeline, and a
+	// TryReadUntilQuiet with limit 0, in bytes: 0 = DefaultMaxBlock (64 MiB), negative = no cap.
+	// Over it a block read fails with a *StrictError (NoTerminator) wrapping ErrBlockTooLong,
+	// TryReadUntilQuiet with an error wrapping ErrBlockTooLong.
 	MaxBlock int
 	// BlockTime is the longest a whole dot block may take, however often lines arrive (the
 	// hang guard Deadline only limits the wait for the next line): 0 = 10 times the hang guard,

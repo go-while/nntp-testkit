@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"errors"
+	"math"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -381,25 +382,37 @@ func TestReadUntilQuietDefaultCap(t *testing.T) {
 			t.Errorf("size %d: err = %v, want ErrBlockTooLong", tc.size, err)
 		}
 	}
-	t.Run("no cap", func(t *testing.T) {
-		// a slow trickle (an endless fast sender without any cap would fill the memory)
-		cl, sv := net.Pipe()
-		go func() {
-			defer sv.Close()
-			for {
-				if _, err := sv.Write([]byte("x")); err != nil {
-					return
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
-		}()
-		c := NewConn(cl)
-		t.Cleanup(c.Close)
-		c.MaxBlock = -1
-		c.Deadline = 300 * time.Millisecond
-		_, err := c.TryReadUntilQuiet(time.Second, 0)
-		if err == nil || errors.Is(err, ErrBlockTooLong) {
-			t.Errorf("err = %v, want the hang guard's error", err)
+}
+
+// TestQuietBound: the bound of TryReadUntilQuiet: an explicit limit, MaxBlock (+1) for limit 0,
+// none for MaxBlock < 0 or one that would overflow.
+func TestQuietBound(t *testing.T) {
+	for _, tc := range []struct {
+		maxBlock, limit, want int
+		capped                bool
+	}{
+		{0, 5, 5, false},
+		{100, 5, 5, false},
+		{0, 0, DefaultMaxBlock + 1, true},
+		{1000, 0, 1001, true},
+		{1000, -1, 1001, true},
+		{-1, 0, 0, false},
+		{math.MaxInt, 0, 0, false},
+	} {
+		c := &Conn{MaxBlock: tc.maxBlock}
+		if got, capped := c.quietBound(tc.limit); got != tc.want || capped != tc.capped {
+			t.Errorf("MaxBlock %d limit %d: %d %v, want %d %v", tc.maxBlock, tc.limit, got, capped, tc.want, tc.capped)
 		}
-	})
+	}
+}
+
+// TestQuoteCut: an error message quotes at most 256 bytes of the data.
+func TestQuoteCut(t *testing.T) {
+	if got := quote([]byte("ab")); got != `"ab"` {
+		t.Errorf("short: %s", got)
+	}
+	got := quote(bytes.Repeat([]byte{0xff}, 1000))
+	if !strings.HasSuffix(got, "... (744 more bytes)") || len(got) > 256*4+40 {
+		t.Errorf("long: %d bytes, %.60s", len(got), got)
+	}
 }

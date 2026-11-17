@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"strings"
@@ -21,8 +22,10 @@ func timedOut(err error) bool {
 // TryReadUntilQuiet reads raw bytes (the bytes buffered in R first) until the server has been
 // silent for quiet or limit bytes have been read, and returns them with a nil error. With limit
 // <= 0 the bound is Conn.MaxBlock (default DefaultMaxBlock, 64 MiB; negative: none): a server
-// that sends more than that before it goes quiet gives the bytes read and an error wrapping
-// ErrBlockTooLong. A closed connection gives the bytes read so far and io.EOF itself, so
+// that sends more than that before it goes quiet gives the bytes read (MaxBlock+1: one byte
+// tells it is over) and an error
+// wrapping ErrBlockTooLong (not a *StrictError); that error wins over io.EOF when the server
+// closes after going over. A closed connection gives the bytes read so far and io.EOF itself, so
 // `err == io.EOF` tells "the server closed or crashed" from "the server went quiet". A read
 // error other than a timeout is returned as it is. Whatever the server sends, the call ends
 // after one hang guard (the Conn's Deadline) with an error. Nothing is interpreted: no strict
@@ -31,12 +34,7 @@ func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error)
 	var out []byte
 	start := time.Now()
 	defer c.bump()
-	maxOut, capped := limit, false
-	if limit <= 0 {
-		if mb := c.maxBlock(); mb > 0 {
-			maxOut, capped = mb+1, true // one byte more tells "over the cap" from "exactly the cap"
-		}
-	}
+	maxOut, capped := c.quietBound(limit)
 	chunk := make([]byte, 32<<10)
 	for maxOut <= 0 || len(out) < maxOut {
 		if time.Since(start) > c.deadline() {
@@ -68,9 +66,31 @@ func (c *Conn) TryReadUntilQuiet(quiet time.Duration, limit int) ([]byte, error)
 		}
 	}
 	if capped {
-		return out, fmt.Errorf("%w: server still sending after %d bytes (Conn.MaxBlock; pass a limit or set MaxBlock < 0)", ErrBlockTooLong, len(out)-1)
+		return out, fmt.Errorf("%w: read until quiet: server sent more than %d bytes (Conn.MaxBlock; pass a limit or set MaxBlock < 0)", ErrBlockTooLong, maxOut-1)
 	}
 	return out, nil
+}
+
+// quietBound is how many bytes TryReadUntilQuiet reads at most for limit: limit itself when it
+// is > 0 (capped false), else Conn.MaxBlock plus one byte that tells "over the cap" from
+// "exactly the cap" (capped true), or 0, no bound, when MaxBlock < 0.
+func (c *Conn) quietBound(limit int) (maxOut int, capped bool) {
+	if limit > 0 {
+		return limit, false
+	}
+	if mb := c.maxBlock(); mb > 0 && mb < math.MaxInt {
+		return mb + 1, true
+	}
+	return 0, false
+}
+
+// quote is data for an error message: %q of at most 256 bytes, and how many were left out.
+func quote(data []byte) string {
+	const keep = 256
+	if len(data) <= keep {
+		return fmt.Sprintf("%q", data)
+	}
+	return fmt.Sprintf("%q... (%d more bytes)", data[:keep], len(data)-keep)
 }
 
 // ReadUntilQuiet is TryReadUntilQuiet that fails tb on an error other than EOF; eof tells that
@@ -84,7 +104,7 @@ func (c *Conn) ReadUntilQuiet(quiet time.Duration, limit int) (data []byte, eof 
 		return data, true
 	}
 	if err != nil {
-		c.fatalf("read until quiet: %v (%d bytes read: %q)", err, len(data), data)
+		c.fatalf("read until quiet: %v (%d bytes read: %s)", err, len(data), quote(data))
 	}
 	return data, false
 }
