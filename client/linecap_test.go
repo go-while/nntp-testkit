@@ -481,12 +481,16 @@ func TestBlockErrBoundsReaders(t *testing.T) {
 		c.Deadline = 10 * time.Second
 		c.MaxBlock = -1
 		c.BlockTime = 300 * time.Millisecond
+		// own bound: if the BlockTime cut ever broke, neither MaxBlock (lifted) nor the hang guard
+		// (renewed by every tick) would stop the read; close after 5 s so it fails, not hangs
+		guard := time.AfterFunc(5*time.Second, c.Close)
 		var err error
 		if raw {
 			_, err = c.TryRawUntilDot()
 		} else {
 			_, err = c.TryReadDotLines()
 		}
+		guard.Stop()
 		c.Close()
 		if !errors.Is(err, ErrBlockTooLong) || !strings.Contains(err.Error(), "(bounds: no byte bound, 300ms)") {
 			t.Errorf("time cut, raw %v: %v", raw, err)
