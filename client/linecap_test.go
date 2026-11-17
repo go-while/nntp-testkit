@@ -3,12 +3,15 @@ package client
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	testkit "github.com/go-while/nntp-testkit"
 )
 
 // endlessServer returns a client Conn on one end of a net.Pipe and the number of bytes the other
@@ -434,5 +437,77 @@ func TestReadUntilQuietMessageCut(t *testing.T) {
 	}()
 	if !strings.Contains(msg, "more than 2000 bytes") || !strings.Contains(msg, "more bytes)") || len(msg) > 1000 {
 		t.Errorf("message (%d bytes): %.200q", len(msg), msg)
+	}
+}
+
+// TestBlockErrBounds: the bounds in a block error name the caps in force, and say "no byte
+// bound" / "no time bound" for a negative MaxBlock or BlockTime instead of a cap that does not
+// apply.
+func TestBlockErrBounds(t *testing.T) {
+	for _, tc := range []struct {
+		c    Conn
+		want string
+	}{
+		{Conn{Deadline: time.Second}, "(bounds: 67108864 bytes, 10s)"},
+		{Conn{Deadline: time.Second, MaxBlock: 100, BlockTime: 3 * time.Second}, "(bounds: 100 bytes, 3s)"},
+		{Conn{Deadline: time.Second, BlockTime: -1}, "(bounds: 67108864 bytes, no time bound)"},
+		{Conn{Deadline: time.Second, MaxBlock: -1}, "(bounds: no byte bound, 10s)"},
+		{Conn{Deadline: time.Second, MaxBlock: -1, BlockTime: -1}, "(bounds: no byte bound, no time bound)"},
+		{Conn{}, fmt.Sprintf("(bounds: 67108864 bytes, %v)", blockFactor*testkit.Deadline())}, // the fallback guard
+	} {
+		err := tc.c.blockErr(2, 30)
+		if !errors.Is(err, ErrBlockTooLong) || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("MaxBlock %d BlockTime %v: %v, want suffix %q", tc.c.MaxBlock, tc.c.BlockTime, err, tc.want)
+		}
+	}
+}
+
+// TestBlockErrBoundsReaders: the text reaches the caller through both block readers: a block cut
+// at MaxBlock with no time bound says so, and one cut at BlockTime with no byte bound too.
+func TestBlockErrBoundsReaders(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		// time cut: one short line every 20 ms, forever; MaxBlock lifted, BlockTime 300 ms
+		cl, sv := net.Pipe()
+		go func() {
+			defer sv.Close()
+			for {
+				if _, err := sv.Write([]byte("tick\r\n")); err != nil {
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}()
+		c := NewConn(cl)
+		c.Deadline = 10 * time.Second
+		c.MaxBlock = -1
+		c.BlockTime = 300 * time.Millisecond
+		// own bound: if the BlockTime cut ever broke, neither MaxBlock (lifted) nor the hang guard
+		// (renewed by every tick) would stop the read; close after 5 s so it fails, not hangs
+		guard := time.AfterFunc(5*time.Second, c.Close)
+		var err error
+		if raw {
+			_, err = c.TryRawUntilDot()
+		} else {
+			_, err = c.TryReadDotLines()
+		}
+		guard.Stop()
+		c.Close()
+		if !errors.Is(err, ErrBlockTooLong) || !strings.Contains(err.Error(), "(bounds: no byte bound, 300ms)") {
+			t.Errorf("time cut, raw %v: %v", raw, err)
+		}
+	}
+	for _, raw := range []bool{false, true} {
+		c, _ := endlessServer(t, "", strings.Repeat("line of text\r\n", 400))
+		c.MaxBlock = 100 << 10
+		c.BlockTime = -1
+		var err error
+		if raw {
+			_, err = c.TryRawUntilDot()
+		} else {
+			_, err = c.TryReadDotLines()
+		}
+		if !errors.Is(err, ErrBlockTooLong) || !strings.Contains(err.Error(), "(bounds: 102400 bytes, no time bound)") {
+			t.Errorf("raw %v: %v", raw, err)
+		}
 	}
 }

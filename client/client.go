@@ -251,30 +251,44 @@ func capOf(v, def int) int {
 	return v
 }
 
-// blockUntil is the absolute end of a dot block that starts now; the zero time: no limit.
-func (c *Conn) blockUntil() time.Time {
+// blockLimit is how long a whole dot block may take: BlockTime, blockFactor hang guards when it
+// is 0, or no limit (ok false) when it is negative. blockUntil and the error text both use it.
+func (c *Conn) blockLimit() (d time.Duration, ok bool) {
 	switch {
 	case c.BlockTime < 0:
-		return time.Time{}
+		return 0, false
 	case c.BlockTime > 0:
-		return time.Now().Add(c.BlockTime)
+		return c.BlockTime, true
 	}
-	return time.Now().Add(blockFactor * c.deadline())
+	return blockFactor * c.deadline(), true
 }
 
-// blockBound is the time a block may take, for messages.
-func (c *Conn) blockBound() time.Duration {
-	if c.BlockTime > 0 {
-		return c.BlockTime
+// blockUntil is the absolute end of a dot block that starts now; the zero time: no limit.
+func (c *Conn) blockUntil() time.Time {
+	if d, ok := c.blockLimit(); ok {
+		return time.Now().Add(d)
 	}
-	return blockFactor * c.deadline()
+	return time.Time{}
+}
+
+// blockBounds is the bounds of a block, for messages: the byte cap and the time cap, or "no
+// byte bound" / "no time bound" when MaxBlock or BlockTime is negative.
+func (c *Conn) blockBounds() string {
+	size := "no byte bound"
+	if mb := c.maxBlock(); mb > 0 {
+		size = fmt.Sprintf("%d bytes", mb)
+	}
+	if d, ok := c.blockLimit(); ok {
+		return fmt.Sprintf("%s, %v", size, d)
+	}
+	return size + ", no time bound"
 }
 
 // blockErr is the error of a block that went over MaxBlock or BlockTime.
 func (c *Conn) blockErr(lines, size int) error {
 	return &StrictError{Kind: NoTerminator, Err: fmt.Errorf(
-		"%w: still going after %d lines, %d bytes (bounds: %d bytes, %v)",
-		ErrBlockTooLong, lines, size, c.maxBlock(), c.blockBound())}
+		"%w: still going after %d lines, %d bytes (bounds: %s)",
+		ErrBlockTooLong, lines, size, c.blockBounds())}
 }
 
 // readLineBytes reads one line with its line end, giving up as soon as it is longer than limit
