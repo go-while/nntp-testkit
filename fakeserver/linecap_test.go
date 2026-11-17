@@ -336,7 +336,12 @@ func TestCapErrorSticky(t *testing.T) {
 		done <- errs
 	}})
 	nc := capDial(t, s)
-	writeIgnoringClose(nc, []byte(strings.Repeat("z", 300)+"\r\nDATE\r\n"))
+	// the line arrives in two parts: the first (under the cap, no LF) is consumed, the cap trips
+	// on the second, which stays unread; only a sticky error keeps a second read from returning
+	// that tail as a command line and "DATE" as the next one
+	writeIgnoringClose(nc, []byte(strings.Repeat("z", 60)))
+	time.Sleep(200 * time.Millisecond)
+	writeIgnoringClose(nc, []byte(strings.Repeat("z", 60)+"\r\nDATE\r\n"))
 	got, _ := io.ReadAll(nc)
 	var errs []error
 	select {
@@ -358,8 +363,9 @@ func TestCapErrorSticky(t *testing.T) {
 }
 
 // TestCapErrorStickyUpgrades: the sticky cap error holds after COMPRESS and after STARTTLS too: a
-// custom Handler that ignores the error and reads on gets it again, nothing it writes reaches
-// the client, and no line after the upgrade is recorded.
+// line that arrives in two parts is cut, a custom Handler that ignores the error and reads on
+// gets it again (not the tail of the line or "DATE"), nothing it writes reaches the client, and
+// no line after the upgrade is recorded.
 func TestCapErrorStickyUpgrades(t *testing.T) {
 	ca := tlscert.NewCA(t)
 	cfg := ca.Issue(t, tlscert.Options{}).ServerConfig()
@@ -397,16 +403,21 @@ func TestCapErrorStickyUpgrades(t *testing.T) {
 			} else {
 				cl = cl.StartTLS(&tls.Config{RootCAs: ca.Pool, ServerName: "localhost", MinVersion: tls.VersionTLS12})
 			}
-			if err := cl.Send(strings.Repeat("z", 300) + "\r\nDATE\r\n"); err != nil {
+			// in two parts, as in TestCapErrorSticky: only a sticky error keeps the tail of the
+			// line and "DATE" from being read as commands after the cut
+			if err := cl.Send(strings.Repeat("z", 60)); err != nil {
 				t.Fatal(err)
 			}
-			got, _ := cl.TryReadUntilQuiet(500*time.Millisecond, 4096)
+			time.Sleep(200 * time.Millisecond)
+			_ = cl.Send(strings.Repeat("z", 60) + "\r\nDATE\r\n") // may fail once the server closed
 			var errs []error
 			select {
 			case errs = <-done:
 			case <-time.After(10 * time.Second):
 				t.Fatal("the handler is still reading: the cap error did not stick")
 			}
+			// the handler has written whatever it could before done; read it now
+			got, _ := cl.TryReadUntilQuiet(200*time.Millisecond, 4096)
 			if len(errs) != 3 {
 				t.Fatalf("handler: %v", errs)
 			}
@@ -418,8 +429,9 @@ func TestCapErrorStickyUpgrades(t *testing.T) {
 			if strings.Contains(string(got), "still here") {
 				t.Errorf("the handler's reply reached the client: %q", got)
 			}
-			if l := s.Lines(); len(l) != 1 {
-				t.Errorf("lines recorded after the upgrade: %q", l)
+			want := map[string]string{"compress": "COMPRESS DEFLATE", "starttls": "STARTTLS"}[mode]
+			if l := s.Lines(); len(l) != 1 || l[0] != want {
+				t.Errorf("lines %q, want only %q (nothing after the upgrade)", l, want)
 			}
 		})
 	}
