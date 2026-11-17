@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -161,6 +162,7 @@ func TestBlockTimeOption(t *testing.T) {
 		{Options{}, BlockWindow * time.Second},
 		{Options{BlockTime: time.Minute}, time.Minute},
 		{Options{BlockTime: -1}, -1},
+		{Options{BlockTime: time.Millisecond}, time.Millisecond}, // shorter than the deadline
 	} {
 		if got := tc.o.blockTime(time.Second); got != tc.want {
 			t.Errorf("BlockTime %v: %v, want %v", tc.o.BlockTime, got, tc.want)
@@ -168,9 +170,9 @@ func TestBlockTimeOption(t *testing.T) {
 	}
 }
 
-// TestSlowCapabilitiesBlock: a CAPABILITIES block that ends after about 1 s, one line every
-// 10 ms, is cut by the default window (3 hang guards of 200 ms) and passes when BlockTime is
-// raised or lifted.
+// TestSlowCapabilitiesBlock: a valid CAPABILITIES block of 100 distinct lines, one every 10 ms
+// (about 1 s in all, the same list every time), fails as cut by the default window (3 hang
+// guards of 200 ms) and passes when BlockTime is raised or lifted.
 func TestSlowCapabilitiesBlock(t *testing.T) {
 	s := hostile(t, fakeserver.Options{}, func(c *fakeserver.Conn, line string) bool {
 		if !strings.HasPrefix(line, "CAPABILITIES") {
@@ -179,8 +181,8 @@ func TestSlowCapabilitiesBlock(t *testing.T) {
 		if c.WriteLines("101 caps", "VERSION 2") != nil {
 			return false
 		}
-		for end := time.Now().Add(time.Second); time.Now().Before(end); {
-			if c.WriteLines("X-SLOW") != nil {
+		for i := range 100 {
+			if c.WriteLines(fmt.Sprintf("X-SLOW-%d", i)) != nil {
 				return false
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -201,8 +203,11 @@ func TestSlowCapabilitiesBlock(t *testing.T) {
 			t.Fatalf("BlockTime %v: %v", tc.blockTime, err)
 		}
 		res := r.ByName()["capabilities"]
-		if tooLong := strings.Contains(res.Detail, "dot block too long"); tooLong != tc.fail {
-			t.Errorf("BlockTime %v: %v %q, want cut %v", tc.blockTime, res.Status, res.Detail, tc.fail)
+		switch {
+		case tc.fail && (res.Status != Fail || !strings.Contains(res.Detail, "dot block too long")):
+			t.Errorf("BlockTime %v: %v %q, want a Fail as cut", tc.blockTime, res.Status, res.Detail)
+		case !tc.fail && res.Status != Pass:
+			t.Errorf("BlockTime %v: %v %q, want Pass", tc.blockTime, res.Status, res.Detail)
 		}
 	}
 }

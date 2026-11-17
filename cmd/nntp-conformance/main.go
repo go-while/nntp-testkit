@@ -127,7 +127,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	deadline := fs.Duration("deadline", 10*time.Second, "hang guard per read and write")
 	maxLine := fs.Int("max-line", 0, "longest line the server may send, line end included, in bytes (a longer one fails the check that reads it); 0: 64 KiB, negative: no cap")
 	maxBlock := fs.Int("max-block", 0, "largest multi-line reply the server may send, in bytes (a block must also end within -block-time); 0: 64 MiB, negative: no cap")
-	blockTime := fs.Duration("block-time", 0, "longest one multi-line reply may take in all, however often its lines arrive (for a slow link with big LIST or OVER replies, instead of a longer -deadline); 0: 3 times -deadline, negative: no limit")
+	blockTime := fs.Duration("block-time", 0, "longest one multi-line reply may take in all, however often its lines arrive (for a slow link with big LIST or OVER replies, instead of a longer -deadline); 0: 3 times -deadline, negative (e.g. -1s): no limit")
 	workers := fs.Int("workers", 4, "checks that run at the same time, each on its own connection (servers that allow fewer connections: lower it)")
 	skip := fs.String("skip", "", "comma-separated check names to leave out")
 	asJSON := fs.Bool("json", false, "print the report as JSON")
