@@ -262,19 +262,27 @@ func (c *Conn) blockUntil() time.Time {
 	return time.Now().Add(blockFactor * c.deadline())
 }
 
-// blockBound is the time a block may take, for messages.
-func (c *Conn) blockBound() time.Duration {
-	if c.BlockTime > 0 {
-		return c.BlockTime
+// blockBounds is the bounds of a block, for messages: the byte cap and the time cap, or "no
+// byte bound" / "no time bound" when MaxBlock or BlockTime is negative.
+func (c *Conn) blockBounds() string {
+	size := "no byte bound"
+	if mb := c.maxBlock(); mb > 0 {
+		size = fmt.Sprintf("%d bytes", mb)
 	}
-	return blockFactor * c.deadline()
+	switch {
+	case c.BlockTime < 0:
+		return size + ", no time bound"
+	case c.BlockTime > 0:
+		return fmt.Sprintf("%s, %v", size, c.BlockTime)
+	}
+	return fmt.Sprintf("%s, %v", size, blockFactor*c.deadline())
 }
 
 // blockErr is the error of a block that went over MaxBlock or BlockTime.
 func (c *Conn) blockErr(lines, size int) error {
 	return &StrictError{Kind: NoTerminator, Err: fmt.Errorf(
-		"%w: still going after %d lines, %d bytes (bounds: %d bytes, %v)",
-		ErrBlockTooLong, lines, size, c.maxBlock(), c.blockBound())}
+		"%w: still going after %d lines, %d bytes (bounds: %s)",
+		ErrBlockTooLong, lines, size, c.blockBounds())}
 }
 
 // readLineBytes reads one line with its line end, giving up as soon as it is longer than limit

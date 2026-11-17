@@ -436,3 +436,24 @@ func TestReadUntilQuietMessageCut(t *testing.T) {
 		t.Errorf("message (%d bytes): %.200q", len(msg), msg)
 	}
 }
+
+// TestBlockErrBounds: the bounds in a block error name the caps in force, and say "no byte
+// bound" / "no time bound" for a negative MaxBlock or BlockTime instead of a cap that does not
+// apply.
+func TestBlockErrBounds(t *testing.T) {
+	for _, tc := range []struct {
+		c    Conn
+		want string
+	}{
+		{Conn{Deadline: time.Second}, "(bounds: 67108864 bytes, 10s)"},
+		{Conn{Deadline: time.Second, MaxBlock: 100, BlockTime: 3 * time.Second}, "(bounds: 100 bytes, 3s)"},
+		{Conn{Deadline: time.Second, BlockTime: -1}, "(bounds: 67108864 bytes, no time bound)"},
+		{Conn{Deadline: time.Second, MaxBlock: -1}, "(bounds: no byte bound, 10s)"},
+		{Conn{Deadline: time.Second, MaxBlock: -1, BlockTime: -1}, "(bounds: no byte bound, no time bound)"},
+	} {
+		err := tc.c.blockErr(2, 30)
+		if !errors.Is(err, ErrBlockTooLong) || !strings.HasSuffix(err.Error(), tc.want) {
+			t.Errorf("MaxBlock %d BlockTime %v: %v, want suffix %q", tc.c.MaxBlock, tc.c.BlockTime, err, tc.want)
+		}
+	}
+}
